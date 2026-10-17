@@ -292,57 +292,67 @@ export class LoanService {
     }
     const now = new Date();
     const dueAt = new Date(now.getTime() + loan.application.product.durationDays * 24 * 60 * 60 * 1000);
-    return this.prisma.$transaction(async (tx) => {
-      const claimed = await tx.loan.updateMany({
-        where: { id: loanId, status: LoanStatus.DISBURSEMENT_PENDING },
-        data: { status: LoanStatus.DISBURSED, disbursedAt: now },
-      });
-      if (claimed.count !== 1) throw new ConflictException('This loan has already been disbursed or cancelled.');
-      const disbursement = await tx.loanDisbursement.create({
-        data: {
-          loanId,
-          amountKes: loan.principalKes,
-          status: 'CONFIRMED',
-          paymentReference: dto.paymentReference.trim(),
-          recordedById: reviewerId,
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const claimed = await tx.loan.updateMany({
+          where: { id: loanId, status: LoanStatus.DISBURSEMENT_PENDING },
+          data: { status: LoanStatus.DISBURSED, disbursedAt: now },
+        });
+        if (claimed.count !== 1) throw new ConflictException('This loan has already been disbursed or cancelled.');
+        const disbursement = await tx.loanDisbursement.create({
+          data: {
+            loanId,
+            amountKes: loan.principalKes,
+            status: 'CONFIRMED',
+            paymentReference: dto.paymentReference.trim(),
+            recordedById: reviewerId,
+            reason: dto.reason.trim(),
+            confirmedAt: now,
+          },
+        });
+        await tx.repaymentSchedule.create({
+          data: {
+            loanId,
+            sequence: 1,
+            principalDueKes: loan.principalKes,
+            chargesDueKes: loan.chargesKes,
+            amountDueKes: loan.totalRepayableKes,
+            dueAt,
+          },
+        });
+        await this.ledger.postWithinTransaction(tx, {
+          idempotencyKey: `loan-disbursement:${loanId}`,
+          transactionType: 'LOAN_DISBURSEMENT',
+          actorType: 'SUPERADMIN',
+          actorId: reviewerId,
           reason: dto.reason.trim(),
-          confirmedAt: now,
-        },
-      });
-      await tx.repaymentSchedule.create({
-        data: {
-          loanId,
-          sequence: 1,
-          principalDueKes: loan.principalKes,
-          chargesDueKes: loan.chargesKes,
-          amountDueKes: loan.totalRepayableKes,
-          dueAt,
-        },
-      });
-      await this.ledger.postWithinTransaction(tx, {
-        idempotencyKey: `loan-disbursement:${loanId}`,
-        transactionType: 'LOAN_DISBURSEMENT',
-        actorType: 'SUPERADMIN',
-        actorId: reviewerId,
-        reason: dto.reason.trim(),
-        lines: [
-          { accountId: receivableAccount.id, debitKes: loan.principalKes, creditKes: 0 },
-          { accountId: cashAccount.id, debitKes: 0, creditKes: loan.principalKes },
-        ],
-      });
-      await tx.adminAuditLog.create({
-        data: {
-          superadminId: reviewerId,
-          action: 'LOAN_MANUAL_DISBURSEMENT_CONFIRMED',
-          subjectType: 'LOAN',
-          subjectId: loanId,
-          outcome: 'SUCCESS',
-          reason: dto.reason.trim(),
-          ipAddress: ipAddress?.slice(0, 64),
-        },
-      });
-      return { disbursement, dueAt, status: LoanStatus.DISBURSED };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+          lines: [
+            { accountId: receivableAccount.id, debitKes: loan.principalKes, creditKes: 0 },
+            { accountId: cashAccount.id, debitKes: 0, creditKes: loan.principalKes },
+          ],
+        });
+        await tx.adminAuditLog.create({
+          data: {
+            superadminId: reviewerId,
+            action: 'LOAN_MANUAL_DISBURSEMENT_CONFIRMED',
+            subjectType: 'LOAN',
+            subjectId: loanId,
+            outcome: 'SUCCESS',
+            reason: dto.reason.trim(),
+            ipAddress: ipAddress?.slice(0, 64),
+          },
+        });
+        return { disbursement, dueAt, status: LoanStatus.DISBURSED };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2002' || error.code === 'P2034')
+      ) {
+        throw new ConflictException('This loan has already been disbursed or the confirmation reference has been used.');
+      }
+      throw error;
+    }
   }
 
   private validateProductBounds(minimum: number, maximum: number): void {

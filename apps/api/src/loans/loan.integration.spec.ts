@@ -147,7 +147,17 @@ describe('loan workflow database integration', () => {
       paymentReference: `TEST-DISBURSE-${randomBytes(6).toString('hex')}`,
       reason: 'Integration test records an operator-confirmed manual payout.',
     });
-    const disbursed = await loans.confirmManualDisbursement(loan.id, manualDisbursement, adminId);
+    const attempts = await Promise.allSettled([
+      loans.confirmManualDisbursement(loan.id, manualDisbursement, adminId),
+      loans.confirmManualDisbursement(loan.id, manualDisbursement, adminId),
+    ]);
+    expect(attempts.filter((attempt) => attempt.status === 'fulfilled')).toHaveLength(1);
+    const rejectedAttempt = attempts.find((attempt) => attempt.status === 'rejected');
+    if (rejectedAttempt?.status !== 'rejected') throw new Error('A concurrent disbursement request was not rejected.');
+    expect(rejectedAttempt.reason).toBeInstanceOf(ConflictException);
+    const successfulAttempt = attempts.find((attempt) => attempt.status === 'fulfilled');
+    if (successfulAttempt?.status !== 'fulfilled') throw new Error('No disbursement request succeeded.');
+    const disbursed = successfulAttempt.value;
     expect(disbursed.status).toBe('DISBURSED');
     expect((await prisma.repaymentSchedule.findUniqueOrThrow({ where: { loanId_sequence: { loanId: loan.id, sequence: 1 } } })).amountDueKes).toBe(3310);
     expect((await prisma.loan.findUniqueOrThrow({ where: { id: loan.id } })).disbursedAt).not.toBeNull();

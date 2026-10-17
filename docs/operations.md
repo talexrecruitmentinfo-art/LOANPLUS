@@ -8,6 +8,27 @@ The `app` Compose profile builds the Next.js and NestJS containers. It runs migr
 
 In restricted Docker-outside-of-Docker environments, peer-container networking may be unavailable even when published host ports work. The default `DATABASE_HOST=postgres` uses normal Compose service DNS; only when required by that environment, set `DATABASE_HOST=host.docker.internal` and ensure the DB port is securely published. Do not use the host-gateway override in a normal production deployment.
 
+## Render API deployment
+
+The repository uses pnpm 12.3.4 (`packageManager` in the root manifest and `pnpm-lock.yaml`). Configure the existing Render Node web service with root directory `.` and Node `24.21.0`. Do not use `yarn` as the build command. Set:
+
+```sh
+# Build command
+corepack enable && corepack prepare pnpm@12.3.4 --activate && pnpm install --frozen-lockfile && pnpm --filter @loanplus/api db:generate && pnpm --filter @loanplus/api build
+
+# Pre-deploy command (run migrations only through this reviewed deployment step)
+pnpm --filter @loanplus/api db:deploy
+
+# Start command
+pnpm --filter @loanplus/api start:prod
+```
+
+Set the Render health check path to `/api/v1/health`. The service binds to `0.0.0.0` and uses Render's `PORT` value, with `API_PORT` retained as the local fallback. The pre-deploy migration command needs `DATABASE_URL` and a Render plan that supports pre-deploy commands; otherwise run the same migration command manually as an authorized deployment step before starting the release. Never run migrations from every application instance at startup.
+
+Configure `DATABASE_URL`, `WEB_ORIGIN`, `ID_ENCRYPTION_KEY_BASE64`, `ID_HASH_KEY`, `OTP_HASH_KEY`, `TERMS_VERSION`, `PRIVACY_VERSION`, `SUPERADMIN_EMAIL`, `SUPERADMIN_EMAIL_VERIFIED`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` as Render environment values. Use a production PostgreSQL URL from the existing Supabase project, the exact deployed Vercel origin for `WEB_ORIGIN`, non-draft approved terms/privacy versions, independent generated keys, a verified Superadmin mailbox, and a verified email sender. Render provides `PORT`; do not hardcode it. Configure `NEXT_PUBLIC_API_URL` in Vercel to the API base URL ending in `/api/v1`; it must contain no credentials.
+
+For a separately approved M-Pesa production rollout, the API also reads `MPESA_ENVIRONMENT`, `MPESA_LIVE_ENABLED`, `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_SHORT_CODE`, `MPESA_PASSKEY`, and `MPESA_CALLBACK_URL`. Keep credentials in Render secrets; set the callback base to the public HTTPS `/api/v1/payments/mpesa/callback` path. Do not enable live processing until Daraja credentials, callback reachability, customer policy, and payment reconciliation have been verified. `REDIS_URL` and `DATABASE_HOST` are not read by the API application.
+
 ## Security key generation
 
 Generate independent values and keep them in a secret manager or a local untracked `.env` file. Example commands:
