@@ -43,6 +43,7 @@ describe('customer registration and login flow', () => {
   let controller: AuthController;
   let cookie: jest.Mock;
   let clearCookie: jest.Mock;
+  let setHeader: jest.Mock;
   let findFirstUser: jest.Mock;
 
   beforeEach(() => {
@@ -57,6 +58,7 @@ describe('customer registration and login flow', () => {
     sessionHashes = new Set();
     cookie = jest.fn();
     clearCookie = jest.fn();
+    setHeader = jest.fn();
     findFirstUser = jest.fn(async () => storedUser ? { id: storedUser.id } : null);
 
     const principal = () => {
@@ -133,7 +135,7 @@ describe('customer registration and login flow', () => {
 
   it('registers, logs in, and issues an HttpOnly session cookie without returning credentials', async () => {
     const request = { headers: { origin: 'http://localhost:3000' } } as AuthenticatedRequest;
-    const response = { cookie, clearCookie } as unknown as Response;
+    const response = { cookie, clearCookie, setHeader } as unknown as Response;
     const registration = await controller.register({
       fullName: ' Test Customer ',
       email: 'TEST@example.invalid',
@@ -153,6 +155,7 @@ describe('customer registration and login flow', () => {
     expect(registration).not.toHaveProperty('data.nationalIdCiphertext');
     expect(registration).not.toHaveProperty('token');
     expect(storedUser?.passwordHash).toMatch(/^\$2[aby]\$12\$/);
+    expect(setHeader).toHaveBeenCalledWith('X-Request-Id', expect.stringMatching(/^[0-9a-f-]{36}$/));
 
     const registerCookie = cookie.mock.calls[0] as [string, string, { httpOnly: boolean; sameSite: string }];
     expect(registerCookie[0]).toBe('lp_customer_session');
@@ -335,13 +338,43 @@ describe('customer registration and login flow', () => {
         confirmPassword: 'a-strong-test-password',
         termsAccepted: true,
         privacyAccepted: true,
-      })).rejects.toMatchObject({
+      }, undefined, 'registration-test-request-id')).rejects.toMatchObject({
         status: 500,
         message: 'A required security setting is unavailable.',
       });
       expect(loggerSpy.mock.calls.flat().join(' '))
         .toContain('Required security setting ID_HASH_KEY is missing or invalid.');
+      expect(loggerSpy.mock.calls.flat().join(' ')).toContain('requestId=registration-test-request-id');
       expect(findFirstUser).not.toHaveBeenCalled();
+    } finally {
+      loggerSpy.mockRestore();
+    }
+  });
+
+  it('returns a correlation ID with a generic registration error without exposing request data', async () => {
+    delete process.env.ID_HASH_KEY;
+    const loggerSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const request = { headers: { origin: 'http://localhost:3000' } } as AuthenticatedRequest;
+    const response = { setHeader } as unknown as Response;
+    try {
+      await expect(controller.register({
+        fullName: 'Test Customer',
+        email: 'test@example.invalid',
+        phone: '0712345678',
+        nationalId: '12345678',
+        password: 'a-strong-test-password',
+        confirmPassword: 'a-strong-test-password',
+        termsAccepted: true,
+        privacyAccepted: true,
+      }, request, response)).rejects.toMatchObject({
+        status: 500,
+        message: 'A required security setting is unavailable.',
+      });
+      const [header, requestId] = setHeader.mock.calls[0] as [string, string];
+      expect(header).toBe('X-Request-Id');
+      expect(loggerSpy.mock.calls.flat().join(' ')).toContain(`requestId=${requestId}`);
+      expect(loggerSpy.mock.calls.flat().join(' ')).not.toContain('12345678');
+      expect(loggerSpy.mock.calls.flat().join(' ')).not.toContain('a-strong-test-password');
     } finally {
       loggerSpy.mockRestore();
     }
@@ -396,12 +429,12 @@ describe('customer registration and login flow', () => {
         confirmPassword: 'a-strong-test-password',
         termsAccepted: true,
         privacyAccepted: true,
-      })).rejects.toMatchObject({
+      }, undefined, 'registration-test-request-id')).rejects.toMatchObject({
         status: 503,
         message: 'Registration service is temporarily unavailable.',
       });
       expect(loggerSpy.mock.calls.flat().join(' '))
-        .toContain('Applicant registration database connectivity failed (Prisma code P1001).');
+        .toContain('Applicant registration database connectivity failed (Prisma code P1001; requestId=registration-test-request-id).');
       expect(loggerSpy.mock.calls.flat().join(' ')).not.toContain('sensitive database failure detail');
     } finally {
       loggerSpy.mockRestore();
@@ -424,12 +457,12 @@ describe('customer registration and login flow', () => {
         confirmPassword: 'a-strong-test-password',
         termsAccepted: true,
         privacyAccepted: true,
-      })).rejects.toMatchObject({
+      }, undefined, 'registration-test-request-id')).rejects.toMatchObject({
         status: 500,
         message: 'Registration could not be completed.',
       });
       expect(loggerSpy.mock.calls.flat().join(' '))
-        .toContain('Applicant registration database schema mismatch (Prisma code P2021).');
+        .toContain('Applicant registration database schema mismatch (Prisma code P2021; requestId=registration-test-request-id).');
       expect(loggerSpy.mock.calls.flat().join(' ')).not.toContain('sensitive schema failure detail');
     } finally {
       loggerSpy.mockRestore();
@@ -474,10 +507,11 @@ describe('customer registration and login flow', () => {
         confirmPassword: 'a-strong-test-password',
         termsAccepted: true,
         privacyAccepted: true,
-      })).rejects.toMatchObject({
+      }, undefined, 'registration-test-request-id')).rejects.toMatchObject({
         status: 500,
         message: 'Registration could not be completed.',
       });
+      expect(loggerSpy.mock.calls.flat().join(' ')).toContain('requestId=registration-test-request-id');
       expect(loggerSpy.mock.calls.flat().join(' ')).not.toContain('sensitive unexpected failure detail');
     } finally {
       loggerSpy.mockRestore();
@@ -486,7 +520,7 @@ describe('customer registration and login flow', () => {
 
   it('uses production-only secure cross-site cookies', async () => {
     process.env.NODE_ENV = 'production';
-    const response = { cookie, clearCookie } as unknown as Response;
+    const response = { cookie, clearCookie, setHeader } as unknown as Response;
 
     await controller.register({
       fullName: 'Test Customer',

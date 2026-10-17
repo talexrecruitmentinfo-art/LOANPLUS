@@ -1,5 +1,7 @@
 const DATABASE_VARIABLES = ['DATABASE_URL', 'DIRECT_URL'] as const;
 const EXPECTED_SUPABASE_PROJECT_REF = 'kgvsekredvzepeewocxl';
+const EXPECTED_DATABASE = 'postgres';
+const EXPECTED_DIRECT_HOST = `db.${EXPECTED_SUPABASE_PROJECT_REF}.supabase.co`;
 const URL_RESERVED_CHARACTERS = /[:/?#\[\]@!$&'()*+,;=%\s]/;
 
 type DatabaseVariable = (typeof DATABASE_VARIABLES)[number];
@@ -51,11 +53,15 @@ function parseDatabaseUrl(
       ['postgres:', 'postgresql:'].includes(url.protocol) &&
       Boolean(url.hostname && username && database) &&
       !database.includes('/');
-    const isSupabasePooler = /(^|\.)pooler\./i.test(url.hostname);
-    const expectedUsername =
+    const isSupabasePooler = url.hostname.toLowerCase().endsWith('.pooler.supabase.com');
+    const expectedUsername = `postgres.${EXPECTED_SUPABASE_PROJECT_REF}`;
+    const isSupabaseDirectHost = /^db\.[a-z0-9]+\.supabase\.co$/i.test(url.hostname);
+    const usernameMatchesExpectedFormat =
       variable === 'DATABASE_URL'
-        ? `postgres.${EXPECTED_SUPABASE_PROJECT_REF}`
-        : 'postgres';
+        ? username === expectedUsername
+        : isSupabasePooler
+          ? username === expectedUsername
+          : isSupabaseDirectHost && username === 'postgres';
 
     return {
       present: true,
@@ -64,7 +70,7 @@ function parseDatabaseUrl(
       port: url.port || 'default',
       database: sanitize(database, /[^a-zA-Z0-9_.-]/g),
       isSupabasePooler,
-      usernameMatchesExpectedFormat: username === expectedUsername,
+      usernameMatchesExpectedFormat,
       passwordPresent: password.length > 0,
       passwordMayRequireUrlEncoding: URL_RESERVED_CHARACTERS.test(password),
     };
@@ -96,9 +102,6 @@ export function diagnoseDatabaseConfiguration(
     } else if (!configuration.syntacticallyValid) {
       issues.push(`${variable} is not a valid PostgreSQL URL`);
     } else {
-      if (!configuration.usernameMatchesExpectedFormat) {
-        issues.push(`${variable} username does not match the expected Supabase format`);
-      }
       if (!configuration.passwordPresent) {
         issues.push(`${variable} password is missing`);
       }
@@ -110,32 +113,60 @@ export function diagnoseDatabaseConfiguration(
   const runtimeUrl = getValidUrl(environment.DATABASE_URL);
   const directUrl = getValidUrl(environment.DIRECT_URL);
 
-  if (runtime.syntacticallyValid && runtime.isSupabasePooler !== true) {
-    issues.push('DATABASE_URL host does not appear to be a Supabase pooler');
+  if (runtime.syntacticallyValid && runtimeUrl) {
+    if (runtime.isSupabasePooler !== true) {
+      issues.push('DATABASE_URL host must be a Supabase transaction-pooler endpoint');
+    }
+    if (runtimeUrl.port !== '6543') {
+      issues.push('DATABASE_URL must use transaction-pooler port 6543');
+    }
+    if (!runtime.usernameMatchesExpectedFormat) {
+      issues.push(
+        `DATABASE_URL username must be postgres.${EXPECTED_SUPABASE_PROJECT_REF} for the expected Supabase project`,
+      );
+    }
   }
-  if (direct.syntacticallyValid && direct.isSupabasePooler === true) {
-    issues.push('DIRECT_URL host appears to be a pooler, not a direct Supabase host');
+
+  if (direct.syntacticallyValid && directUrl) {
+    const isExpectedDirectHost = directUrl.hostname === EXPECTED_DIRECT_HOST;
+    const isSupabaseDirectHost = /^db\.[a-z0-9]+\.supabase\.co$/i.test(directUrl.hostname);
+    const isSupabaseSessionPooler = direct.isSupabasePooler === true;
+
+    if (!isExpectedDirectHost && !isSupabaseSessionPooler) {
+      issues.push(
+        'DIRECT_URL host does not confirm the expected Supabase project or a Supabase session pooler',
+      );
+    }
+    if (directUrl.port !== '5432') {
+      issues.push('DIRECT_URL must use port 5432 for a direct or session-pooler connection');
+    }
+    if (!direct.usernameMatchesExpectedFormat) {
+      issues.push(
+        isSupabaseDirectHost
+          ? 'DIRECT_URL username must be postgres for the expected direct Supabase endpoint'
+          : isSupabaseSessionPooler
+            ? `DIRECT_URL username must be postgres.${EXPECTED_SUPABASE_PROJECT_REF} for the expected Supabase project`
+            : 'DIRECT_URL username does not match a supported Supabase connection format',
+      );
+    }
+  }
+
+  if (
+    runtime.syntacticallyValid &&
+    runtime.database !== EXPECTED_DATABASE
+  ) {
+    issues.push(`DATABASE_URL must target the ${EXPECTED_DATABASE} database`);
   }
   if (
     direct.syntacticallyValid &&
-    directUrl?.hostname !== `db.${EXPECTED_SUPABASE_PROJECT_REF}.supabase.co`
+    direct.database !== EXPECTED_DATABASE
   ) {
-    issues.push('DIRECT_URL host does not confirm the expected Supabase project');
-  }
-  if (
-    runtime.syntacticallyValid &&
-    runtime.isSupabasePooler === true &&
-    runtime.usernameMatchesExpectedFormat !== true
-  ) {
-    issues.push('DATABASE_URL username does not confirm the expected Supabase project');
+    issues.push(`DIRECT_URL must target the ${EXPECTED_DATABASE} database`);
   }
   if (
     runtime.syntacticallyValid &&
     direct.syntacticallyValid &&
-    runtimeUrl &&
-    directUrl &&
-    decodeURIComponent(runtimeUrl.pathname.slice(1)) !==
-      decodeURIComponent(directUrl.pathname.slice(1))
+    runtime.database !== direct.database
   ) {
     issues.push('DATABASE_URL and DIRECT_URL use different database names');
   }
@@ -162,10 +193,16 @@ export function validateDatabaseConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
 ): string[] {
   return DATABASE_VARIABLES.flatMap((variable) => {
-    const configuration = parseDatabaseUrl(variable, environment[variable]);
-    if (!configuration.present) {
+    const value = environment[variable];
+    if (!value) {
       return [`${variable} is not set`];
     }
+    try {
+      new URL(value);
+    } catch {
+      return [`${variable} is not a valid URL`];
+    }
+    const configuration = parseDatabaseUrl(variable, value);
     if (!configuration.syntacticallyValid) {
       return [`${variable} must be a PostgreSQL URL with a host, username, and database name`];
     }

@@ -1,6 +1,7 @@
 import { Body, Controller, ForbiddenException, Get, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import { AuthService } from './auth.service';
 import {
   CustomerLoginDto,
@@ -53,7 +54,9 @@ export class AuthController {
     @Res({ passthrough: true }) response: Response,
   ) {
     assertSameOrigin(request);
-    const result = await this.auth.registerCustomer(dto, request.ip);
+    const requestId = randomUUID();
+    response.setHeader('X-Request-Id', requestId);
+    const result = await this.auth.registerCustomer(dto, request.ip, requestId);
     setCustomerCookie(response, result.token);
     return { data: result.principal };
   }

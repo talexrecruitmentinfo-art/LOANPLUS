@@ -45,6 +45,10 @@ const PRISMA_SCHEMA_ERROR_CODES = new Set(['P2021', 'P2022']);
 
 type SessionResult<T> = { token: string; principal: T };
 
+function requestContext(requestId?: string): string {
+  return `requestId=${requestId ?? 'unavailable'}`;
+}
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -55,24 +59,30 @@ export class AuthService {
   async registerCustomer(
     dto: RegisterCustomerDto,
     ipAddress?: string,
+    requestId?: string,
   ): Promise<SessionResult<Pick<User, 'id' | 'fullName' | 'email' | 'identityStatus' | 'referralCode'>>> {
     try {
       return await this.registerCustomerRecord(dto, ipAddress);
     } catch (error) {
-      if (error instanceof HttpException) throw error;
+      if (error instanceof HttpException) {
+        if (error.getStatus() >= 500) {
+          logger.error(`Applicant registration failed with HTTP ${error.getStatus()} (${requestContext(requestId)}).`);
+        }
+        throw error;
+      }
 
       if (
         error instanceof Prisma.PrismaClientKnownRequestError
       ) {
         if (PRISMA_CONNECTIVITY_ERROR_CODES.has(error.code)) {
-          logger.error(`Applicant registration database connectivity failed (Prisma code ${error.code}).`);
+          logger.error(`Applicant registration database connectivity failed (Prisma code ${error.code}; ${requestContext(requestId)}).`);
           throw new ServiceUnavailableException('Registration service is temporarily unavailable.');
         }
         if (PRISMA_SCHEMA_ERROR_CODES.has(error.code)) {
-          logger.error(`Applicant registration database schema mismatch (Prisma code ${error.code}).`);
+          logger.error(`Applicant registration database schema mismatch (Prisma code ${error.code}; ${requestContext(requestId)}).`);
           throw new InternalServerErrorException('Registration could not be completed.');
         }
-        logger.error(`Applicant registration database operation failed (Prisma code ${error.code}).`);
+        logger.error(`Applicant registration database operation failed (Prisma code ${error.code}; ${requestContext(requestId)}).`);
         throw new InternalServerErrorException('Registration could not be completed.');
       }
 
@@ -81,11 +91,11 @@ export class AuthService {
         error instanceof Prisma.PrismaClientInitializationError ||
         error instanceof Prisma.PrismaClientRustPanicError
       ) {
-        logger.error(`Applicant registration database configuration or connection failed (${error.constructor.name}).`);
+        logger.error(`Applicant registration database configuration or connection failed (${error.constructor.name}; ${requestContext(requestId)}).`);
         throw new ServiceUnavailableException('Registration service is temporarily unavailable.');
       }
 
-      logger.error('Applicant registration failed due to an unexpected internal error.');
+      logger.error(`Applicant registration failed due to an unexpected internal error (${requestContext(requestId)}).`);
       throw new InternalServerErrorException('Registration could not be completed.');
     }
   }
@@ -110,6 +120,7 @@ export class AuthService {
     if (referrer && (referrer.email === email || referrer.nationalIdHash === nationalIdHash)) {
       throw new BadRequestException('Self-referrals are not permitted.');
     }
+
     const duplicate = await this.prisma.user.findFirst({
       where: { OR: [{ email }, { phone }, { nationalIdHash }] },
       select: { id: true },

@@ -12,8 +12,8 @@ In restricted Docker-outside-of-Docker environments, peer-container networking m
 
 The repository's local environment pattern is a root `.env` copied from `.env.example`; `.env` is ignored by Git. The Prisma schema resolves `DATABASE_URL` and `DIRECT_URL` from the process environment. For Codespaces, configure both as Codespaces secrets/environment variables so they are injected into terminal processes. For local commands, make sure the variables are exported in the shell before invoking Prisma; do not paste their values into command history. Do not put connection strings in `prisma/schema.prisma`: the datasource must use `env("DATABASE_URL")` and `env("DIRECT_URL")`.
 
-- `DATABASE_URL` is the API/runtime connection. For Supabase, configure the pooler URL and its provider-recommended runtime pool options.
-- `DIRECT_URL` is the Prisma direct connection used by migration tooling. For Supabase, configure the direct PostgreSQL connection, not the pooler endpoint.
+- `DATABASE_URL` is the API/runtime connection. For Supabase, use the transaction pooler on port `6543`, with the project-specific username `postgres.kgvsekredvzepeewocxl` and provider-recommended runtime options such as `pgbouncer=true`.
+- `DIRECT_URL` is Prisma's migration connection. It can use either the project's direct database endpoint on port `5432` (username `postgres`) or the Supabase session pooler on port `5432` (username `postgres.kgvsekredvzepeewocxl`). The session-pooler hostname contains `.pooler.supabase.com`; this is supported and is not treated as an invalid endpoint. Both variables should target the `postgres` database.
 
 The API package supplies a no-connect preflight:
 
@@ -21,9 +21,9 @@ The API package supplies a no-connect preflight:
 pnpm --filter @loanplus/api db:preflight
 ```
 
-It reports presence and URL syntax, hostname, port, database name, expected Supabase username format, pooler classification, password presence, and whether URL-reserved password characters may need encoding. It never prints credentials or attempts a database connection. It also checks whether both URLs identify the expected project and database. A successful preflight verifies configuration only, not connectivity.
+It reports presence and URL syntax, hostname, port, database name, expected Supabase username format, pooler classification, password presence, and whether URL-reserved password characters may need encoding. It never prints credentials or attempts a database connection. It checks that `DATABASE_URL` uses the transaction pooler on port `6543` and that `DIRECT_URL` uses either the expected direct host or a Supabase session-pooler host on port `5432`; it also verifies the project and database targets. URL-encode reserved characters in passwords. A successful preflight verifies configuration only, not DNS resolution, network access, credentials, or database connectivity.
 
-For Supabase project `kgvsekredvzepeewocxl`, the expected shared/session pooler username for `DATABASE_URL` is `postgres.kgvsekredvzepeewocxl`; the direct `DIRECT_URL` username is normally `postgres`. The direct host should identify this project's `db` endpoint. If the preflight cannot confirm these, open the project's **Connect** dialog in Supabase, copy the runtime pooler string for `DATABASE_URL` and the direct PostgreSQL string for `DIRECT_URL`, and compare them with the diagnostic's non-secret fields. If the direct endpoint is unavailable from the current network, follow Supabase's displayed connection guidance rather than substituting a guessed host or username.
+For Supabase project `kgvsekredvzepeewocxl`, the expected `DATABASE_URL` username is `postgres.kgvsekredvzepeewocxl`. A direct `DIRECT_URL` endpoint uses host `db.kgvsekredvzepeewocxl.supabase.co` and username `postgres`; a session-pooler `DIRECT_URL` uses the pooler hostname and username `postgres.kgvsekredvzepeewocxl`. Use the connection modes and values shown in the project's Supabase **Connect** dialog; do not substitute a guessed host or username.
 
 The migration status and read-only database diagnostic are separate commands that do connect:
 
@@ -51,7 +51,9 @@ pnpm --filter @loanplus/api start:prod
 
 Set the Render health check path to `/api/v1/health/ready`. `/api/v1/health` reports process health only; `/api/v1/health/ready` makes a minimal `SELECT 1` query via the runtime Prisma client and returns only a generic healthy/unavailable response. The service binds to `0.0.0.0` and uses Render's `PORT` value, with `API_PORT` retained as the local fallback. The pre-deploy migration command needs both database connection variables and a Render plan that supports pre-deploy commands; otherwise run the same migration command manually as an authorized deployment step before starting the release. Never run migrations from every application instance at startup.
 
-Configure `NODE_ENV=production`, `DATABASE_URL`, `DIRECT_URL`, `WEB_ORIGIN`, `ID_ENCRYPTION_KEY_BASE64`, `ID_HASH_KEY`, `OTP_HASH_KEY`, `TERMS_VERSION`, `PRIVACY_VERSION`, `SUPERADMIN_EMAIL`, `SUPERADMIN_EMAIL_VERIFIED`, `RESEND_API_KEY`, and `RESEND_FROM` as Render environment values. For Supabase project `kgvsekredvzepeewocxl`, use its pooler URL as `DATABASE_URL` for application runtime connections and its direct PostgreSQL URL as `DIRECT_URL` for Prisma migration commands. The Prisma schema's `url` maps to `DATABASE_URL`; `directUrl` maps to `DIRECT_URL`. Configure both as Render secrets; never print them or pass them as build arguments.
+Render service settings are not defined by a Render manifest in this repository. Treat the commands above as the intended configuration, not proof of the live service settings; verify the service's **Pre-Deploy Command** in the Render dashboard before relying on automatic migration deployment.
+
+Configure `NODE_ENV=production`, `DATABASE_URL`, `DIRECT_URL`, `WEB_ORIGIN`, `ID_ENCRYPTION_KEY_BASE64`, `ID_HASH_KEY`, `OTP_HASH_KEY`, `TERMS_VERSION`, `PRIVACY_VERSION`, `SUPERADMIN_EMAIL`, `SUPERADMIN_EMAIL_VERIFIED`, `RESEND_API_KEY`, and `RESEND_FROM` as Render environment values. For Supabase project `kgvsekredvzepeewocxl`, use its transaction-pooler URL on port `6543` as `DATABASE_URL` for application runtime connections, and either the direct database endpoint or session-pooler URL on port `5432` as `DIRECT_URL` for Prisma migration commands. The Prisma schema's `url` maps to `DATABASE_URL`; `directUrl` maps to `DIRECT_URL`. Configure both as Render secrets; never print them or pass them as build arguments.
 
 Applicant registration specifically requires:
 
@@ -64,7 +66,7 @@ Applicant registration specifically requires:
 
 `DIRECT_URL` is required for Prisma migration commands but is not used for applicant registration queries. `OTP_HASH_KEY` is for Superadmin OTP, not applicant registration. Resend is used for mail flows, but registration does not send a verification email. Keep all secrets in Render's environment settings. Do not replace missing values with defaults, sample values, or credentials from `.env.example`. Render provides `PORT`; do not hardcode it.
 
-The registration API logs only the failing security variable name or a generic database/unexpected dependency classification; it does not log environment values, connection URLs, query parameters, request bodies, or exception messages. The client receives a generic response for security-key failures and database errors.
+The registration API logs only the failing security variable name or a generic database/unexpected dependency classification, with a per-request correlation ID. Registration responses include that ID in the `X-Request-Id` header so an applicant can provide it to an operator. Logs do not include environment values, connection URLs, query parameters, request bodies, or exception messages. The client receives a generic response for security-key failures and database errors.
 
 The API's read-only database diagnostic compares application tables and migration records against the checked-in schema and migration directory names:
 
