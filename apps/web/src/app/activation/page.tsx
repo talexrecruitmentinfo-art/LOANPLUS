@@ -10,11 +10,6 @@ interface ActivationTerms {
   availabilityReason: string | null;
   amountKes: number;
   currency: 'KES';
-  destination: null | {
-    businessShortCode: string;
-    tillNumber: string | null;
-    transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
-  };
   terms: null | {
     purpose: string;
     refundability: string;
@@ -25,16 +20,32 @@ interface ActivationTerms {
 }
 
 interface Payment {
+  paymentId: string;
+  type: 'ACTIVATION';
+  purpose: string;
   reference: string;
   status: 'PENDING' | 'CONFIRMED' | 'FAILED' | 'CANCELLED' | 'EXPIRED' | 'REVERSED';
   amountKes: number;
   currency: string;
   createdAt: string;
+  updatedAt: string;
+  providerResult: {
+    code: number | null;
+    receiptReference: string | null;
+    message: string;
+  };
+  accountActivated: boolean;
+  statusCheckMessage: string | null;
 }
 
 interface ActivationStatus {
   activationStatus: string;
   payment: Payment | null;
+}
+
+interface Wallet {
+  balanceKes: number;
+  currency: string;
 }
 
 interface CustomerProfile {
@@ -43,19 +54,15 @@ interface CustomerProfile {
 
 const formatKes = (amount: number) => `KSh ${new Intl.NumberFormat('en-KE').format(amount)}`;
 
-const statusMessage: Record<Payment['status'], string> = {
-  PENDING: 'Payment is awaiting provider confirmation. Check the phone entered above for the M-Pesa prompt. Do not submit another request while this one is pending.',
-  CONFIRMED: 'M-Pesa confirmed this activation payment. Account activation is complete; this does not verify your identity or approve a loan.',
-  FAILED: 'The provider did not confirm this payment. Your account has not been activated. Check your M-Pesa messages before trying again.',
-  CANCELLED: 'The M-Pesa request was cancelled. Your account has not been activated.',
-  EXPIRED: 'The M-Pesa request expired without confirmation. Your account has not been activated.',
-  REVERSED: 'This payment was reversed. Your account is not activated by this payment.',
-};
-
 export default function ActivationPage() {
   const router = useRouter();
   const [terms, setTerms] = useState<ActivationTerms | null>(null);
   const [activation, setActivation] = useState<ActivationStatus | null>(null);
+  const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [statusLoaded, setStatusLoaded] = useState(false);
+  const [statusRefreshing, setStatusRefreshing] = useState(false);
+  const [paymentAttemptUnresolved, setPaymentAttemptUnresolved] = useState(false);
+  const [statusError, setStatusError] = useState('');
   const [phone, setPhone] = useState('');
   const [accepted, setAccepted] = useState(false);
   const [error, setError] = useState('');
@@ -65,6 +72,14 @@ export default function ActivationPage() {
   const refreshStatus = useCallback(async () => {
     const result = await apiRequest<ActivationStatus>('/payments/activation/status');
     setActivation(result);
+    setStatusLoaded(true);
+    setPaymentAttemptUnresolved((current) => current && !result.payment);
+    setStatusError('');
+    try {
+      setWallet(await apiRequest<Wallet>('/wallet'));
+    } catch {
+      setWallet(null);
+    }
     return result;
   }, []);
 
@@ -92,7 +107,7 @@ export default function ActivationPage() {
       try {
         await refreshStatus();
       } catch (reason) {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : 'Payment status could not be loaded.');
+        if (!cancelled) setStatusError(reason instanceof Error ? reason.message : 'Payment status could not be loaded.');
       }
     }
     void load();
@@ -103,7 +118,7 @@ export default function ActivationPage() {
     if (activation?.payment?.status !== 'PENDING') return;
     const timer = window.setInterval(() => {
       refreshStatus().catch((reason: unknown) => {
-        setError(reason instanceof Error ? reason.message : 'Payment status could not be refreshed.');
+        setStatusError(reason instanceof Error ? reason.message : 'Payment status could not be refreshed.');
       });
     }, 15_000);
     return () => window.clearInterval(timer);
@@ -116,7 +131,7 @@ export default function ActivationPage() {
     setError('');
     setMessage('');
     try {
-      const response = await apiRequest<Payment & { message?: string }>('/payments/activation', {
+      const response = await apiRequest<{ message?: string }>('/payments/activation', {
         method: 'POST',
         headers: { 'Idempotency-Key': crypto.randomUUID() },
         body: JSON.stringify({
@@ -125,24 +140,21 @@ export default function ActivationPage() {
           termsVersion: terms.terms.termsVersion,
         }),
       });
-      setMessage(response.message ?? 'Check your phone for an M-Pesa prompt. Payment is not confirmed yet.');
-      setActivation((current) => ({
-        activationStatus: current?.activationStatus ?? 'PENDING',
-        payment: {
-          reference: response.reference,
-          status: 'PENDING',
-          amountKes: response.amountKes,
-          currency: response.currency,
-          createdAt: new Date().toISOString(),
-        },
-      }));
+      setPaymentAttemptUnresolved(true);
+      setMessage(response.message ?? 'The payment request was submitted. This does not confirm payment.');
       try {
         await refreshStatus();
       } catch {
-        setError('Payment is pending. Confirmation could not be refreshed yet; do not submit another request.');
+        setStatusError('Payment status could not be refreshed. Do not submit another payment while the result is uncertain.');
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The payment request could not be started.');
+      setPaymentAttemptUnresolved(true);
+      try {
+        await refreshStatus();
+      } catch {
+        setStatusError('The payment outcome and current status could not be verified. Refresh status before trying again.');
+      }
     } finally {
       setBusy(false);
     }
@@ -189,16 +201,6 @@ export default function ActivationPage() {
                     <div><dt>Purpose</dt><dd>{terms.terms.purpose}</dd></div>
                     <div><dt>Refundability</dt><dd>{terms.terms.refundability.replaceAll('_', ' ').toLowerCase()}</dd></div>
                     <div><dt>Wallet treatment</dt><dd>{terms.terms.creditedToWallet ? 'Credited to your wallet' : 'Not credited to your wallet'}</dd></div>
-                    {terms.destination && (
-                      <div>
-                        <dt>M-Pesa business destination</dt>
-                        <dd>
-                          {terms.destination.transactionType === 'CustomerBuyGoodsOnline'
-                            ? `Till ${terms.destination.tillNumber}`
-                            : `Paybill ${terms.destination.businessShortCode}`}
-                        </dd>
-                      </div>
-                    )}
                   </dl>
                   <p>{terms.terms.customerDisclosure}</p>
                 </>
@@ -241,7 +243,17 @@ export default function ActivationPage() {
                   </span>
                 </label>
                 {error && <p className="form-error" role="alert">{error}</p>}
-                <button className="button" disabled={busy || !accepted || paymentPending}>
+                <button
+                  className="button"
+                  disabled={
+                    busy ||
+                    !accepted ||
+                    !statusLoaded ||
+                    Boolean(statusError) ||
+                    paymentPending ||
+                    (paymentAttemptUnresolved && !activation?.payment)
+                  }
+                >
                   {busy ? 'Requesting…' : 'Request M-Pesa prompt'} <span aria-hidden="true">↗</span>
                 </button>
                 <p className="activation-disclosure">
@@ -254,6 +266,18 @@ export default function ActivationPage() {
         )}
         {error && !terms && <p className="form-error" role="alert">{error}</p>}
         {message && <p className="form-success" role="status">{message}</p>}
+        {!statusLoaded && !statusError && <p>Loading your latest activation payment…</p>}
+        {statusLoaded && !activation?.payment && (
+          <section className="payment-status" aria-live="polite">
+            <p className="eyebrow">LATEST ACTIVATION PAYMENT</p>
+            <h2>No activation payment record</h2>
+            <p>
+              {paymentAttemptUnresolved
+                ? 'The payment request may still be processing. Check its status before requesting another payment.'
+                : 'A payment will appear here after a request is recorded.'}
+            </p>
+          </section>
+        )}
         {activation?.payment && (
           <section className="payment-status" aria-live="polite">
             <p className="eyebrow">LATEST ACTIVATION PAYMENT</p>
@@ -263,10 +287,41 @@ export default function ActivationPage() {
                 {activation.payment.status}
               </span>
             </div>
-            <p>{statusMessage[activation.payment.status]}</p>
-            <small>Reference {activation.payment.reference}</small>
+            <p>{activation.payment.providerResult.message}</p>
+            {activation.payment.statusCheckMessage && <p>{activation.payment.statusCheckMessage}</p>}
+            <small>{activation.payment.purpose} · Reference {activation.payment.reference}</small>
+            {activation.payment.providerResult.receiptReference && (
+              <small>Safaricom receipt {activation.payment.providerResult.receiptReference}</small>
+            )}
+            <small>Created {new Date(activation.payment.createdAt).toLocaleString('en-KE')}</small>
+            <small>
+              Updated {new Date(activation.payment.updatedAt).toLocaleString('en-KE')}
+            </small>
+            {activation.payment.accountActivated && <p>Account activation is complete.</p>}
+            {wallet && <small>Wallet balance: {formatKes(wallet.balanceKes)}</small>}
           </section>
         )}
+        {(statusLoaded || statusError) && (
+          <button
+            type="button"
+            className="quiet-button"
+            disabled={statusRefreshing}
+            onClick={async () => {
+              setStatusRefreshing(true);
+              setStatusError('');
+              try {
+                await refreshStatus();
+              } catch (reason) {
+                setStatusError(reason instanceof Error ? reason.message : 'Payment status could not be refreshed.');
+              } finally {
+                setStatusRefreshing(false);
+              }
+            }}
+          >
+            {statusRefreshing ? 'Refreshing…' : 'Refresh payment status'}
+          </button>
+        )}
+        {statusError && <p className="form-error" role="alert">{statusError}</p>}
         {activation?.activationStatus !== 'ACTIVE' && (
           <p className="activation-support">
             Need help? Contact <a href="mailto:loanplus.info@gmail.com">loanplus.info@gmail.com</a> or{' '}

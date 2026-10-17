@@ -66,7 +66,6 @@ export class PaymentService {
         availabilityReason: 'Approved KES 50 activation policy is not configured.',
         amountKes: ACTIVATION_AMOUNT_KES,
         currency: 'KES',
-        destination: null,
         terms: null,
       };
     }
@@ -95,7 +94,6 @@ export class PaymentService {
       availabilityReason,
       amountKes: ACTIVATION_AMOUNT_KES,
       currency: 'KES',
-      destination,
       terms: {
         purpose: policy.purpose,
         refundability: policy.refundability,
@@ -266,47 +264,98 @@ export class PaymentService {
     if (!user) throw new NotFoundException('Customer account was not found.');
     if (!transaction) return { activationStatus: user.activationStatus, payment: null };
 
-    let status = transaction.status;
+    let statusCheckMessage: string | null = null;
     if (
-      status === PaymentStatus.PENDING &&
+      transaction.status === PaymentStatus.PENDING &&
       transaction.type === PaymentType.ACTIVATION &&
       transaction.amountKes === ACTIVATION_AMOUNT_KES &&
       transaction.currency === 'KES' &&
-      transaction.activationRequest?.userId === userId &&
-      transaction.activationRequest.checkoutRequestId &&
-      transaction.activationRequest.merchantRequestId
+      transaction.activationRequest?.userId === userId
     ) {
       const request = transaction.activationRequest;
       const checkoutRequestId = request.checkoutRequestId;
       const merchantRequestId = request.merchantRequestId;
       if (!checkoutRequestId || !merchantRequestId) {
-        throw new ServiceUnavailableException('M-Pesa payment status is not available yet.');
+        statusCheckMessage = 'Payment remains pending because provider identifiers are not available for a status check.';
+      } else {
+        let providerStatus: Awaited<ReturnType<MpesaService['queryStkStatus']>> | null = null;
+        try {
+          providerStatus = await this.mpesa.queryStkStatus(checkoutRequestId);
+        } catch (error) {
+          if (error instanceof ServiceUnavailableException || error instanceof InternalServerErrorException) {
+            statusCheckMessage = 'Payment remains pending. Provider status could not be refreshed; try refreshing again.';
+          } else {
+            throw error;
+          }
+        }
+        if (providerStatus) {
+          if (
+            providerStatus.checkoutRequestId !== checkoutRequestId ||
+            providerStatus.merchantRequestId !== merchantRequestId
+          ) {
+            statusCheckMessage = 'Payment is still pending because its provider status could not be verified.';
+          } else if (providerStatus.resultCode !== 0) {
+            await this.settleActivationPayment(transaction, request, providerStatus);
+          } else {
+            statusCheckMessage = 'Safaricom has not yet sent the payment confirmation. The payment remains pending.';
+          }
+        }
       }
-      const providerStatus = await this.mpesa.queryStkStatus(checkoutRequestId);
-      if (
-        providerStatus.checkoutRequestId !== checkoutRequestId ||
-        providerStatus.merchantRequestId !== merchantRequestId
-      ) {
-        throw new ServiceUnavailableException('M-Pesa payment status did not match the stored request.');
-      }
-      await this.settleActivationPayment(transaction, request, providerStatus);
-      status = providerStatus.resultCode === 0
-        ? PaymentStatus.CONFIRMED
-        : this.getTerminalProviderStatus(providerStatus.resultCode);
     }
-    const refreshedUser = status === PaymentStatus.CONFIRMED
-      ? await this.prisma.user.findUnique({ where: { id: userId }, select: { activationStatus: true } })
-      : user;
+    const [refreshedUser, latestTransaction] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activationStatus: true } }),
+      this.prisma.paymentTransaction.findFirst({
+        where: { userId, type: PaymentType.ACTIVATION },
+        include: { activationRequest: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    if (!refreshedUser) throw new NotFoundException('Customer account was not found.');
+    if (!latestTransaction) return { activationStatus: refreshedUser.activationStatus, payment: null };
+    const providerResultCode = latestTransaction.receiptReference
+      ? 0
+      : this.getPersistedProviderResultCode(latestTransaction.failureCode);
     return {
-      activationStatus: refreshedUser?.activationStatus ?? user.activationStatus,
+      activationStatus: refreshedUser.activationStatus,
       payment: {
-        reference: transaction.internalReference,
-        status,
-        amountKes: transaction.amountKes,
-        currency: transaction.currency,
-        createdAt: transaction.createdAt,
+        paymentId: latestTransaction.id,
+        type: latestTransaction.type,
+        purpose: 'Account activation',
+        reference: latestTransaction.internalReference,
+        status: latestTransaction.status,
+        amountKes: latestTransaction.amountKes,
+        currency: latestTransaction.currency,
+        createdAt: latestTransaction.createdAt,
+        updatedAt: latestTransaction.updatedAt,
+        providerResult: {
+          code: providerResultCode,
+          receiptReference: latestTransaction.receiptReference,
+          message: this.getCustomerPaymentMessage(latestTransaction.status, providerResultCode),
+        },
+        accountActivated:
+          latestTransaction.status === PaymentStatus.CONFIRMED &&
+          refreshedUser.activationStatus === 'ACTIVE',
+        statusCheckMessage,
       },
     };
+  }
+
+  private getPersistedProviderResultCode(failureCode: string | null): number | null {
+    const match = /^MPESA_RESULT_(\d+)$/.exec(failureCode ?? '');
+    return match ? Number(match[1]) : null;
+  }
+
+  private getCustomerPaymentMessage(status: PaymentStatus, resultCode: number | null): string {
+    if (status === PaymentStatus.CONFIRMED) return 'Safaricom confirmed this payment.';
+    if (status === PaymentStatus.CANCELLED) return 'The M-Pesa payment was cancelled.';
+    if (status === PaymentStatus.EXPIRED) return 'The M-Pesa payment expired without confirmation.';
+    if (status === PaymentStatus.REVERSED) return 'This payment was reversed.';
+    if (status === PaymentStatus.FAILED) {
+      return resultCode === null
+        ? 'Safaricom reported that this payment failed.'
+        : `Safaricom reported that this payment failed (result ${resultCode}).`;
+    }
+    return 'Payment confirmation has not been conclusively received. Do not submit another payment while this one is pending.';
   }
 
   async handleMpesaCallback(callbackToken: string, payload: unknown): Promise<{ ResultCode: number; ResultDesc: string }> {
@@ -316,13 +365,14 @@ export class PaymentService {
       where: { callbackTokenHash },
       include: { paymentTransaction: true },
     });
-    if (!request || !request.checkoutRequestId || !request.merchantRequestId) {
+    if (!request) {
       throw new NotFoundException('Payment callback is invalid.');
     }
-    if (callback.CheckoutRequestID !== request.checkoutRequestId) {
-      throw new ForbiddenException('Payment callback did not match the requested transaction.');
-    }
-    if (callback.MerchantRequestID !== request.merchantRequestId) {
+    if (
+      (request.checkoutRequestId !== null && callback.CheckoutRequestID !== request.checkoutRequestId) ||
+      (request.merchantRequestId !== null && callback.MerchantRequestID !== request.merchantRequestId) ||
+      (request.checkoutRequestId === null) !== (request.merchantRequestId === null)
+    ) {
       throw new ForbiddenException('Payment callback did not match the requested transaction.');
     }
     this.assertActivationPaymentAssociation(request.paymentTransaction, request);
@@ -334,17 +384,27 @@ export class PaymentService {
     });
     if (priorEvent) return { ResultCode: 0, ResultDesc: 'Accepted' };
 
-    const providerStatus = await this.mpesa.queryStkStatus(request.checkoutRequestId);
+    const providerStatus = await this.mpesa.queryStkStatus(
+      request.checkoutRequestId ?? callback.CheckoutRequestID,
+    );
     if (
-      providerStatus.checkoutRequestId !== request.checkoutRequestId ||
       providerStatus.checkoutRequestId !== callback.CheckoutRequestID ||
-      providerStatus.merchantRequestId !== request.merchantRequestId ||
       providerStatus.merchantRequestId !== callback.MerchantRequestID ||
       providerStatus.resultCode !== callback.ResultCode
     ) {
       throw new ServiceUnavailableException('M-Pesa callback could not be reconciled with provider status.');
     }
-    await this.settleActivationPayment(request.paymentTransaction, request, providerStatus, callback, payloadHash);
+    await this.settleActivationPayment(
+      request.paymentTransaction,
+      {
+        ...request,
+        checkoutRequestId: providerStatus.checkoutRequestId,
+        merchantRequestId: providerStatus.merchantRequestId,
+      },
+      providerStatus,
+      callback,
+      payloadHash,
+    );
     return { ResultCode: 0, ResultDesc: 'Accepted' };
   }
 
@@ -409,11 +469,37 @@ export class PaymentService {
         throw new ServiceUnavailableException('Activation accounting policy is unavailable.');
       }
     }
-    if (callback && isConfirmed) this.validateSuccessfulCallback(callback, payment, request.phoneNumberCiphertext);
+    if (isConfirmed && !callback) {
+      throw new ForbiddenException('A verified M-Pesa callback is required to confirm this payment.');
+    }
+    const receiptReference = callback && isConfirmed
+      ? this.validateSuccessfulCallback(callback, payment, request.phoneNumberCiphertext)
+      : null;
 
     const now = new Date();
     try {
       await this.prisma.$transaction(async (tx) => {
+        const boundRequest = await tx.activationPaymentRequest.updateMany({
+          where: {
+            id: request.id,
+            paymentTransactionId: request.paymentTransactionId,
+            userId: request.userId,
+            OR: [
+              { checkoutRequestId: null, merchantRequestId: null },
+              {
+                checkoutRequestId: request.checkoutRequestId,
+                merchantRequestId: request.merchantRequestId,
+              },
+            ],
+          },
+          data: {
+            checkoutRequestId: request.checkoutRequestId,
+            merchantRequestId: request.merchantRequestId,
+          },
+        });
+        if (boundRequest.count !== 1) {
+          throw new ConflictException('Payment provider identifiers could not be safely associated.');
+        }
         if (payloadHash) {
           await tx.paymentCallbackEvent.create({
             data: {
@@ -421,7 +507,7 @@ export class PaymentService {
               paymentTransactionId: request.paymentTransactionId,
               payloadHash,
               providerResultCode: String(providerStatus.resultCode),
-              providerReceiptReference: null,
+              providerReceiptReference: receiptReference,
             },
           });
         }
@@ -430,7 +516,7 @@ export class PaymentService {
           data: {
             status: targetStatus,
             providerReference: request.checkoutRequestId,
-            receiptReference: null,
+            receiptReference,
             confirmedAt: isConfirmed ? now : null,
             failureCode: isConfirmed ? null : `MPESA_RESULT_${providerStatus.resultCode}`,
           },
@@ -500,7 +586,7 @@ export class PaymentService {
     callback: MpesaCallback,
     payment: { amountKes: number; currency: string },
     phoneNumberCiphertext: string | null,
-  ): void {
+  ): string {
     const receipt = this.getCallbackItem(callback, 'MpesaReceiptNumber');
     const amount = this.getCallbackItem(callback, 'Amount');
     const phoneNumber = this.getCallbackItem(callback, 'PhoneNumber');
@@ -523,6 +609,7 @@ export class PaymentService {
       if (expectedPhone !== confirmedPhone) {
         throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
       }
+      return receipt;
     } catch (error) {
       if (error instanceof ServiceUnavailableException) throw error;
       throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');

@@ -128,6 +128,18 @@ describe('M-Pesa Daraja HTTP integration', () => {
     expect(() => mpesa.getCustomerPaymentDestination()).toThrow('MPESA_LIVE_ENABLED=true');
   });
 
+  it('loads MPESA_ENVIRONMENT=production at call time without requiring live payments to be enabled', () => {
+    process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_LIVE_ENABLED = 'false';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerBuyGoodsOnline';
+    process.env.MPESA_SHORT_CODE = '5526990';
+    process.env.MPESA_TILL_NUMBER = '3400188';
+
+    expect(() => mpesa.getCustomerPaymentDestination()).toThrow(ServiceUnavailableException);
+    expect(() => mpesa.getCustomerPaymentDestination()).toThrow('Production M-Pesa payments are disabled.');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('rejects invalid amount, phone, account reference, and transaction description before HTTP calls', async () => {
     const valid = {
       amountKes: 1,

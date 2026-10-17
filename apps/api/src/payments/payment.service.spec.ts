@@ -29,6 +29,7 @@ describe('M-Pesa payment callback reconciliation', () => {
   let nextTransactionError: Error | null;
   let paymentUpdateData: Record<string, unknown> | undefined;
   let callbackEventData: Record<string, unknown> | undefined;
+  let activationRequestRecord: Record<string, unknown>;
   let paymentService: PaymentService;
   let queryStkStatus: jest.Mock;
   let postLedger: jest.Mock;
@@ -105,7 +106,11 @@ describe('M-Pesa payment callback reconciliation', () => {
         status: paymentStatus,
       },
     };
+    activationRequestRecord = request;
     transactionClient = {
+      activationPaymentRequest: {
+        updateMany: jest.fn(async () => ({ count: 1 })),
+      },
       paymentCallbackEvent: {
         create: jest.fn(async ({ data }: { data: Record<string, unknown> & { payloadHash: string } }) => {
           callbackEventData = data;
@@ -229,7 +234,6 @@ describe('M-Pesa payment callback reconciliation', () => {
         available: false,
         amountKes: 50,
         currency: 'KES',
-        destination: null,
         terms: null,
       });
     });
@@ -295,37 +299,35 @@ describe('M-Pesa payment callback reconciliation', () => {
       });
     });
 
-    it('exposes the configured destination only when approved terms and callback config are present', async () => {
+    it('does not expose configured destination details when approved terms are available', async () => {
       process.env.MPESA_CALLBACK_URL = 'https://api.example.com/api/v1/payments/mpesa/callback';
       const service = createService(50, policy, {
         businessShortCode: '174379',
         tillNumber: null,
         transactionType: 'CustomerPayBillOnline',
       });
-      await expect(service.getActivationTerms()).resolves.toMatchObject({
+      const response = await service.getActivationTerms();
+      expect(response).toMatchObject({
         available: true,
         amountKes: 50,
         currency: 'KES',
-        destination: { businessShortCode: '174379', tillNumber: null, transactionType: 'CustomerPayBillOnline' },
         terms: { termsVersion: 'activation-v1' },
       });
+      expect(response).not.toHaveProperty('destination');
+      expect(JSON.stringify(response)).not.toMatch(/174379|Till|Paybill/i);
     });
 
-    it('exposes the confirmed Buy Goods shortcode and Till independently', async () => {
+    it('keeps the confirmed Buy Goods shortcode and Till internal', async () => {
       process.env.MPESA_CALLBACK_URL = 'https://loanplus-api.onrender.com/api/v1/payments/mpesa/callback';
       const service = createService(50, policy, {
         businessShortCode: '5526990',
         tillNumber: '3400188',
         transactionType: 'CustomerBuyGoodsOnline',
       });
-      await expect(service.getActivationTerms()).resolves.toMatchObject({
-        available: true,
-        destination: {
-          businessShortCode: '5526990',
-          tillNumber: '3400188',
-          transactionType: 'CustomerBuyGoodsOnline',
-        },
-      });
+      const response = await service.getActivationTerms();
+      expect(response.available).toBe(true);
+      expect(response).not.toHaveProperty('destination');
+      expect(JSON.stringify(response)).not.toMatch(/5526990|3400188|Till/i);
     });
   });
 
@@ -517,16 +519,38 @@ describe('M-Pesa payment callback reconciliation', () => {
         callbackUrl: string;
       };
       expect(stkInput.accountReference).toHaveLength(12);
-      expect(stkInput.callbackUrl).toMatch(/^https:\/\/api\.example\.com\/api\/v1\/payments\/mpesa\/callback\//);
+      const callbackUrl = new URL(stkInput.callbackUrl);
+      const callbackToken = callbackUrl.pathname.split('/').at(-1)!;
+      expect(callbackUrl.origin).toBe('https://api.example.com');
+      expect(callbackUrl.pathname).toBe(`/api/v1/payments/mpesa/callback/${callbackToken}`);
+      expect(callbackUrl.search).toBe('');
+      expect(create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          activationRequest: {
+            create: expect.objectContaining({ callbackTokenHash: hashToken(callbackToken) }),
+          },
+        }),
+      }));
       expect(updateRequest).toHaveBeenCalledWith(expect.objectContaining({
         where: { paymentTransactionId: 'payment-id' },
         data: { checkoutRequestId: 'ws_CO_test', merchantRequestId: 'mr_test' },
       }));
       expect(postWithinTransaction).not.toHaveBeenCalled();
+
+      updateRequest.mockRejectedValueOnce(new Error('Provider request identifiers could not be persisted.'));
+      await expect(paymentService.initiateActivationPayment(
+        'user-id',
+        { phoneNumber: '0712345678', termsAccepted: true, termsVersion: 'test-v1' },
+        'activation-test-idempotency-002',
+      )).rejects.toThrow('Provider request identifiers could not be persisted.');
+      expect(create).toHaveBeenCalledTimes(2);
+      expect(initiateStkPush).toHaveBeenCalledTimes(2);
+      expect(create.mock.invocationCallOrder[1]).toBeLessThan(initiateStkPush.mock.invocationCallOrder[1]);
+      expect(postWithinTransaction).not.toHaveBeenCalled();
     });
   });
 
-  it('reconciles a delayed provider success through the authenticated activation status flow', async () => {
+  it('keeps a query-only success pending until a verified callback is received', async () => {
     const request = {
       id: 'activation-request-id',
       paymentTransactionId: 'payment-id',
@@ -554,37 +578,14 @@ describe('M-Pesa payment callback reconciliation', () => {
       currency: 'KES',
       status: 'PENDING' as const,
       createdAt: new Date(),
+      updatedAt: new Date(),
+      failureCode: null,
+      receiptReference: null,
       activationRequest: request,
     };
-    const tx = {
-      paymentTransaction: {
-        updateMany: jest.fn(async () => ({ count: 1 })),
-      },
-      ledgerAccount: {
-        findUnique: jest.fn(async ({ where }: { where: { code: string } }) =>
-          where.code === 'MPESA_CLEARING'
-            ? { id: 'clearing-account', isActive: true, currency: 'KES', accountType: 'ASSET' }
-            : null),
-        create: jest.fn(async () => ({
-          id: 'wallet-account',
-          userId: 'user-id',
-          isActive: true,
-          currency: 'KES',
-          accountType: 'LIABILITY',
-        })),
-      },
-      user: { update: jest.fn(async () => ({})) },
-      referral: { updateMany: jest.fn(async () => ({ count: 0 })) },
-      authAuditLog: { create: jest.fn(async () => ({})) },
-    };
     const prisma = {
-      user: {
-        findUnique: jest.fn()
-          .mockResolvedValueOnce({ activationStatus: 'PENDING' })
-          .mockResolvedValueOnce({ activationStatus: 'ACTIVE' }),
-      },
+      user: { findUnique: jest.fn(async () => ({ activationStatus: 'PENDING' })) },
       paymentTransaction: { findFirst: jest.fn(async () => payment) },
-      $transaction: jest.fn(async (callback: (transaction: never) => Promise<unknown>) => callback(tx as never)),
     } as unknown as PrismaService;
     const query = jest.fn(async () => ({
       checkoutRequestId,
@@ -600,14 +601,185 @@ describe('M-Pesa payment callback reconciliation', () => {
     );
 
     await expect(service.getCustomerActivationStatus('user-id')).resolves.toMatchObject({
-      activationStatus: 'ACTIVE',
-      payment: { reference: 'LPA_TEST_REFERENCE', status: 'CONFIRMED', amountKes: 50, currency: 'KES' },
+      activationStatus: 'PENDING',
+      payment: {
+        paymentId: 'payment-id',
+        type: 'ACTIVATION',
+        purpose: 'Account activation',
+        reference: 'LPA_TEST_REFERENCE',
+        status: 'PENDING',
+        amountKes: 50,
+        currency: 'KES',
+        providerResult: { code: null, receiptReference: null },
+        accountActivated: false,
+      },
     });
     expect(query).toHaveBeenCalledWith(checkoutRequestId);
-    expect(post).toHaveBeenCalledTimes(1);
-    expect(tx.user.update).toHaveBeenCalledWith({
-      where: { id: 'user-id' },
-      data: { activationStatus: 'ACTIVE' },
+    expect(post).not.toHaveBeenCalled();
+    expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledWith({
+      where: { userId: 'user-id', type: PaymentType.ACTIVATION },
+      include: { activationRequest: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  });
+
+  it('returns no payment for the authenticated customer when no activation record exists', async () => {
+    const prisma = {
+      user: { findUnique: jest.fn(async () => ({ activationStatus: 'PENDING' })) },
+      paymentTransaction: { findFirst: jest.fn(async () => null) },
+    } as unknown as PrismaService;
+    const service = new PaymentService(
+      prisma,
+      { queryStkStatus: jest.fn() } as unknown as MpesaService,
+      {} as LedgerService,
+    );
+
+    await expect(service.getCustomerActivationStatus('current-user')).resolves.toEqual({
+      activationStatus: 'PENDING',
+      payment: null,
+    });
+    expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledWith({
+      where: { userId: 'current-user', type: PaymentType.ACTIVATION },
+      include: { activationRequest: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  });
+
+  it('returns the persisted pending payment when a status refresh times out', async () => {
+    const request = {
+      id: 'activation-request-id',
+      paymentTransactionId: 'payment-id',
+      userId: 'current-user',
+      checkoutRequestId,
+      merchantRequestId,
+    };
+    const payment = {
+      id: 'payment-id',
+      internalReference: 'LPA_REAL_REFERENCE',
+      userId: 'current-user',
+      type: PaymentType.ACTIVATION,
+      amountKes: 50,
+      currency: 'KES',
+      status: 'PENDING',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      failureCode: null,
+      receiptReference: null,
+      activationRequest: request,
+    };
+    const prisma = {
+      user: { findUnique: jest.fn(async () => ({ activationStatus: 'PENDING' })) },
+      paymentTransaction: { findFirst: jest.fn(async () => payment) },
+    } as unknown as PrismaService;
+    const query = jest.fn().mockRejectedValue(new ServiceUnavailableException('Provider query failed.'));
+    const service = new PaymentService(
+      prisma,
+      { queryStkStatus: query } as unknown as MpesaService,
+      {} as LedgerService,
+    );
+
+    await expect(service.getCustomerActivationStatus('current-user')).resolves.toMatchObject({
+      activationStatus: 'PENDING',
+      payment: {
+        paymentId: 'payment-id',
+        reference: 'LPA_REAL_REFERENCE',
+        status: 'PENDING',
+        accountActivated: false,
+        statusCheckMessage: 'Payment remains pending. Provider status could not be refreshed; try refreshing again.',
+      },
+    });
+    expect(query).toHaveBeenCalledWith(checkoutRequestId);
+    expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledTimes(2);
+  });
+
+  it('explains missing provider identifiers while keeping the payment pending', async () => {
+    const payment = {
+      id: 'payment-id',
+      internalReference: 'LPA_NO_PROVIDER_IDS',
+      userId: 'current-user',
+      type: PaymentType.ACTIVATION,
+      amountKes: 50,
+      currency: 'KES',
+      status: 'PENDING',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      receiptReference: null,
+      activationRequest: {
+        id: 'activation-request-id',
+        paymentTransactionId: 'payment-id',
+        userId: 'current-user',
+        checkoutRequestId: null,
+        merchantRequestId: null,
+      },
+    };
+    const prisma = {
+      user: { findUnique: jest.fn(async () => ({ activationStatus: 'PENDING' })) },
+      paymentTransaction: { findFirst: jest.fn(async () => payment) },
+    } as unknown as PrismaService;
+    const query = jest.fn();
+    const service = new PaymentService(
+      prisma,
+      { queryStkStatus: query } as unknown as MpesaService,
+      {} as LedgerService,
+    );
+
+    await expect(service.getCustomerActivationStatus('current-user')).resolves.toMatchObject({
+      activationStatus: 'PENDING',
+      payment: {
+        status: 'PENDING',
+        statusCheckMessage: 'Payment remains pending because provider identifiers are not available for a status check.',
+        accountActivated: false,
+      },
+    });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['FAILED', 'MPESA_RESULT_1', 'Safaricom reported that this payment failed (result 1).'],
+    ['CANCELLED', 'MPESA_RESULT_1032', 'The M-Pesa payment was cancelled.'],
+    ['EXPIRED', 'MPESA_RESULT_1037', 'The M-Pesa payment expired without confirmation.'],
+    ['REVERSED', null, 'This payment was reversed.'],
+  ] as const)('returns the truthful customer message for persisted %s payments', async (
+    status,
+    failureCode,
+    message,
+  ) => {
+    const payment = {
+      id: 'payment-id',
+      internalReference: 'LPA_PERSISTED_REFERENCE',
+      userId: 'current-user',
+      type: PaymentType.ACTIVATION,
+      amountKes: 50,
+      currency: 'KES',
+      status,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      failureCode,
+      receiptReference: null,
+      activationRequest: null,
+    };
+    const prisma = {
+      user: { findUnique: jest.fn(async () => ({ activationStatus: 'PENDING' })) },
+      paymentTransaction: { findFirst: jest.fn(async () => payment) },
+    } as unknown as PrismaService;
+    const service = new PaymentService(prisma, {} as MpesaService, {} as LedgerService);
+
+    await expect(service.getCustomerActivationStatus('current-user')).resolves.toMatchObject({
+      payment: {
+        status,
+        reference: 'LPA_PERSISTED_REFERENCE',
+        providerResult: {
+          code: failureCode ? Number(failureCode.slice('MPESA_RESULT_'.length)) : null,
+          message,
+        },
+        accountActivated: false,
+      },
+    });
+    expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledWith({
+      where: { userId: 'current-user', type: PaymentType.ACTIVATION },
+      include: { activationRequest: true },
+      orderBy: { createdAt: 'desc' },
     });
   });
 
@@ -619,12 +791,55 @@ describe('M-Pesa payment callback reconciliation', () => {
     expect(paymentStatus).toBe('CONFIRMED');
     expect(transactionCount).toBe(1);
     expect(postLedger).toHaveBeenCalledTimes(1);
-    expect(paymentUpdateData).toMatchObject({ status: 'CONFIRMED', receiptReference: null });
-    expect(callbackEventData).toMatchObject({ providerReceiptReference: null });
+    expect(paymentUpdateData).toMatchObject({ status: 'CONFIRMED', receiptReference: 'TESTRECEIPT1' });
+    expect(callbackEventData).toMatchObject({ providerReceiptReference: 'TESTRECEIPT1' });
     expect(userUpdate).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: 'user-id' },
       data: { activationStatus: 'ACTIVE' },
     }));
+  });
+
+  it('recovers missing initiation request IDs from the token-bound callback and provider query atomically', async () => {
+    activationRequestRecord.checkoutRequestId = null;
+    activationRequestRecord.merchantRequestId = null;
+
+    await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
+      .resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+
+    expect(queryStkStatus).toHaveBeenCalledWith(checkoutRequestId);
+    expect(transactionClient.activationPaymentRequest.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'activation-request-id',
+        paymentTransactionId: 'payment-id',
+        userId: 'user-id',
+        OR: [
+          { checkoutRequestId: null, merchantRequestId: null },
+          { checkoutRequestId, merchantRequestId },
+        ],
+      },
+      data: { checkoutRequestId, merchantRequestId },
+    });
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(userUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'user-id' },
+      data: { activationStatus: 'ACTIVE' },
+    }));
+  });
+
+  it('does not bind recovered identifiers when provider status disagrees with the callback', async () => {
+    activationRequestRecord.checkoutRequestId = null;
+    activationRequestRecord.merchantRequestId = null;
+    providerCheckoutRequestId = 'different-checkout';
+
+    await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
+      .rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    expect(queryStkStatus).toHaveBeenCalledWith(checkoutRequestId);
+    expect(transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
+    expect(userUpdate).not.toHaveBeenCalled();
   });
 
   it('rejects malformed, unknown, and mismatched callback identifiers without crediting', async () => {

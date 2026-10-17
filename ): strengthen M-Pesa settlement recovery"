@@ -1,0 +1,23 @@
+[1mdiff --git a/apps/api/src/payments/mpesa.service.spec.ts b/apps/api/src/payments/mpesa.service.spec.ts[m
+[1mindex e2a6bce..6c5471f 100644[m
+[1m--- a/apps/api/src/payments/mpesa.service.spec.ts[m
+[1m+++ b/apps/api/src/payments/mpesa.service.spec.ts[m
+[36m@@ -128,6 +128,18 @@[m [mdescribe('M-Pesa Daraja HTTP integration', () => {[m
+     expect(() => mpesa.getCustomerPaymentDestination()).toThrow('MPESA_LIVE_ENABLED=true');[m
+   });[m
+ [m
+[32m+[m[32m  it('loads MPESA_ENVIRONMENT=production at call time without requiring live payments to be enabled', () => {[m
+[32m+[m[32m    process.env.MPESA_ENVIRONMENT = 'production';[m
+[32m+[m[32m    process.env.MPESA_LIVE_ENABLED = 'false';[m
+[32m+[m[32m    process.env.MPESA_TRANSACTION_TYPE = 'CustomerBuyGoodsOnline';[m
+[32m+[m[32m    process.env.MPESA_SHORT_CODE = '5526990';[m
+[32m+[m[32m    process.env.MPESA_TILL_NUMBER = '3400188';[m
+[32m+[m
+[32m+[m[32m    expect(() => mpesa.getCustomerPaymentDestination()).toThrow(ServiceUnavailableException);[m
+[32m+[m[32m    expect(() => mpesa.getCustomerPaymentDestination()).toThrow('Production M-Pesa payments are disabled.');[m
+[32m+[m[32m    expect(fetchMock).not.toHaveBeenCalled();[m
+[32m+[m[32m  });[m
+[32m+[m
+   it('rejects invalid amount, phone, account reference, and transaction description before HTTP calls', async () => {[m
+     const valid = {[m
+       amountKes: 1,[m

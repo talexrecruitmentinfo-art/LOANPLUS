@@ -143,7 +143,11 @@ describe('activation payment database integration', () => {
     expect(repeated.reference).toBe(started.reference);
     await expect(payments.initiateActivationPayment(
       customerIds[0],
-      Object.assign(new InitiateActivationPaymentDto(), { phoneNumber: '0712345679', termsAccepted: true }),
+      Object.assign(new InitiateActivationPaymentDto(), {
+        phoneNumber: '0712345679',
+        termsAccepted: true,
+        termsVersion: 'test-activation-v1',
+      }),
       'activation-test-key-0001',
     )).rejects.toBeInstanceOf(ConflictException);
     expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(1);
@@ -174,9 +178,30 @@ describe('activation payment database integration', () => {
     await payments.handleMpesaCallback(token, callback);
     await payments.handleMpesaCallback(token, callback);
     expect(mpesa.queryStkStatus).toHaveBeenCalledTimes(1);
-    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } })).status).toBe('CONFIRMED');
+    const confirmedPayment = await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } });
+    expect(confirmedPayment).toMatchObject({
+      status: 'CONFIRMED',
+      amountKes: 50,
+      currency: 'KES',
+      receiptReference: 'TESTRECEIPT1',
+    });
     expect((await prisma.user.findUniqueOrThrow({ where: { id: customerIds[0] } })).activationStatus).toBe('ACTIVE');
     expect(await new LedgerService(prisma).getCustomerWallet(customerIds[0])).toEqual({ balanceKes: 50, currency: 'KES' });
+    expect(await prisma.ledgerTransaction.count({ where: { paymentId: payment.id } })).toBe(1);
+    expect(await prisma.ledgerEntry.aggregate({
+      where: {
+        account: { userId: customerIds[0] },
+        transaction: { paymentId: payment.id, status: 'POSTED' },
+      },
+      _sum: { creditKes: true },
+    })).toMatchObject({ _sum: { creditKes: 50 } });
+    expect(await prisma.paymentCallbackEvent.count({
+      where: { paymentTransactionId: payment.id, providerReceiptReference: 'TESTRECEIPT1' },
+    })).toBe(1);
+    await expect(payments.getCustomerActivationStatus(customerIds[1])).resolves.toMatchObject({
+      activationStatus: 'PENDING',
+      payment: null,
+    });
 
     const failed = await payments.initiateActivationPayment(customerIds[1], input, 'activation-test-key-0002');
     const failedPayment = await prisma.paymentTransaction.findUniqueOrThrow({ where: { internalReference: failed.reference } });
