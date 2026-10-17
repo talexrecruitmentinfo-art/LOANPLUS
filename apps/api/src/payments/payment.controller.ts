@@ -28,6 +28,13 @@ export class PaymentController {
     return { data: await this.payments.getActivationTerms() };
   }
 
+  @Get('activation/status')
+  @UseGuards(CustomerSessionGuard)
+  @Throttle({ default: { limit: 12, ttl: 60_000 } })
+  async getActivationStatus(@Req() request: AuthenticatedRequest) {
+    return { data: await this.payments.getCustomerActivationStatus(request.principal!.id) };
+  }
+
   @Post('activation')
   @UseGuards(CustomerSessionGuard)
   @Throttle({ default: { limit: 3, ttl: 60_000 } })

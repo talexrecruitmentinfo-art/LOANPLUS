@@ -20,6 +20,7 @@ describe('activation payment database integration', () => {
   let callbackUrl = '';
   let merchantRequestId = '';
   let providerResultCode = 0;
+  const originalApprovalEnvironment = process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT;
 
   const mpesa = {
     assertConfiguredForPayments: jest.fn(),
@@ -40,12 +41,13 @@ describe('activation payment database integration', () => {
     if (!databaseUrl) return;
     process.env.DATABASE_URL = databaseUrl;
     process.env.NODE_ENV = 'test';
-    process.env.MPESA_CALLBACK_URL = 'https://callbacks.example.invalid/api/v1/payments/mpesa/callback';
+    process.env.MPESA_CALLBACK_URL = 'https://callbacks.example.com/api/v1/payments/mpesa/callback';
     process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
     const parsedUrl = new URL(databaseUrl);
     if (!['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname) || !parsedUrl.pathname.endsWith('_test')) {
       throw new Error('TEST_DATABASE_URL must point to a local database whose name ends in _test.');
     }
+    process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT = 'staging';
     prisma = new PrismaService();
     await prisma.$connect();
     const ledger = new LedgerService(prisma);
@@ -108,6 +110,8 @@ describe('activation payment database integration', () => {
     await prisma.adminAuditLog.deleteMany({ where: { superadminId: adminId } });
     await prisma.superadminUser.deleteMany({ where: { id: adminId } });
     await prisma.$disconnect();
+    if (originalApprovalEnvironment === undefined) delete process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT;
+    else process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT = originalApprovalEnvironment;
   });
 
   databaseTest('keeps unapproved activation disabled and confirms only provider-verified successful payments', async () => {
@@ -123,7 +127,11 @@ describe('activation payment database integration', () => {
       reason: 'Keep test activation disabled before approval.',
     });
     await settings.configure(unapproved, adminId);
-    const input = Object.assign(new InitiateActivationPaymentDto(), { phoneNumber: '0712345678', termsAccepted: true });
+    const input = Object.assign(new InitiateActivationPaymentDto(), {
+      phoneNumber: '0712345678',
+      termsAccepted: true,
+      termsVersion: 'test-activation-v1',
+    });
     await expect(payments.initiateActivationPayment(customerIds[0], input, 'activation-test-key-0001')).rejects.toBeInstanceOf(ServiceUnavailableException);
 
     const approved = Object.assign(new ConfigureActivationDto(), { ...unapproved, approved: true, reason: 'Approved only for the integration fixture.' });
@@ -142,6 +150,8 @@ describe('activation payment database integration', () => {
 
     const payment = await prisma.paymentTransaction.findUniqueOrThrow({ where: { internalReference: started.reference } });
     const request = await prisma.activationPaymentRequest.findUniqueOrThrow({ where: { paymentTransactionId: payment.id } });
+    expect(request.termsAcceptedVersion).toBe('test-activation-v1');
+    expect(request.termsAcceptedAt).toBeInstanceOf(Date);
     const token = new URL(callbackUrl).pathname.split('/').at(-1)!;
     const callback = {
       Body: {
@@ -183,7 +193,7 @@ describe('activation payment database integration', () => {
         },
       },
     });
-    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: failedPayment.id } })).status).toBe('FAILED');
+    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: failedPayment.id } })).status).toBe('CANCELLED');
     expect((await prisma.user.findUniqueOrThrow({ where: { id: customerIds[1] } })).activationStatus).toBe('PENDING');
   });
 });

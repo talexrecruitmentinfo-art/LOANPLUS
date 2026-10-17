@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  InternalServerErrorException,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -18,6 +19,7 @@ import {
 import { LedgerService } from '../ledger/ledger.service';
 import { MpesaService } from './mpesa.service';
 import { InitiateActivationPaymentDto } from './payment.dto';
+import { buildMpesaCallbackUrl } from './mpesa-callback-url';
 
 interface ActivationPolicy {
   approved: boolean;
@@ -29,6 +31,8 @@ interface ActivationPolicy {
   termsVersion: string;
   creditAccountCode: string | null;
 }
+
+const ACTIVATION_AMOUNT_KES = 50;
 
 interface MpesaCallback {
   CheckoutRequestID: string;
@@ -52,12 +56,28 @@ export class PaymentService {
       this.prisma.systemSetting.findUnique({ where: { key: 'activation.payment_policy' } }),
     ]);
     const policy = this.parsePolicy(setting?.value);
-    if (!policy?.approved || typeof amount?.value !== 'number') {
-      return { available: false, amountKes: null, terms: null };
+    const termsApproved = policy?.approved === true &&
+      policy.termsVersion.trim().length > 0 &&
+      !/^draft(?:[-_. ]|$)/i.test(policy.termsVersion.trim()) &&
+      amount?.value === ACTIVATION_AMOUNT_KES;
+    const destination = termsApproved ? this.mpesa.getCustomerPaymentDestination() : null;
+    let callbackConfigured = false;
+    if (destination) {
+      try {
+        buildMpesaCallbackUrl('configuration-check');
+        callbackConfigured = true;
+      } catch (error) {
+        if (!(error instanceof ServiceUnavailableException) && !(error instanceof InternalServerErrorException)) throw error;
+      }
+    }
+    if (!termsApproved) {
+      return { available: false, amountKes: ACTIVATION_AMOUNT_KES, currency: 'KES', destination: null, terms: null };
     }
     return {
-      available: true,
-      amountKes: amount.value,
+      available: destination !== null && callbackConfigured,
+      amountKes: ACTIVATION_AMOUNT_KES,
+      currency: 'KES',
+      destination,
       terms: {
         purpose: policy.purpose,
         refundability: policy.refundability,
@@ -79,7 +99,7 @@ export class PaymentService {
     }
     const phoneNumber = normalizeKenyaPhone(dto.phoneNumber);
     const requestHash = createHash('sha256')
-      .update(JSON.stringify({ userId, phoneNumber }))
+      .update(JSON.stringify({ userId, phoneNumber, termsVersion: dto.termsVersion.trim() }))
       .digest('hex');
     const scopedKey = `activation:${userId}:${idempotencyKey}`;
     const existing = await this.prisma.paymentTransaction.findUnique({ where: { idempotencyKey: scopedKey } });
@@ -101,14 +121,22 @@ export class PaymentService {
     ]);
     if (!user || !user.isActive) throw new ForbiddenException('This account cannot request activation.');
     if (user.activationStatus === 'ACTIVE') throw new ConflictException('This account is already activated.');
-    const amountKes = typeof amountSetting?.value === 'number' ? amountSetting.value : 0;
+    const amountKes = amountSetting?.value;
     const policy = this.parsePolicy(policySetting?.value);
-    if (!Number.isSafeInteger(amountKes) || amountKes < 1 || !policy?.approved) {
+    if (
+      amountKes !== ACTIVATION_AMOUNT_KES ||
+      !policy?.approved ||
+      !policy.termsVersion.trim() ||
+      /^draft(?:[-_. ]|$)/i.test(policy.termsVersion.trim())
+    ) {
       throw new ServiceUnavailableException('Activation payment terms are not configured.');
+    }
+    if (dto.termsVersion.trim() !== policy.termsVersion.trim()) {
+      throw new ConflictException('Activation terms have changed. Review the current terms and try again.');
     }
 
     const callbackToken = randomBytes(32).toString('base64url');
-    const callbackUrl = this.makeCallbackUrl(callbackToken);
+    const callbackUrl = buildMpesaCallbackUrl(callbackToken);
     this.mpesa.assertConfiguredForPayments();
     const payment = await this.prisma.$transaction(async (tx) => {
       const pending = await tx.paymentTransaction.findFirst({
@@ -127,6 +155,8 @@ export class PaymentService {
           activationRequest: {
             create: {
               userId,
+              termsAcceptedVersion: policy.termsVersion.trim(),
+              termsAcceptedAt: new Date(),
               callbackTokenHash: hashToken(callbackToken),
               policySnapshot: policy as unknown as Prisma.InputJsonValue,
               phoneNumberCiphertext: encryptSensitiveValue(phoneNumber),
@@ -148,20 +178,14 @@ export class PaymentService {
       return created;
     });
 
+    let providerRequest: { checkoutRequestId: string; merchantRequestId: string };
     try {
-      const providerRequest = await this.mpesa.initiateStkPush({
+      providerRequest = await this.mpesa.initiateStkPush({
         amountKes,
         phoneNumber: phoneNumber.slice(1),
         accountReference: payment.internalReference.slice(-12),
         description: 'Activation',
         callbackUrl,
-      });
-      await this.prisma.activationPaymentRequest.update({
-        where: { paymentTransactionId: payment.id },
-        data: {
-          checkoutRequestId: providerRequest.checkoutRequestId,
-          merchantRequestId: providerRequest.merchantRequestId,
-        },
       });
     } catch {
       await this.prisma.paymentTransaction.updateMany({
@@ -176,6 +200,13 @@ export class PaymentService {
         message: 'The payment request outcome is being checked. Do not submit another payment; check this transaction status.',
       };
     }
+    await this.prisma.activationPaymentRequest.update({
+      where: { paymentTransactionId: payment.id },
+      data: {
+        checkoutRequestId: providerRequest.checkoutRequestId,
+        merchantRequestId: providerRequest.merchantRequestId,
+      },
+    });
 
     return {
       reference: payment.internalReference,
@@ -205,6 +236,61 @@ export class PaymentService {
     });
   }
 
+  async getCustomerActivationStatus(userId: string) {
+    const [user, transaction] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activationStatus: true } }),
+      this.prisma.paymentTransaction.findFirst({
+        where: { userId, type: PaymentType.ACTIVATION },
+        include: { activationRequest: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    if (!user) throw new NotFoundException('Customer account was not found.');
+    if (!transaction) return { activationStatus: user.activationStatus, payment: null };
+
+    let status = transaction.status;
+    if (
+      status === PaymentStatus.PENDING &&
+      transaction.type === PaymentType.ACTIVATION &&
+      transaction.amountKes === ACTIVATION_AMOUNT_KES &&
+      transaction.currency === 'KES' &&
+      transaction.activationRequest?.userId === userId &&
+      transaction.activationRequest.checkoutRequestId &&
+      transaction.activationRequest.merchantRequestId
+    ) {
+      const request = transaction.activationRequest;
+      const checkoutRequestId = request.checkoutRequestId;
+      const merchantRequestId = request.merchantRequestId;
+      if (!checkoutRequestId || !merchantRequestId) {
+        throw new ServiceUnavailableException('M-Pesa payment status is not available yet.');
+      }
+      const providerStatus = await this.mpesa.queryStkStatus(checkoutRequestId);
+      if (
+        providerStatus.checkoutRequestId !== checkoutRequestId ||
+        providerStatus.merchantRequestId !== merchantRequestId
+      ) {
+        throw new ServiceUnavailableException('M-Pesa payment status did not match the stored request.');
+      }
+      await this.settleActivationPayment(transaction, request, providerStatus);
+      status = providerStatus.resultCode === 0
+        ? PaymentStatus.CONFIRMED
+        : this.getTerminalProviderStatus(providerStatus.resultCode);
+    }
+    const refreshedUser = status === PaymentStatus.CONFIRMED
+      ? await this.prisma.user.findUnique({ where: { id: userId }, select: { activationStatus: true } })
+      : user;
+    return {
+      activationStatus: refreshedUser?.activationStatus ?? user.activationStatus,
+      payment: {
+        reference: transaction.internalReference,
+        status,
+        amountKes: transaction.amountKes,
+        currency: transaction.currency,
+        createdAt: transaction.createdAt,
+      },
+    };
+  }
+
   async handleMpesaCallback(callbackToken: string, payload: unknown): Promise<{ ResultCode: number; ResultDesc: string }> {
     const callback = this.parseCallback(payload);
     const callbackTokenHash = hashToken(callbackToken);
@@ -221,6 +307,7 @@ export class PaymentService {
     if (callback.MerchantRequestID !== request.merchantRequestId) {
       throw new ForbiddenException('Payment callback did not match the requested transaction.');
     }
+    this.assertActivationPaymentAssociation(request.paymentTransaction, request);
 
     const payloadHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
     const priorEvent = await this.prisma.paymentCallbackEvent.findFirst({
@@ -239,52 +326,91 @@ export class PaymentService {
     ) {
       throw new ServiceUnavailableException('M-Pesa callback could not be reconciled with provider status.');
     }
-    const receiptValue = this.getCallbackItem(callback, 'MpesaReceiptNumber');
-    const receipt = typeof receiptValue === 'string' ? receiptValue : null;
-    const amount = this.getCallbackItem(callback, 'Amount');
+    await this.settleActivationPayment(request.paymentTransaction, request, providerStatus, callback, payloadHash);
+    return { ResultCode: 0, ResultDesc: 'Accepted' };
+  }
+
+  private assertActivationPaymentAssociation(
+    payment: { id: string; userId: string; type: PaymentType; amountKes: number; currency: string },
+    request: { paymentTransactionId: string; userId: string },
+  ): void {
+    if (
+      payment.id !== request.paymentTransactionId ||
+      payment.userId !== request.userId ||
+      payment.type !== PaymentType.ACTIVATION ||
+      payment.amountKes !== ACTIVATION_AMOUNT_KES ||
+      payment.currency !== 'KES'
+    ) {
+      throw new ForbiddenException('Payment callback did not match an activation payment.');
+    }
+  }
+
+  private getTerminalProviderStatus(resultCode: number): PaymentStatus {
+    if (resultCode === 1032) return PaymentStatus.CANCELLED;
+    if (resultCode === 1037) return PaymentStatus.EXPIRED;
+    return PaymentStatus.FAILED;
+  }
+
+  private async settleActivationPayment(
+    payment: {
+      id: string;
+      userId: string;
+      type: PaymentType;
+      amountKes: number;
+      currency: string;
+      status: PaymentStatus;
+    },
+    request: {
+      id: string;
+      paymentTransactionId: string;
+      userId: string;
+      checkoutRequestId: string | null;
+      merchantRequestId: string | null;
+      phoneNumberCiphertext: string | null;
+      policySnapshot: Prisma.JsonValue | null;
+    },
+    providerStatus: { checkoutRequestId: string; merchantRequestId: string; resultCode: number },
+    callback?: MpesaCallback,
+    payloadHash?: string,
+  ): Promise<void> {
+    this.assertActivationPaymentAssociation(payment, request);
+    if (
+      !request.checkoutRequestId ||
+      !request.merchantRequestId ||
+      providerStatus.checkoutRequestId !== request.checkoutRequestId ||
+      providerStatus.merchantRequestId !== request.merchantRequestId
+    ) {
+      throw new ServiceUnavailableException('M-Pesa payment status did not match the stored request.');
+    }
     const isConfirmed = providerStatus.resultCode === 0;
+    const targetStatus = isConfirmed ? PaymentStatus.CONFIRMED : this.getTerminalProviderStatus(providerStatus.resultCode);
+    let policy: ActivationPolicy | null = null;
     if (isConfirmed) {
-      const phoneNumber = this.getCallbackItem(callback, 'PhoneNumber');
-      if (
-        request.paymentTransaction.currency !== 'KES' ||
-        typeof amount !== 'number' ||
-        !Number.isSafeInteger(amount) ||
-        amount !== request.paymentTransaction.amountKes ||
-        typeof receipt !== 'string' ||
-        !/^[A-Za-z0-9]{6,32}$/.test(receipt) ||
-        (typeof phoneNumber !== 'number' && typeof phoneNumber !== 'string')
-      ) {
-        throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
-      }
-      let expectedPhone: string;
-      let confirmedPhone: string;
-      try {
-        if (!request.phoneNumberCiphertext) throw new Error('Payment phone number is unavailable.');
-        expectedPhone = normalizeKenyaPhone(decryptSensitiveValue(request.phoneNumberCiphertext));
-        confirmedPhone = normalizeKenyaPhone(String(phoneNumber));
-      } catch {
-        throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
-      }
-      if (expectedPhone !== confirmedPhone) {
-        throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
+      policy = this.parsePolicy(request.policySnapshot ?? undefined);
+      if (!policy?.approved || /^draft(?:[-_. ]|$)/i.test(policy.termsVersion.trim())) {
+        throw new ServiceUnavailableException('Activation accounting policy is unavailable.');
       }
     }
+    if (callback && isConfirmed) this.validateSuccessfulCallback(callback, payment, request.phoneNumberCiphertext);
+
     const now = new Date();
     try {
       await this.prisma.$transaction(async (tx) => {
-        await tx.paymentCallbackEvent.create({
-          data: {
-            activationPaymentRequestId: request.id,
-            paymentTransactionId: request.paymentTransactionId,
-            payloadHash,
-            providerResultCode: String(providerStatus.resultCode),
-            providerReceiptReference: null,
-          },
-        });
+        if (payloadHash) {
+          await tx.paymentCallbackEvent.create({
+            data: {
+              activationPaymentRequestId: request.id,
+              paymentTransactionId: request.paymentTransactionId,
+              payloadHash,
+              providerResultCode: String(providerStatus.resultCode),
+              providerReceiptReference: null,
+            },
+          });
+        }
         const changed = await tx.paymentTransaction.updateMany({
           where: { id: request.paymentTransactionId, status: PaymentStatus.PENDING },
           data: {
-            status: isConfirmed ? PaymentStatus.CONFIRMED : PaymentStatus.FAILED,
+            status: targetStatus,
             providerReference: request.checkoutRequestId,
             receiptReference: null,
             confirmedAt: isConfirmed ? now : null,
@@ -293,15 +419,12 @@ export class PaymentService {
         });
         if (changed.count === 0) {
           const current = await tx.paymentTransaction.findUniqueOrThrow({ where: { id: request.paymentTransactionId } });
-          if (current.status === PaymentStatus.CONFIRMED && isConfirmed) return;
-          if (current.status === PaymentStatus.FAILED && !isConfirmed) return;
+          if (current.status === targetStatus) return;
           throw new ConflictException('Payment has already been reconciled.');
         }
 
-        if (isConfirmed) {
-          const policy = this.parsePolicy(request.policySnapshot ?? undefined);
-          if (!policy?.approved) throw new ServiceUnavailableException('Activation accounting policy is unavailable.');
-          const creditAccount = await this.getCreditAccount(tx, policy, request.paymentTransaction.userId);
+        if (isConfirmed && policy) {
+          const creditAccount = await this.getCreditAccount(tx, policy, payment.userId);
           const clearingAccount = await tx.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } });
           if (
             !clearingAccount ||
@@ -312,23 +435,23 @@ export class PaymentService {
             throw new ServiceUnavailableException('Activation clearing account is unavailable.');
           }
           await this.ledger.postWithinTransaction(tx, {
-            idempotencyKey: `activation-payment:${request.paymentTransactionId}`,
+            idempotencyKey: `activation-payment:${payment.id}`,
             transactionType: 'ACTIVATION_PAYMENT',
             actorType: 'PROVIDER',
-            paymentId: request.paymentTransactionId,
+            paymentId: payment.id,
             reason: `Activation policy ${policy.termsVersion}`,
             lines: [
-              { accountId: clearingAccount.id, debitKes: request.paymentTransaction.amountKes, creditKes: 0 },
-              { accountId: creditAccount.id, debitKes: 0, creditKes: request.paymentTransaction.amountKes },
+              { accountId: clearingAccount.id, debitKes: ACTIVATION_AMOUNT_KES, creditKes: 0 },
+              { accountId: creditAccount.id, debitKes: 0, creditKes: ACTIVATION_AMOUNT_KES },
             ],
           });
           await tx.user.update({
-            where: { id: request.paymentTransaction.userId },
+            where: { id: payment.userId },
             data: { activationStatus: 'ACTIVE' },
           });
           await tx.referral.updateMany({
             where: {
-              referredUserId: request.paymentTransaction.userId,
+              referredUserId: payment.userId,
               status: { in: ['REGISTERED', 'ACTIVATION_PENDING'] },
             },
             data: { status: 'QUALIFIED', qualifiedAt: now },
@@ -338,22 +461,54 @@ export class PaymentService {
           data: {
             actorType: 'PROVIDER',
             actorId: 'MPESA_DARAJA',
-            action: 'ACTIVATION_PAYMENT_CALLBACK',
-            outcome: isConfirmed ? 'CONFIRMED' : 'FAILED',
+            action: 'ACTIVATION_PAYMENT_RECONCILIATION',
+            outcome: targetStatus,
           },
         });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && payloadHash) {
         const duplicateEvent = await this.prisma.paymentCallbackEvent.findFirst({
           where: { activationPaymentRequestId: request.id, payloadHash },
           select: { id: true },
         });
-        if (duplicateEvent) return { ResultCode: 0, ResultDesc: 'Accepted' };
+        if (duplicateEvent) return;
       }
       throw error;
     }
-    return { ResultCode: 0, ResultDesc: 'Accepted' };
+  }
+
+  private validateSuccessfulCallback(
+    callback: MpesaCallback,
+    payment: { amountKes: number; currency: string },
+    phoneNumberCiphertext: string | null,
+  ): void {
+    const receipt = this.getCallbackItem(callback, 'MpesaReceiptNumber');
+    const amount = this.getCallbackItem(callback, 'Amount');
+    const phoneNumber = this.getCallbackItem(callback, 'PhoneNumber');
+    if (
+      payment.currency !== 'KES' ||
+      payment.amountKes !== ACTIVATION_AMOUNT_KES ||
+      typeof amount !== 'number' ||
+      !Number.isSafeInteger(amount) ||
+      amount !== ACTIVATION_AMOUNT_KES ||
+      typeof receipt !== 'string' ||
+      !/^[A-Za-z0-9]{6,32}$/.test(receipt) ||
+      (typeof phoneNumber !== 'number' && typeof phoneNumber !== 'string')
+    ) {
+      throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
+    }
+    try {
+      if (!phoneNumberCiphertext) throw new Error('Payment phone number is unavailable.');
+      const expectedPhone = normalizeKenyaPhone(decryptSensitiveValue(phoneNumberCiphertext));
+      const confirmedPhone = normalizeKenyaPhone(String(phoneNumber));
+      if (expectedPhone !== confirmedPhone) {
+        throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
+      }
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) throw error;
+      throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
+    }
   }
 
   private parsePolicy(value: Prisma.JsonValue | undefined): ActivationPolicy | null {
@@ -446,28 +601,4 @@ export class PaymentService {
     });
   }
 
-  private makeCallbackUrl(callbackToken: string): string {
-    const configuredUrl = process.env.MPESA_CALLBACK_URL;
-    if (!configuredUrl) throw new ServiceUnavailableException('M-Pesa callback URL is not configured.');
-    let baseUrl: URL;
-    try {
-      baseUrl = new URL(configuredUrl);
-    } catch {
-      throw new ServiceUnavailableException('M-Pesa callback URL is not configured.');
-    }
-    if (process.env.NODE_ENV === 'production') {
-      if (
-        baseUrl.protocol !== 'https:' ||
-        baseUrl.username ||
-        baseUrl.password ||
-        baseUrl.search ||
-        baseUrl.hash ||
-        !/(?:^|\/)api\/v1\/payments\/mpesa\/callback\/?$/.test(baseUrl.pathname)
-      ) {
-        throw new ServiceUnavailableException('M-Pesa callback URL must be the public HTTPS payment callback route.');
-      }
-    }
-    baseUrl.pathname = `${baseUrl.pathname.replace(/\/$/, '')}/${callbackToken}`;
-    return baseUrl.toString();
-  }
 }

@@ -16,6 +16,15 @@ export class ActivationSettingsService {
   }
 
   async configure(dto: ConfigureActivationDto, superadminId: string, ipAddress?: string) {
+    if (dto.approved && process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT !== 'staging') {
+      throw new UnprocessableEntityException('Activation policy approval is enabled only for the explicitly configured staging environment.');
+    }
+    if (dto.amountKes !== 50) {
+      throw new UnprocessableEntityException('Account activation amount must be exactly KES 50.');
+    }
+    if (dto.approved && /^draft(?:[-_. ]|$)/i.test(dto.termsVersion.trim())) {
+      throw new UnprocessableEntityException('Draft activation terms cannot be approved.');
+    }
     if (dto.approved && !dto.creditedToWallet && !dto.creditAccountCode) {
       throw new UnprocessableEntityException('An approved accounting credit account is required.');
     }

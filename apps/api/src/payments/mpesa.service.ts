@@ -1,4 +1,4 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
 
 interface StkInitiationResult {
   checkoutRequestId: string;
@@ -12,12 +12,29 @@ export interface StkStatusResult {
   resultDescription: string;
 }
 
+export interface MpesaCustomerPaymentDestination {
+  businessShortCode: string;
+  transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
+}
+
 @Injectable()
 export class MpesaService {
   assertConfiguredForPayments(): void {
     this.getConfiguration();
     this.requiredSetting('MPESA_CONSUMER_KEY');
     this.requiredSetting('MPESA_CONSUMER_SECRET');
+  }
+
+  getCustomerPaymentDestination(): MpesaCustomerPaymentDestination | null {
+    try {
+      const { shortCode, transactionType } = this.getConfiguration();
+      this.requiredSetting('MPESA_CONSUMER_KEY');
+      this.requiredSetting('MPESA_CONSUMER_SECRET');
+      return { businessShortCode: shortCode, transactionType };
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException || error instanceof InternalServerErrorException) return null;
+      throw error;
+    }
   }
 
   async initiateStkPush(input: {
@@ -27,7 +44,7 @@ export class MpesaService {
     description: string;
     callbackUrl: string;
   }): Promise<StkInitiationResult> {
-    const { apiBase, shortCode, passkey } = this.getConfiguration();
+    const { apiBase, shortCode, passkey, transactionType } = this.getConfiguration();
     if (
       !Number.isSafeInteger(input.amountKes) ||
       input.amountKes <= 0 ||
@@ -47,7 +64,7 @@ export class MpesaService {
         BusinessShortCode: shortCode,
         Password: password,
         Timestamp: timestamp,
-        TransactionType: 'CustomerPayBillOnline',
+        TransactionType: transactionType,
         Amount: input.amountKes,
         PartyA: input.phoneNumber,
         PartyB: shortCode,
@@ -126,26 +143,40 @@ export class MpesaService {
     return response.access_token;
   }
 
-  private getConfiguration(): { apiBase: string; shortCode: string; passkey: string } {
+  private getConfiguration(): {
+    apiBase: string;
+    shortCode: string;
+    passkey: string;
+    transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
+  } {
     const environment = process.env.MPESA_ENVIRONMENT;
-    if (!environment) throw new ServiceUnavailableException('M-Pesa environment is not configured.');
+    if (!environment) {
+      throw new InternalServerErrorException('MPESA_ENVIRONMENT must be set to sandbox or production.');
+    }
     if (environment === 'production' && process.env.MPESA_LIVE_ENABLED !== 'true') {
       throw new ServiceUnavailableException('Live M-Pesa processing is disabled.');
     }
     if (environment !== 'sandbox' && environment !== 'production') {
-      throw new ServiceUnavailableException('M-Pesa environment is not configured.');
+      throw new InternalServerErrorException('MPESA_ENVIRONMENT must be set to sandbox or production.');
+    }
+    const transactionType = process.env.MPESA_TRANSACTION_TYPE ?? 'CustomerPayBillOnline';
+    if (transactionType !== 'CustomerPayBillOnline' && transactionType !== 'CustomerBuyGoodsOnline') {
+      throw new InternalServerErrorException(
+        'MPESA_TRANSACTION_TYPE must be CustomerPayBillOnline or CustomerBuyGoodsOnline.',
+      );
     }
     return {
       apiBase: environment === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke',
       shortCode: this.requiredSetting('MPESA_SHORT_CODE'),
       passkey: this.requiredSetting('MPESA_PASSKEY'),
+      transactionType,
     };
   }
 
   private requiredSetting(name: string): string {
     const value = process.env[name];
     if (!value || value.startsWith('replace-with-')) {
-      throw new ServiceUnavailableException('M-Pesa credentials are not configured.');
+      throw new InternalServerErrorException(`${name} must be configured in the API environment.`);
     }
     return value;
   }

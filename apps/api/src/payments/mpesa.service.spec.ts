@@ -1,4 +1,4 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import { InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
 import { MpesaService } from './mpesa.service';
 
 describe('M-Pesa Daraja HTTP integration', () => {
@@ -9,6 +9,7 @@ describe('M-Pesa Daraja HTTP integration', () => {
     'MPESA_CONSUMER_SECRET',
     'MPESA_SHORT_CODE',
     'MPESA_PASSKEY',
+    'MPESA_TRANSACTION_TYPE',
   ] as const;
   const originalSettings = Object.fromEntries(settingNames.map((name) => [name, process.env[name]]));
   let fetchMock: jest.SpyInstance;
@@ -141,7 +142,8 @@ describe('M-Pesa Daraja HTTP integration', () => {
 
   it('rejects missing credential configuration without making HTTP requests', async () => {
     delete process.env.MPESA_CONSUMER_SECRET;
-    expect(() => mpesa.assertConfiguredForPayments()).toThrow(ServiceUnavailableException);
+    expect(() => mpesa.assertConfiguredForPayments()).toThrow('MPESA_CONSUMER_SECRET');
+    expect(() => mpesa.assertConfiguredForPayments()).toThrow(InternalServerErrorException);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -170,7 +172,15 @@ describe('M-Pesa Daraja HTTP integration', () => {
 
   it('requires an explicit environment instead of silently selecting sandbox', async () => {
     delete process.env.MPESA_ENVIRONMENT;
-    expect(() => mpesa.assertConfiguredForPayments()).toThrow(ServiceUnavailableException);
+    expect(() => mpesa.assertConfiguredForPayments()).toThrow('MPESA_ENVIRONMENT');
+    expect(() => mpesa.assertConfiguredForPayments()).toThrow(InternalServerErrorException);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid configured transaction type as an actionable configuration error', async () => {
+    process.env.MPESA_TRANSACTION_TYPE = 'C2B';
+    expect(() => mpesa.assertConfiguredForPayments()).toThrow('MPESA_TRANSACTION_TYPE');
+    expect(() => mpesa.assertConfiguredForPayments()).toThrow(InternalServerErrorException);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

@@ -7,6 +7,7 @@ export interface AuthPrincipal {
   id: string;
   role: 'NORMAL_USER' | 'SUPERADMIN';
   email: string;
+  phone?: string;
   fullName?: string;
   identityStatus?: string;
   activationStatus?: string;

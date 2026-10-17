@@ -2,6 +2,7 @@ import { Equals, IsBoolean, IsIn, IsInt, IsOptional, IsString, Length, Matches, 
 
 export class ConfigureActivationDto {
   @IsInt()
+  @Equals(50)
   @Min(1)
   @Max(100_000)
   amountKes!: number;
@@ -49,4 +50,8 @@ export class InitiateActivationPaymentDto {
 
   @Equals(true)
   termsAccepted!: boolean;
+
+  @IsString()
+  @Length(1, 40)
+  termsVersion!: string;
 }

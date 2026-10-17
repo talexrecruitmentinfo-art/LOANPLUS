@@ -90,6 +90,7 @@ export class AuthController {
         id: principal.id,
         role: principal.role,
         email: principal.email,
+        phone: principal.phone,
         fullName: principal.fullName,
         identityStatus: principal.identityStatus,
         activationStatus: principal.activationStatus,

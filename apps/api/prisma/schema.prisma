@@ -58,6 +58,7 @@ enum PaymentStatus {
   CONFIRMED
   FAILED
   CANCELLED
+  EXPIRED
   REVERSED
 }
 
@@ -388,6 +389,8 @@ model ActivationPaymentRequest {
   merchantRequestId     String?           @db.VarChar(100)
   callbackTokenHash     String?           @unique @db.VarChar(64)
   policySnapshot        Json?
+  termsAcceptedVersion  String?           @db.VarChar(40)
+  termsAcceptedAt       DateTime?
   phoneNumberCiphertext String?           @db.Text
   expiresAt             DateTime
   createdAt             DateTime          @default(now())
