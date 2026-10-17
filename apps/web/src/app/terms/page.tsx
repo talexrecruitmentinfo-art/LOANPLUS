@@ -13,17 +13,21 @@ export default function TermsPage() {
         disclosures against the actual service, obtain approval, publish the final terms, and only then configure
         a matching non-draft <code>TERMS_VERSION</code>.
       </p>
-      <p><strong>Document version:</strong> [OWNER TO ASSIGN AFTER APPROVAL]</p>
+      <p><strong>Draft document version:</strong> 1.0 (unapproved; do not use as a production <code>TERMS_VERSION</code>)</p>
       <p><strong>Effective date:</strong> [OWNER TO COMPLETE AFTER APPROVAL]</p>
 
       <h2>1. Who provides the service</h2>
       <p>
-        The LoanPlus website and related account services (the “Service”) are operated by
-        <strong> [OWNER: full legal name of the contracting entity]</strong>, a business whose registration
-        details are <strong>[OWNER: registration details and jurisdiction]</strong>. Its registered address is
-        <strong> [OWNER: registered address]</strong> and customer contact details are
-        <strong> [OWNER: approved support email, telephone and service hours]</strong>. These required details
-        have not been supplied in this draft.
+        The LoanPlus website and related account services (the “Service”) are operated by the owner-identified
+        legal entity <strong>Airswif</strong>. The owner supplied company reference
+        <strong> PVT_2451</strong>; its official registration number, jurisdiction, and legal status remain
+        unverified and must be confirmed before publication. Its registered address is
+        <strong> [OWNER: confirm registered address]</strong>. The owner has supplied the business address
+        RNG Plaza, 2nd Floor, Nairobi, Kenya, and customer support contacts
+        <a href="mailto:loanplus.info@gmail.com">loanplus.info@gmail.com</a> and
+        <a href="tel:+254107052973">+254107052973</a>. Verify these details before publication; the supplied
+        business address is not represented as the registered office. Confirm that these contacts are monitored
+        for customer support and complaints, and provide service hours before publication.
       </p>
       <p>
         The owner must have Kenyan counsel confirm which laws and regulatory requirements apply to the actual
@@ -63,20 +67,25 @@ export default function TermsPage() {
         information. Availability can change. An application is a request only: submission does not guarantee
         eligibility, approval, an offer, or disbursement. Loan applications are reviewed by an administrator;
         this draft makes no claim that a particular credit-scoring or automated decision system is used.
+        A proposed principal range of KSh 500–5,000 has been supplied for consideration, but it is not
+        verified or configured here and is not an available or approved loan offer.
       </p>
       <p>
-        If an application is approved, review the individual offer before accepting it. The offer and related
-        disclosures must state, in a form the owner has verified as legally sufficient, the amount advanced,
-        all interest and other charges, the total amount repayable, payment dates and method, consequences of
-        late or missed payment, and any applicable cancellation or complaint rights. Do not accept an offer
-        unless those terms are clear. Your acceptance records agreement to the offer version shown at that
-        time; a product’s terms do not replace mandatory disclosures or rights under applicable law.
+        The current customer website lists products and loan application status, but does not provide a
+        customer-facing application form or an approved-offer presentation and acceptance screen. Session-
+        protected API routes for applications and offer acceptance exist. The acceptance route records an
+        acceptance time and product terms-version string, but does not save a snapshot of the full offer or
+        agreement presented to the customer. Do not treat these backend routes as a complete customer loan
+        application or agreement process. Before offering loans, the owner must implement and verify a
+        customer flow that presents the approved amount, all charges, total repayable, due dates and payment
+        method, late-payment consequences, and applicable cancellation and complaint rights before an
+        informed acceptance, and preserves the exact accepted disclosure.
       </p>
       <p>
-        An accepted offer creates a loan record, but the current implementation records disbursement only
-        after an administrator manually confirms it. Do not treat an application, approval, offer acceptance,
-        or a pending status as proof that funds have been disbursed. Confirm the disbursement status and
-        reference in your account and retain the relevant records.
+        An accepted offer creates a loan record, but an administrator manually confirms disbursement. The
+        customer website does not currently show the resulting loan or disbursement record. An application,
+        approval, recorded offer acceptance, or pending status is not proof that funds have been disbursed.
+        The owner must provide customers with an accurate disbursement confirmation and reference.
       </p>
 
       <h2>5. Repayment and charges</h2>
@@ -105,13 +114,21 @@ export default function TermsPage() {
         appropriate, refundable, or approved for production.
       </p>
       <p>
-        Before asking you to pay, the Service must show the amount, purpose, refundability, accounting
-        treatment, and other required disclosures and obtain your acceptance. A payment prompt is not proof
-        of payment. The transaction remains pending until the provider status is reconciled; activation follows
-        only after a confirmed successful payment. Keep the M-Pesa confirmation and in-app reference, and
-        contact <strong>[OWNER: approved payment support contact]</strong> promptly about an unrecognised,
-        duplicated, failed, or unreconciled payment. The owner must complete and approve the exact refund,
-        cancellation, and complaint terms for any enabled payment policy.
+        The current activation screen displays the amount, purpose, refundability, wallet treatment, customer
+        disclosure, and configured terms-version string, and requires a checkbox before requesting an STK
+        Push. It does not display the separate internal accounting-treatment field. The provider callback is
+        checked against a Daraja status query before the payment is confirmed, but no scheduled retry or
+        reconciliation worker is implemented. An uncertain initiation or missing callback can therefore
+        remain pending; do not make another payment while the first is pending. A payment prompt is not proof
+        of payment, and activation follows only after confirmed success. The application stores its own
+        transaction reference but currently does not retain or display the Safaricom receipt number; keep
+        Safaricom&apos;s confirmation and contact <strong>loanplus.info@gmail.com or +254107052973</strong>
+        promptly about an unrecognised, duplicated, failed, or unreconciled payment. The owner must verify and
+        monitor these supplied contacts. No in-app refund or cancellation workflow is implemented. The owner
+        has mentioned a possible KSh 50 activation fee, but this amount is unverified, is not a configured
+        customer term, and must not be charged or represented as approved without separate review and approval.
+        The owner must approve and operationalise accurate refund, cancellation, and complaint terms before
+        enabling any payment policy.
       </p>
       <p>
         Daraja processing may involve Safaricom and its payment systems. We do not promise uninterrupted
@@ -123,16 +140,19 @@ export default function TermsPage() {
       <p>
         The Service provides referral codes and displays referral status. No referral reward is promised by
         these terms: the current customer view reports that rewards are not configured. The owner must publish
-        separate eligibility, value, timing, tax, and dispute terms before offering a reward. Do not submit
-        another person’s details without their authority.
+        separate eligibility, value, timing, tax, and dispute terms before offering a reward. The referral
+        screen displays a referred customer’s name and referral status. A possible KSh 25 referral reward has
+        been mentioned but is unverified, is not configured, and is not promised. Do not submit another person’s
+        details without their authority.
       </p>
       <p>
         Signed-in customers can submit support tickets and messages through the Service. Do not include
         passwords, full National ID numbers, payment PINs, or other unnecessary sensitive information in a
         support message. The support channel is not a substitute for a legally required formal complaint or
-        regulatory escalation process. The owner must supply the approved complaint procedure and external
-        escalation contacts: <strong>[OWNER: complete complaint channels, response process, and applicable
-        escalation body/contact after legal review]</strong>.
+        regulatory escalation process. The owner has supplied loanplus.info@gmail.com and +254107052973 as
+        support and complaint contacts; verify and monitor them before publication. The complaint handling
+        procedure, reference tracking, response targets, and external escalation body/contact still require
+        owner and legal review.
       </p>
 
       <h2>8. Suspension, changes, and service availability</h2>
@@ -145,8 +165,9 @@ export default function TermsPage() {
 
       <h2>9. Complaints and applicable law</h2>
       <p>
-        Contact <strong>[OWNER: approved complaints contact and postal/email/telephone details]</strong> first
-        about a complaint. The owner must complete the complaint handling procedure, response targets,
+        Contact <strong>loanplus.info@gmail.com or +254107052973</strong> about a complaint, once the owner
+        has verified these supplied details are monitored for complaints. The owner must complete the complaint
+        handling procedure, response targets,
         escalation pathway, and any required regulator or alternative dispute-resolution information before
         publication. These terms are intended to be governed by the laws of Kenya, subject to mandatory
         consumer rights, applicable regulatory requirements, and the jurisdiction rules confirmed by Kenyan

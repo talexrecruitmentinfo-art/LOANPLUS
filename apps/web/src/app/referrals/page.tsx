@@ -8,11 +8,9 @@ import { apiRequest } from '@/lib/api';
 interface Referral {
   id: string;
   status: string;
-  riskReview: string;
   createdAt: string;
-  qualifiedAt: string | null;
-  referredUser: { fullName: string; activationStatus: string };
-  reward: { amountKes: number; status: string } | null;
+  referredUser: { fullName: string };
+  reward: { status: string } | null;
 }
 
 interface Overview {

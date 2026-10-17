@@ -469,9 +469,17 @@ describe('customer registration and login flow', () => {
     }
   });
 
-  it('does not allow draft consent versions in production', async () => {
+  it.each([
+    ['missing TERMS_VERSION', undefined, 'test-v1'],
+    ['draft TERMS_VERSION', 'draft-v1', 'test-v1'],
+    ['missing PRIVACY_VERSION', 'test-v1', undefined],
+    ['draft PRIVACY_VERSION', 'test-v1', 'draft-v1'],
+  ])('blocks production registration with %s', async (_caseName, termsVersion, privacyVersion) => {
     process.env.NODE_ENV = 'production';
-    process.env.TERMS_VERSION = 'draft-v1';
+    if (termsVersion === undefined) delete process.env.TERMS_VERSION;
+    else process.env.TERMS_VERSION = termsVersion;
+    if (privacyVersion === undefined) delete process.env.PRIVACY_VERSION;
+    else process.env.PRIVACY_VERSION = privacyVersion;
     const loggerSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     try {
       await expect(auth.registerCustomer({

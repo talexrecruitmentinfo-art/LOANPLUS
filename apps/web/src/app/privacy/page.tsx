@@ -13,17 +13,20 @@ export default function PrivacyPage() {
         owner-input item and verify this notice against actual operations before publishing or collecting real
         customer data.
       </p>
-      <p><strong>Document version:</strong> [OWNER TO ASSIGN AFTER APPROVAL]</p>
+      <p><strong>Draft document version:</strong> 1.0 (unapproved; do not use as a production <code>PRIVACY_VERSION</code>)</p>
       <p><strong>Effective date:</strong> [OWNER TO COMPLETE AFTER APPROVAL]</p>
 
       <h2>1. Who is responsible for your personal data</h2>
       <p>
-        The data controller is <strong>[OWNER: full legal name of the entity determining the purposes and means
-        of processing]</strong>, registration details <strong>[OWNER: registration details and jurisdiction]</strong>,
-        with registered address <strong>[OWNER: registered address]</strong>. Contact the privacy team or data
-        protection officer, if appointed or required, at <strong>[OWNER: approved privacy/DPO email, telephone
-        and postal contact]</strong>. These details have not been supplied in this draft and must be completed
-        before publication.
+        The owner identifies the data controller as the legal entity <strong>Airswif</strong> and supplied
+        company reference <strong>PVT_2451</strong>. Its official registration number, jurisdiction, and legal
+        status remain unverified and must be confirmed before publication;
+        with registered address <strong>[OWNER: confirm registered address]</strong>. The owner has supplied
+        the business address RNG Plaza, 2nd Floor, Nairobi, Kenya, and customer support contacts
+        <a href="mailto:loanplus.info@gmail.com">loanplus.info@gmail.com</a> and
+        <a href="tel:+254107052973">+254107052973</a>. Verify these details before publication; the supplied
+        business address is not represented as the registered office. The owner must confirm that these
+        contacts are monitored for privacy requests and identify any privacy/DPO contact required by law.
       </p>
       <p>
         This notice is intended to address obligations under Kenya’s Data Protection Act, 2019 and applicable
@@ -40,7 +43,7 @@ export default function PrivacyPage() {
           <strong>Account and identity details:</strong> full name, email address, Kenyan phone number, National
           ID number, account status, and referral code. The ID number is encrypted in storage and a separate
           keyed digest is used for duplicate checks. This is not identity verification; registration does not
-          request an ID-card or passport image.
+          request an ID-card or passport image. Identity verification is proposed but not currently implemented.
         </li>
         <li>
           <strong>Authentication and security records:</strong> password hashes, session and password-reset
@@ -50,23 +53,28 @@ export default function PrivacyPage() {
         <li>
           <strong>Consent and lending records:</strong> accepted Terms and Privacy Policy version identifiers
           and timestamps; loan product, requested and approved amounts, decision and review details, accepted
-          offer version, disbursement reference, and scheduled or recorded repayment information where created.
+          product terms-version string, disbursement reference, and scheduled or recorded repayment information
+          where created. The current web application does not provide the customer-facing loan application,
+          offer-acceptance, or disbursement-history screens.
         </li>
         <li>
           <strong>Payments:</strong> transaction amount, currency, status, internal and provider references,
-          receipt reference, timestamps, callback reconciliation records, and the phone number supplied for an
-          activation payment. The activation phone number is encrypted in storage. M-Pesa PINs are not
-          requested by this Service.
+          timestamps, callback result codes and a hash of each callback payload, and the phone number supplied
+          for an activation payment. The activation phone number is encrypted in storage. A Safaricom receipt
+          number is checked during successful callback processing but is not stored in the payment or callback
+          record. M-Pesa PINs are not requested by this Service.
         </li>
         <li>
           <strong>Referrals and support:</strong> referral code, referral relationship and status, reward status
-          if configured, support-ticket subject and messages, ticket status, and associated timestamps. A
-          referrer’s account can display the referred customer’s name and activation status.
+          if configured, support-ticket subject and messages, ticket status, and associated timestamps. The
+          referral screen displays the referred customer’s name and referral status to the referrer. The
+          customer referral response does not need or expose the referred customer’s account activation status.
         </li>
         <li>
           <strong>Operational data:</strong> request IP address may be recorded in authentication or
-          administrative audit entries, along with timestamps and action/outcome information. The owner must
-          verify all application, hosting, security, and analytics logging before publication.
+          administrative audit entries, along with timestamps and action/outcome information. No analytics or
+          advertising integration was found in the reviewed application source; the owner must verify all
+          application, hosting, security, and provider logging before publication.
         </li>
       </ul>
 
@@ -75,7 +83,7 @@ export default function PrivacyPage() {
       <ul>
         <li>create and secure accounts, authenticate users, process password resets, and prevent duplicate or abusive registrations;</li>
         <li>record consent to the applicable terms and privacy notice;</li>
-        <li>receive and review loan applications, communicate decisions and offers, record accepted offer details, and administer disbursement records;</li>
+        <li>record and review loan applications, decisions and offers, accepted offer details, and disbursement records where those features are used;</li>
         <li>initiate and reconcile an activation payment when the feature and its approved terms are enabled;</li>
         <li>operate referral tracking and respond to support requests;</li>
         <li>maintain audit, accounting, security, and dispute records; and</li>
@@ -103,12 +111,12 @@ export default function PrivacyPage() {
           documented instructions and subject to appropriate safeguards;
         </li>
         <li>
-          Safaricom/Daraja and related payment providers when an M-Pesa activation payment is initiated or
-          reconciled; and an email provider for password-reset or administrator verification messages;
+          Safaricom/Daraja for an M-Pesa activation STK Push and callback status check, when enabled; and
+          Resend for password-reset or administrator verification email, as configured;
         </li>
         <li>
-          a person you refer, but only through the referral feature’s disclosed display of the referred
-          customer’s name and activation status to the referrer; and
+          a person who referred you, through the referral feature’s display of your name and referral status
+          to that referrer; and
         </li>
         <li>
           courts, regulators, law enforcement, or other recipients where disclosure is required or permitted by
@@ -119,8 +127,11 @@ export default function PrivacyPage() {
         The current implementation does not verify identity documents and does not implement credit-reference
         bureau checks or disclosures. Do not represent those checks or disclosures as occurring unless the
         owner implements them, verifies the legal basis and required notice, and updates this policy first.
-        <strong> [OWNER: list actual providers, their roles, data shared, contract safeguards, and any other
-        recipients before approval.]</strong>
+        Repository deployment instructions refer to Supabase for PostgreSQL, Render for the API, Vercel for
+        the website, Resend for email, and Safaricom Daraja for activation payments; these references do not
+        establish which services are actually used in production, their contractual roles, subprocessors, or
+        the data each receives. <strong>[OWNER: verify and list actual providers, their roles, data shared,
+        contract safeguards, and any other recipients before approval.]</strong>
       </p>
 
       <h2>5. Transfers and processing locations</h2>
@@ -144,6 +155,12 @@ export default function PrivacyPage() {
         <strong> [OWNER: provide the approved retention schedule and deletion/anonymisation process; do not
         publish an invented duration]</strong>.
       </p>
+      <p>
+        The current application does not provide self-service account deletion, data export, or a formal
+        privacy-rights request workflow. The owner must establish and test a monitored contact process for
+        access, correction, deletion, objection, and other applicable requests, including identity verification,
+        response tracking, and lawful retention exceptions, before collecting real customer data.
+      </p>
 
       <h2>7. Your rights and choices</h2>
       <p>
@@ -155,11 +172,12 @@ export default function PrivacyPage() {
         process data under law or to establish, exercise, or defend legal claims.
       </p>
       <p>
-        To exercise a right, contact <strong>[OWNER: approved privacy/DPO contact]</strong> and provide enough
+        To exercise a right, contact <strong>loanplus.info@gmail.com or +254107052973</strong> and provide enough
         information for the controller to locate your record and verify your request securely. The controller
         must respond within applicable legal timelines and explain any lawful refusal or limitation. You may
         also lodge a complaint with Kenya’s Office of the Data Protection Commissioner (ODPC). The owner must
-        verify and add any required ODPC contact or complaint instructions before publication.
+        verify that these owner-supplied contacts are monitored for privacy requests and add any required ODPC
+        contact or complaint instructions before publication.
       </p>
 
       <h2>8. Security</h2>
@@ -174,10 +192,11 @@ export default function PrivacyPage() {
 
       <h2>9. Cookies and essential service operation</h2>
       <p>
-        The Service uses an HTTP-only session cookie to keep you signed in; production settings mark it Secure
-        and allow cross-site use for the deployed frontend/API arrangement. The owner must confirm the final
-        cookie configuration and disclose any additional analytics, advertising, or non-essential tracking
-        technologies before they are enabled.
+        The customer and administrator sign-in flows use separate HTTP-only session cookies. Production
+        settings mark them Secure and use SameSite=None for the separate website and API origins. No analytics
+        or advertising cookie integration was found in the reviewed application source. The owner must verify
+        cookie configuration and all hosting/provider logs, and disclose any additional analytics, advertising,
+        or non-essential tracking before enabling it.
       </p>
 
       <h2>10. Children and eligibility</h2>
@@ -192,9 +211,9 @@ export default function PrivacyPage() {
       <p>
         If this notice changes, the controller must determine when notice or renewed consent is required, make
         the current version available, and record the version and acceptance where applicable. Contact
-        <strong> [OWNER: approved privacy/DPO email, telephone, postal address, and complaint channel]</strong>
-        for questions or requests. This information is intentionally left incomplete until verified by the
-        owner.
+        <strong> loanplus.info@gmail.com or +254107052973</strong> for questions or requests. These contacts
+        were supplied by the owner and must be verified, monitored, and confirmed as the appropriate privacy
+        channel; the legal controller identity and any required DPO contact remain to be completed.
       </p>
 
       <h2>12. Owner completion and approval record</h2>
