@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit --incremental false --noUnusedLocals --noUnusedParameters",
     "typecheck": "tsc --noEmit",
     "test": "jest --runInBand",
+    "db:diagnose": "ts-node scripts/database-diagnostic.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",

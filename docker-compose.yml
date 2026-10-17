@@ -32,6 +32,7 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://loanplus:${POSTGRES_PASSWORD:-loanplus_dev_only}@${DATABASE_HOST:-postgres}:5432/loanplus?schema=public
+      DIRECT_URL: postgresql://loanplus:${POSTGRES_PASSWORD:-loanplus_dev_only}@${DATABASE_HOST:-postgres}:5432/loanplus?schema=public
       REDIS_URL: redis://redis:6379
       API_PORT: 4000
       WEB_ORIGIN: http://localhost:3000
