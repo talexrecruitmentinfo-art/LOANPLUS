@@ -26,7 +26,7 @@ function setCustomerCookie(response: Response, token: string): void {
   response.cookie(CUSTOMER_COOKIE, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
     path: '/',
     maxAge: CUSTOMER_SESSION_MS,
   });
@@ -36,7 +36,7 @@ function clearCustomerCookie(response: Response): void {
   response.clearCookie(CUSTOMER_COOKIE, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
     path: '/',
   });
 }

@@ -1,5 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
-import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException, Logger } from '@nestjs/common';
+
+const logger = new Logger('AuthSecurity');
 
 export interface AuthPrincipal {
   id: string;
@@ -20,7 +22,6 @@ export function normalizeKenyaPhone(phone: string): string {
   const digits = phone.replace(/\D/g, '');
   let normalized: string;
   if (/^0[17]\d{8}$/.test(digits)) normalized = `254${digits.slice(1)}`;
-  else if (/^\+[17]\d{8}$/.test(phone.trim())) normalized = `254${digits}`;
   else if (/^254[17]\d{8}$/.test(digits)) normalized = digits;
   else throw new BadRequestException('Enter a valid Kenyan phone number.');
   return `+${normalized}`;
@@ -45,6 +46,7 @@ export function createOpaqueToken(): string {
 export function keyedDigest(value: string, keyName: string): string {
   const key = process.env[keyName];
   if (!key || Buffer.byteLength(key) < 32) {
+    logger.error(`Required security setting ${keyName} is missing or invalid.`);
     throw new InternalServerErrorException('A required security setting is unavailable.');
   }
   return createHmac('sha256', key).update(value).digest('hex');
@@ -52,9 +54,13 @@ export function keyedDigest(value: string, keyName: string): string {
 
 function getNationalIdKey(): Buffer {
   const value = process.env.ID_ENCRYPTION_KEY_BASE64;
-  if (!value) throw new InternalServerErrorException('A required security setting is unavailable.');
+  if (!value) {
+    logger.error('Required security setting ID_ENCRYPTION_KEY_BASE64 is missing.');
+    throw new InternalServerErrorException('A required security setting is unavailable.');
+  }
   const key = Buffer.from(value, 'base64');
   if (key.length !== 32 || key.toString('base64').replace(/=+$/, '') !== value.replace(/=+$/, '')) {
+    logger.error('Required security setting ID_ENCRYPTION_KEY_BASE64 is invalid.');
     throw new InternalServerErrorException('A required security setting is unavailable.');
   }
   return key;
@@ -73,6 +79,10 @@ export function encryptNationalId(nationalId: string): string {
 }
 
 export function decryptNationalId(encrypted: string): string {
+  return decryptSensitiveValue(encrypted);
+}
+
+export function decryptSensitiveValue(encrypted: string): string {
   const [version, ivPart, tagPart, ciphertextPart] = encrypted.split(':');
   if (version !== 'v1' || !ivPart || !tagPart || !ciphertextPart) {
     throw new InternalServerErrorException('Protected data could not be read.');

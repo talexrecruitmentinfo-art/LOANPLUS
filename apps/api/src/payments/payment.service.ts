@@ -9,7 +9,12 @@ import {
 import { LedgerAccountType, PaymentStatus, PaymentType, Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { encryptSensitiveValue, hashToken, normalizeKenyaPhone } from '../auth/security.util';
+import {
+  decryptSensitiveValue,
+  encryptSensitiveValue,
+  hashToken,
+  normalizeKenyaPhone,
+} from '../auth/security.util';
 import { LedgerService } from '../ledger/ledger.service';
 import { MpesaService } from './mpesa.service';
 import { InitiateActivationPaymentDto } from './payment.dto';
@@ -147,8 +152,8 @@ export class PaymentService {
       const providerRequest = await this.mpesa.initiateStkPush({
         amountKes,
         phoneNumber: phoneNumber.slice(1),
-        accountReference: payment.internalReference,
-        description: 'LoanPlus account activation',
+        accountReference: payment.internalReference.slice(-12),
+        description: 'Activation',
         callbackUrl,
       });
       await this.prisma.activationPaymentRequest.update({
@@ -207,13 +212,13 @@ export class PaymentService {
       where: { callbackTokenHash },
       include: { paymentTransaction: true },
     });
-    if (!request || !request.checkoutRequestId || request.expiresAt <= new Date()) {
-      throw new NotFoundException('Payment callback is invalid or expired.');
+    if (!request || !request.checkoutRequestId || !request.merchantRequestId) {
+      throw new NotFoundException('Payment callback is invalid.');
     }
     if (callback.CheckoutRequestID !== request.checkoutRequestId) {
       throw new ForbiddenException('Payment callback did not match the requested transaction.');
     }
-    if (request.merchantRequestId && callback.MerchantRequestID !== request.merchantRequestId) {
+    if (callback.MerchantRequestID !== request.merchantRequestId) {
       throw new ForbiddenException('Payment callback did not match the requested transaction.');
     }
 
@@ -225,17 +230,45 @@ export class PaymentService {
     if (priorEvent) return { ResultCode: 0, ResultDesc: 'Accepted' };
 
     const providerStatus = await this.mpesa.queryStkStatus(request.checkoutRequestId);
-    if (providerStatus.resultCode !== callback.ResultCode) {
+    if (
+      providerStatus.checkoutRequestId !== request.checkoutRequestId ||
+      providerStatus.checkoutRequestId !== callback.CheckoutRequestID ||
+      providerStatus.merchantRequestId !== request.merchantRequestId ||
+      providerStatus.merchantRequestId !== callback.MerchantRequestID ||
+      providerStatus.resultCode !== callback.ResultCode
+    ) {
       throw new ServiceUnavailableException('M-Pesa callback could not be reconciled with provider status.');
     }
     const receiptValue = this.getCallbackItem(callback, 'MpesaReceiptNumber');
-    const receipt = receiptValue === null ? null : String(receiptValue);
+    const receipt = typeof receiptValue === 'string' ? receiptValue : null;
     const amount = this.getCallbackItem(callback, 'Amount');
     const isConfirmed = providerStatus.resultCode === 0;
-    if (isConfirmed && (!receipt || Number(amount) !== request.paymentTransaction.amountKes)) {
-      throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested amount.');
+    if (isConfirmed) {
+      const phoneNumber = this.getCallbackItem(callback, 'PhoneNumber');
+      if (
+        request.paymentTransaction.currency !== 'KES' ||
+        typeof amount !== 'number' ||
+        !Number.isSafeInteger(amount) ||
+        amount !== request.paymentTransaction.amountKes ||
+        typeof receipt !== 'string' ||
+        !/^[A-Za-z0-9]{6,32}$/.test(receipt) ||
+        (typeof phoneNumber !== 'number' && typeof phoneNumber !== 'string')
+      ) {
+        throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
+      }
+      let expectedPhone: string;
+      let confirmedPhone: string;
+      try {
+        if (!request.phoneNumberCiphertext) throw new Error('Payment phone number is unavailable.');
+        expectedPhone = normalizeKenyaPhone(decryptSensitiveValue(request.phoneNumberCiphertext));
+        confirmedPhone = normalizeKenyaPhone(String(phoneNumber));
+      } catch {
+        throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
+      }
+      if (expectedPhone !== confirmedPhone) {
+        throw new ServiceUnavailableException('M-Pesa confirmation did not match the requested payment.');
+      }
     }
-
     const now = new Date();
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -245,7 +278,7 @@ export class PaymentService {
             paymentTransactionId: request.paymentTransactionId,
             payloadHash,
             providerResultCode: String(providerStatus.resultCode),
-            providerReceiptReference: receipt,
+            providerReceiptReference: null,
           },
         });
         const changed = await tx.paymentTransaction.updateMany({
@@ -253,7 +286,7 @@ export class PaymentService {
           data: {
             status: isConfirmed ? PaymentStatus.CONFIRMED : PaymentStatus.FAILED,
             providerReference: request.checkoutRequestId,
-            receiptReference: isConfirmed ? receipt : null,
+            receiptReference: null,
             confirmedAt: isConfirmed ? now : null,
             failureCode: isConfirmed ? null : `MPESA_RESULT_${providerStatus.resultCode}`,
           },
@@ -312,7 +345,11 @@ export class PaymentService {
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        return { ResultCode: 0, ResultDesc: 'Accepted' };
+        const duplicateEvent = await this.prisma.paymentCallbackEvent.findFirst({
+          where: { activationPaymentRequestId: request.id, payloadHash },
+          select: { id: true },
+        });
+        if (duplicateEvent) return { ResultCode: 0, ResultDesc: 'Accepted' };
       }
       throw error;
     }
@@ -344,11 +381,33 @@ export class PaymentService {
       !callback ||
       typeof callback.CheckoutRequestID !== 'string' ||
       typeof callback.MerchantRequestID !== 'string' ||
-      !/^\d+$/.test(String(callback.ResultCode)) ||
+      typeof callback.ResultCode !== 'number' ||
+      !Number.isSafeInteger(callback.ResultCode) ||
+      callback.ResultCode < 0 ||
+      typeof callback.ResultDesc !== 'string' ||
       (callback.CallbackMetadata !== undefined &&
-        !Array.isArray((callback.CallbackMetadata as { Item?: unknown[] }).Item))
+        (!callback.CallbackMetadata ||
+          typeof callback.CallbackMetadata !== 'object' ||
+          !Array.isArray((callback.CallbackMetadata as { Item?: unknown[] }).Item)))
     ) {
       throw new BadRequestException('Invalid M-Pesa callback.');
+    }
+    const items = (callback.CallbackMetadata as { Item?: unknown[] } | undefined)?.Item;
+    if (items) {
+      const names = new Set<string>();
+      for (const item of items) {
+        if (
+          !item ||
+          typeof item !== 'object' ||
+          typeof (item as { Name?: unknown }).Name !== 'string' ||
+          !['string', 'number'].includes(typeof (item as { Value?: unknown }).Value)
+        ) {
+          throw new BadRequestException('Invalid M-Pesa callback.');
+        }
+        const name = (item as { Name: string }).Name;
+        if (names.has(name)) throw new BadRequestException('Invalid M-Pesa callback.');
+        names.add(name);
+      }
     }
     return callback as unknown as MpesaCallback;
   }
@@ -396,8 +455,17 @@ export class PaymentService {
     } catch {
       throw new ServiceUnavailableException('M-Pesa callback URL is not configured.');
     }
-    if (process.env.NODE_ENV === 'production' && baseUrl.protocol !== 'https:') {
-      throw new ServiceUnavailableException('M-Pesa callback URL must use HTTPS.');
+    if (process.env.NODE_ENV === 'production') {
+      if (
+        baseUrl.protocol !== 'https:' ||
+        baseUrl.username ||
+        baseUrl.password ||
+        baseUrl.search ||
+        baseUrl.hash ||
+        !/(?:^|\/)api\/v1\/payments\/mpesa\/callback\/?$/.test(baseUrl.pathname)
+      ) {
+        throw new ServiceUnavailableException('M-Pesa callback URL must be the public HTTPS payment callback route.');
+      }
     }
     baseUrl.pathname = `${baseUrl.pathname.replace(/\/$/, '')}/${callbackToken}`;
     return baseUrl.toString();

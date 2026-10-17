@@ -1,7 +1,10 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
+  InternalServerErrorException,
+  Logger,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -36,6 +39,9 @@ const ADMIN_SESSION_MS = 8 * 60 * 60 * 1000;
 const OTP_TTL_MS = 5 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync('loanplus-invalid-credential-timing-padding', 12);
+const logger = new Logger('AuthService');
+const PRISMA_CONNECTIVITY_ERROR_CODES = new Set(['P1001', 'P1002', 'P1008', 'P1017', 'P2024']);
+const PRISMA_SCHEMA_ERROR_CODES = new Set(['P2021', 'P2022']);
 
 type SessionResult<T> = { token: string; principal: T };
 
@@ -47,6 +53,44 @@ export class AuthService {
   ) {}
 
   async registerCustomer(
+    dto: RegisterCustomerDto,
+    ipAddress?: string,
+  ): Promise<SessionResult<Pick<User, 'id' | 'fullName' | 'email' | 'identityStatus' | 'referralCode'>>> {
+    try {
+      return await this.registerCustomerRecord(dto, ipAddress);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError
+      ) {
+        if (PRISMA_CONNECTIVITY_ERROR_CODES.has(error.code)) {
+          logger.error(`Applicant registration database connectivity failed (Prisma code ${error.code}).`);
+          throw new ServiceUnavailableException('Registration service is temporarily unavailable.');
+        }
+        if (PRISMA_SCHEMA_ERROR_CODES.has(error.code)) {
+          logger.error(`Applicant registration database schema mismatch (Prisma code ${error.code}).`);
+          throw new InternalServerErrorException('Registration could not be completed.');
+        }
+        logger.error(`Applicant registration database operation failed (Prisma code ${error.code}).`);
+        throw new InternalServerErrorException('Registration could not be completed.');
+      }
+
+      if (
+        error instanceof Prisma.PrismaClientUnknownRequestError ||
+        error instanceof Prisma.PrismaClientInitializationError ||
+        error instanceof Prisma.PrismaClientRustPanicError
+      ) {
+        logger.error(`Applicant registration database configuration or connection failed (${error.constructor.name}).`);
+        throw new ServiceUnavailableException('Registration service is temporarily unavailable.');
+      }
+
+      logger.error('Applicant registration failed due to an unexpected internal error.');
+      throw new InternalServerErrorException('Registration could not be completed.');
+    }
+  }
+
+  private async registerCustomerRecord(
     dto: RegisterCustomerDto,
     ipAddress?: string,
   ): Promise<SessionResult<Pick<User, 'id' | 'fullName' | 'email' | 'identityStatus' | 'referralCode'>>> {
@@ -73,11 +117,18 @@ export class AuthService {
     if (duplicate) throw new ConflictException('Some of the details provided are already registered.');
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
-    const termsVersion = process.env.TERMS_VERSION ?? 'draft-v1';
-    const privacyVersion = process.env.PRIVACY_VERSION ?? 'draft-v1';
-    if (process.env.NODE_ENV === 'production' && (termsVersion.startsWith('draft-') || privacyVersion.startsWith('draft-'))) {
+    const configuredTermsVersion = process.env.TERMS_VERSION;
+    const configuredPrivacyVersion = process.env.PRIVACY_VERSION;
+    if (
+      process.env.NODE_ENV === 'production' &&
+      (!configuredTermsVersion || configuredTermsVersion.startsWith('draft-') ||
+        !configuredPrivacyVersion || configuredPrivacyVersion.startsWith('draft-'))
+    ) {
+      logger.error('Applicant registration requires approved TERMS_VERSION and PRIVACY_VERSION settings.');
       throw new ServiceUnavailableException('Registration is not configured.');
     }
+    const termsVersion = configuredTermsVersion ?? 'draft-v1';
+    const privacyVersion = configuredPrivacyVersion ?? 'draft-v1';
     const createdAt = new Date();
     const token = createOpaqueToken();
     try {
@@ -229,6 +280,7 @@ export class AuthService {
   async requestSuperadminOtp(dto: SuperadminPasswordDto, ipAddress?: string): Promise<{ challengeId: string }> {
     const email = normalizeEmail(dto.email);
     const configuredEmail = process.env.SUPERADMIN_EMAIL ? normalizeEmail(process.env.SUPERADMIN_EMAIL) : '';
+    if (!configuredEmail) logger.error('Required Superadmin setting SUPERADMIN_EMAIL is missing.');
     const admin = configuredEmail ? await this.prisma.superadminUser.findUnique({ where: { email } }) : null;
     const passwordMatches = await bcrypt.compare(dto.password, admin?.passwordHash ?? DUMMY_PASSWORD_HASH);
     if (!admin || email !== configuredEmail || !admin.isActive || !admin.emailVerifiedAt || !passwordMatches) {
@@ -263,6 +315,7 @@ export class AuthService {
       });
       await this.recordAdminAudit(admin.id, 'OTP_DELIVERY', 'FAILURE', ipAddress);
       await this.recordAuthAudit('SUPERADMIN', admin.id, 'OTP_DELIVERY', 'FAILURE', ipAddress);
+      logger.error('Superadmin OTP email delivery failed (email provider unavailable).');
       throw new ServiceUnavailableException('Administrator verification is unavailable.');
     }
 

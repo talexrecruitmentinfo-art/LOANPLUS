@@ -8,6 +8,32 @@ The `app` Compose profile builds the Next.js and NestJS containers. It runs migr
 
 In restricted Docker-outside-of-Docker environments, peer-container networking may be unavailable even when published host ports work. The default `DATABASE_HOST=postgres` uses normal Compose service DNS; only when required by that environment, set `DATABASE_HOST=host.docker.internal` and ensure the DB port is securely published. Do not use the host-gateway override in a normal production deployment.
 
+## Local database environment
+
+The repository's local environment pattern is a root `.env` copied from `.env.example`; `.env` is ignored by Git. The Prisma schema resolves `DATABASE_URL` and `DIRECT_URL` from the process environment. For Codespaces, configure both as Codespaces secrets/environment variables so they are injected into terminal processes. For local commands, make sure the variables are exported in the shell before invoking Prisma; do not paste their values into command history. Do not put connection strings in `prisma/schema.prisma`: the datasource must use `env("DATABASE_URL")` and `env("DIRECT_URL")`.
+
+- `DATABASE_URL` is the API/runtime connection. For Supabase, configure the pooler URL and its provider-recommended runtime pool options.
+- `DIRECT_URL` is the Prisma direct connection used by migration tooling. For Supabase, configure the direct PostgreSQL connection, not the pooler endpoint.
+
+The API package supplies a no-connect preflight:
+
+```sh
+pnpm --filter @loanplus/api db:preflight
+```
+
+It reports presence and URL syntax, hostname, port, database name, expected Supabase username format, pooler classification, password presence, and whether URL-reserved password characters may need encoding. It never prints credentials or attempts a database connection. It also checks whether both URLs identify the expected project and database. A successful preflight verifies configuration only, not connectivity.
+
+For Supabase project `kgvsekredvzepeewocxl`, the expected shared/session pooler username for `DATABASE_URL` is `postgres.kgvsekredvzepeewocxl`; the direct `DIRECT_URL` username is normally `postgres`. The direct host should identify this project's `db` endpoint. If the preflight cannot confirm these, open the project's **Connect** dialog in Supabase, copy the runtime pooler string for `DATABASE_URL` and the direct PostgreSQL string for `DIRECT_URL`, and compare them with the diagnostic's non-secret fields. If the direct endpoint is unavailable from the current network, follow Supabase's displayed connection guidance rather than substituting a guessed host or username.
+
+The migration status and read-only database diagnostic are separate commands that do connect:
+
+```sh
+pnpm --filter @loanplus/api exec prisma migrate status
+pnpm --filter @loanplus/api db:diagnose
+```
+
+Prisma uses `DATABASE_URL` for the runtime datasource and `DIRECT_URL` for direct migration connections, as configured in `apps/api/prisma/schema.prisma`. Add or update each Codespaces secret separately in the repository's **Settings > Secrets and variables > Codespaces** page; do not replace unrelated secrets. Rebuild/restart the Codespace so updated values are available to terminal processes, then run the preflight again. Do not paste connection strings into commands, shell history, logs, or source files.
+
 ## Render API deployment
 
 The repository uses pnpm 12.3.4 (`packageManager` in the root manifest and `pnpm-lock.yaml`). Configure the existing Render Node web service with root directory `.` and Node `24.21.0`. Do not use `yarn` as the build command. Set:
@@ -25,7 +51,20 @@ pnpm --filter @loanplus/api start:prod
 
 Set the Render health check path to `/api/v1/health/ready`. `/api/v1/health` reports process health only; `/api/v1/health/ready` makes a minimal `SELECT 1` query via the runtime Prisma client and returns only a generic healthy/unavailable response. The service binds to `0.0.0.0` and uses Render's `PORT` value, with `API_PORT` retained as the local fallback. The pre-deploy migration command needs both database connection variables and a Render plan that supports pre-deploy commands; otherwise run the same migration command manually as an authorized deployment step before starting the release. Never run migrations from every application instance at startup.
 
-Configure `NODE_ENV=production`, `DATABASE_URL`, `DIRECT_URL`, `WEB_ORIGIN`, `ID_ENCRYPTION_KEY_BASE64`, `ID_HASH_KEY`, `OTP_HASH_KEY`, `TERMS_VERSION`, `PRIVACY_VERSION`, `SUPERADMIN_EMAIL`, `SUPERADMIN_EMAIL_VERIFIED`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` as Render environment values. For Supabase project `kgvsekredvzepeewocxl`, use its pooler URL as `DATABASE_URL` for application runtime connections and its direct PostgreSQL URL as `DIRECT_URL` for Prisma migration commands. The Prisma schema's `url` maps to `DATABASE_URL`; `directUrl` maps to `DIRECT_URL`. Configure both as Render secrets; never print them or pass them as build arguments. Use non-draft approved terms/privacy versions, independent generated keys, a verified Superadmin mailbox, and a verified email sender. For the `loanplus-mnfs` Vercel project, set `WEB_ORIGIN=https://loanplus-mnfs.vercel.app` (origin only: no trailing slash or path); confirm this is the project's assigned production domain under Vercel Settings > Domains and substitute its canonical production origin if it differs. The API uses this one exact origin for credentialed CORS, authentication origin checks, and generated links; it does not allow arbitrary origins. Render provides `PORT`; do not hardcode it.
+Configure `NODE_ENV=production`, `DATABASE_URL`, `DIRECT_URL`, `WEB_ORIGIN`, `ID_ENCRYPTION_KEY_BASE64`, `ID_HASH_KEY`, `OTP_HASH_KEY`, `TERMS_VERSION`, `PRIVACY_VERSION`, `SUPERADMIN_EMAIL`, `SUPERADMIN_EMAIL_VERIFIED`, `RESEND_API_KEY`, and `RESEND_FROM` as Render environment values. For Supabase project `kgvsekredvzepeewocxl`, use its pooler URL as `DATABASE_URL` for application runtime connections and its direct PostgreSQL URL as `DIRECT_URL` for Prisma migration commands. The Prisma schema's `url` maps to `DATABASE_URL`; `directUrl` maps to `DIRECT_URL`. Configure both as Render secrets; never print them or pass them as build arguments.
+
+Applicant registration specifically requires:
+
+- `ID_HASH_KEY`: independent random secret of at least 32 bytes, used as the HMAC key to protect the National ID lookup digest. Missing or undersized values cause the generic “A required security setting is unavailable” 500 during registration.
+- `ID_ENCRYPTION_KEY_BASE64`: base64 encoding of exactly 32 random bytes, used for authenticated encryption of the National ID. Missing or invalid values cause the same generic 500 later in registration.
+- `TERMS_VERSION` and `PRIVACY_VERSION`: approved, non-draft versions, stored with consent records. Missing or `draft-` values block registration in production.
+- `DATABASE_URL`: reachable application/runtime PostgreSQL connection; required for lookup and transactional account/session/consent writes.
+- `WEB_ORIGIN`: exact deployed frontend origin for CORS and same-origin checks. For `loanplus-mnfs`, confirm `https://loanplus-mnfs.vercel.app` in Vercel Settings > Domains and configure exactly that origin (no path or trailing slash). A mismatch blocks browser registration.
+- `NODE_ENV=production`: ensures production cookies are Secure and cross-site compatible.
+
+`DIRECT_URL` is required for Prisma migration commands but is not used for applicant registration queries. `OTP_HASH_KEY` is for Superadmin OTP, not applicant registration. Resend is used for mail flows, but registration does not send a verification email. Keep all secrets in Render's environment settings. Do not replace missing values with defaults, sample values, or credentials from `.env.example`. Render provides `PORT`; do not hardcode it.
+
+The registration API logs only the failing security variable name or a generic database/unexpected dependency classification; it does not log environment values, connection URLs, query parameters, request bodies, or exception messages. The client receives a generic response for security-key failures and database errors.
 
 The API's read-only database diagnostic compares application tables and migration records against the checked-in schema and migration directory names:
 
@@ -45,7 +84,27 @@ NEXT_PUBLIC_API_URL=https://loanplus-api.onrender.com/api/v1
 
 The web app makes its API requests from client-side pages with `credentials: 'include'`. Since the default Vercel and Render hostnames are cross-site, production authentication cookies use `SameSite=None; Secure`; local development keeps `SameSite=Strict`. Credentialed CORS remains limited to the exact `WEB_ORIGIN`. Browser privacy settings that block third-party cookies may still prevent sessions on the default cross-site hostnames; a same-site custom frontend/API domain pair is the reliable option where that restriction matters.
 
-For a separately approved M-Pesa production rollout, the API also reads `MPESA_ENVIRONMENT`, `MPESA_LIVE_ENABLED`, `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_SHORT_CODE`, `MPESA_PASSKEY`, and `MPESA_CALLBACK_URL`. Keep credentials in Render secrets; set the callback base to the public HTTPS `/api/v1/payments/mpesa/callback` path. Do not enable live processing until Daraja credentials, callback reachability, customer policy, and payment reconciliation have been verified. `REDIS_URL` and `DATABASE_HOST` are not read by the API application.
+For a separately approved M-Pesa production rollout, the API reads `MPESA_ENVIRONMENT`, `MPESA_LIVE_ENABLED`, `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_SHORT_CODE`, `MPESA_PASSKEY`, and `MPESA_CALLBACK_URL`. Set `MPESA_ENVIRONMENT` explicitly to `sandbox` or `production`; the API no longer selects sandbox implicitly when it is missing. Set `MPESA_LIVE_ENABLED=true` only for an authorized live rollout with `MPESA_ENVIRONMENT=production`; otherwise live requests are blocked. Keep consumer credentials and passkey in Render secrets. Set the callback base to the public HTTPS `https://loanplus-api.onrender.com/api/v1/payments/mpesa/callback` route without a trailing payment token; the API appends a unique per-payment token for each STK request. The current callback route is `POST /api/v1/payments/mpesa/callback/:token`. Do not enable live processing until Daraja credentials, provider-side callback delivery, customer policy, and payment reconciliation have been verified. `REDIS_URL` and `DATABASE_HOST` are not read by the API application.
+
+The activation flow calls Daraja STK Push at `/mpesa/stkpush/v1/processrequest` and performs an STK query at `/mpesa/stkpushquery/v1/query` from the API; there is no public query endpoint. An accepted STK initiation leaves the internal payment `PENDING`. The callback is matched to its unguessable per-payment token and stored checkout/merchant request IDs. The implementation requires a successful query response to return those same IDs and a success result before confirming a payment; this response shape still needs confirmation against an actual Daraja sandbox response. The callback amount and phone are checked against the server-stored payment amount and encrypted phone; currency must be KES; a receipt must be a string in the expected format. The query result used here does not independently verify transaction amount, phone, or receipt. Consequently the callback’s receipt is not considered provider-authenticated and is deliberately not stored as a receipt or exposed as verified; independent receipt verification would require a separately supported and verified provider source. Callback metadata is not treated as a cryptographic signature. Payment state transition, ledger posting, activation, and audit record are committed in one database transaction, conditional on the payment still being `PENDING`. Duplicate callbacks cannot post financial effects again. No callback-reconciliation background worker is configured, so provider callbacks and operational monitoring are required.
+
+C2B v2 validation/confirmation URLs and C2B transaction processing are not implemented in this repository. Do not configure or use C2B v2 to accept customer payments until separate matching, validation, confirmation, idempotency, and ledger processing are implemented and tested.
+
+### Daraja sandbox verification
+
+Use a separate staging API and an isolated PostgreSQL test/staging database; never point the sandbox exercise at production customer or ledger data. Configure these API variables on the staging Render service using credentials created in the Daraja sandbox application:
+
+- `MPESA_ENVIRONMENT=sandbox`
+- `MPESA_LIVE_ENABLED=false`
+- `MPESA_CONSUMER_KEY`
+- `MPESA_CONSUMER_SECRET`
+- `MPESA_SHORT_CODE`
+- `MPESA_PASSKEY`
+- `MPESA_CALLBACK_URL=https://<staging-api-host>/api/v1/payments/mpesa/callback`
+
+Also configure the staging database and required ID encryption key. Migrations, if needed, may only be applied to the isolated staging database. `MPESA_CALLBACK_URL` is a base path: LoanPlus appends a per-payment opaque token and sends the resulting HTTPS URL as the STK `CallBackURL`; do not put a token in Render settings. No C2B callback registration is used for this STK flow.
+
+After staging is isolated and configured, deploy the candidate API there, configure approved activation terms and the required KES ledger accounts in that staging database, then sign in using a staging applicant. Initiate one low-value Daraja sandbox STK prompt with a sandbox-supported test number, approve it only using Safaricom’s documented sandbox procedure, and verify the payment remains `PENDING` immediately after the initiation response. Confirm the callback reaches the staging route, the server-side STK query returns matching stored checkout and merchant IDs plus success, and the payment changes to `CONFIRMED` with exactly one ledger transaction and activation change. Replay the same callback in staging and confirm the status/ledger are unchanged. Repeat with a declined/cancelled sandbox prompt and confirm it remains unpaid. If query identifiers are absent or differ, the implementation intentionally fails closed and the flow is not verified. Never perform this exercise against the production Render service or with a real customer number.
 
 ## Security key generation
 
@@ -62,11 +121,17 @@ Use separate outputs for `OTP_HASH_KEY`, `ID_HASH_KEY`, `ID_ENCRYPTION_KEY_BASE6
 
 ## Superadmin bootstrap
 
-Set `SUPERADMIN_EMAIL` to an operator-controlled, verified mailbox and set `SUPERADMIN_EMAIL_VERIFIED=true` only after the operator confirms mailbox ownership. With database and the OTP/email keys configured, run `pnpm --filter @loanplus/api superadmin:bootstrap` from an interactive terminal and enter the password at its hidden prompt. Public Superadmin registration is not provided. Configure SMTP before the first login; an email delivery failure denies sign-in.
+Set `SUPERADMIN_EMAIL` to an operator-controlled, verified mailbox and set `SUPERADMIN_EMAIL_VERIFIED=true` only after the operator confirms mailbox ownership. To provision an initial account, securely load the intended database's `DATABASE_URL` plus these two settings into the operator shell, then run `pnpm --filter @loanplus/api superadmin:bootstrap` from an interactive terminal and enter the password at its hidden prompt. The command uses `DATABASE_URL` through Prisma Client; `DIRECT_URL` is not used for bootstrap. It normalizes the configured email, hashes the password with bcrypt (cost 12), and creates an active `SUPERADMIN` record with its email marked verified. It refuses to create a duplicate or modify any existing account, so it cannot be used to reset an existing password. Never pass the password as a command-line argument or put secrets in shell history. Public Superadmin registration is not provided. `OTP_HASH_KEY`, `RESEND_API_KEY`, and `RESEND_FROM` are needed for login/OTP delivery, not for account creation; configure Resend before the first login, as an email delivery failure denies sign-in.
+
+For Render Superadmin sign-in, configure `SUPERADMIN_EMAIL`, `OTP_HASH_KEY`, `RESEND_API_KEY`, and `RESEND_FROM`. `OTP_HASH_KEY` must be an independent random secret of at least 32 bytes. Add and verify your sending domain in the Resend dashboard, complete its required DNS records, then set `RESEND_FROM` to a valid address on that verified domain (for example, `LoanPlus <no-reply@your-verified-domain>`). Do not use the example domain for real delivery. `SUPERADMIN_EMAIL_VERIFIED` is only required by the one-time bootstrap command; verification is stored on the Superadmin database record and is checked at sign-in. Sign-in also requires the runtime `DATABASE_URL`, exact `WEB_ORIGIN`, and `NODE_ENV=production` for secure cross-site session cookies. `DIRECT_URL` is only for Prisma migration tooling. Never place API secrets in Vercel.
+
+`MailService` uses the Resend HTTPS API for both Superadmin OTP and applicant password-reset emails. It reads `RESEND_API_KEY` and `RESEND_FROM` at send time, validates both, uses a bounded request timeout, and logs only sanitized network/status/configuration diagnostics. It does not log API keys, OTPs, email contents, or provider response bodies. If Resend rejects delivery or is unavailable, the OTP challenge is invalidated and no authenticated session is created. Applicant email/password login continues independently and does not require OTP.
+
+The Superadmin page uses `POST /api/v1/admin/auth/password` to request an email challenge and `POST /api/v1/admin/auth/otp` to verify it. A successful verification sets an HttpOnly `lp_admin_session` cookie; protected access is checked through `GET /api/v1/admin/auth/me`. Vercel Production must have `NEXT_PUBLIC_API_URL=https://loanplus-api.onrender.com/api/v1`; Render `WEB_ORIGIN` must be exactly `https://loanplus-mnfs.vercel.app`. The production build-time API URL is public, not a secret. The API source enforces throttling on both challenge endpoints and limits OTP guesses; production delivery, mailbox receipt, and authenticated access must still be verified after deployment.
 
 ## Security boundary
 
-No production customer authentication, Superadmin OTP delivery, M-Pesa transactions, lending decisions, or financial ledger are active in this foundation. `/api/v1/health/ready` checks only database connectivity, not full application or production readiness. Keep live financial actions disabled until provider callbacks, idempotency, reconciliation, approvals, and audit controls are implemented and reviewed.
+Production Superadmin OTP delivery and authenticated login have not been end-to-end verified. `/api/v1/health/ready` checks only database connectivity, not full application or production readiness. Keep live financial actions disabled until provider callbacks, idempotency, reconciliation, approvals, and audit controls are implemented and reviewed.
 
 The current source includes database-backed customer/admin authentication, manual loan review, manual disbursement confirmation, a balanced ledger poster, and a Daraja STK Push adapter. M-Pesa has only been integration-tested with a mocked provider response. It has not been verified against Daraja sandbox/live credentials. Activation payments remain unavailable until an operator approves the purpose/refundability/accounting/customer disclosure, configures the required ledger accounts, and supplies a publicly reachable HTTPS callback URL. The Docker example keeps live M-Pesa processing disabled.
 

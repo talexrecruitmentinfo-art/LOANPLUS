@@ -40,7 +40,7 @@ export class SuperadminAuthController {
     response.cookie(ADMIN_COOKIE, result.token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
       path: '/',
       maxAge: ADMIN_SESSION_MS,
     });
@@ -66,7 +66,7 @@ export class SuperadminAuthController {
     response.clearCookie(ADMIN_COOKIE, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
       path: '/',
     });
     return { data: { loggedOut: true } };

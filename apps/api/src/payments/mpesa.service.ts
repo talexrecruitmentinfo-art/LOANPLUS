@@ -6,6 +6,8 @@ interface StkInitiationResult {
 }
 
 export interface StkStatusResult {
+  checkoutRequestId: string;
+  merchantRequestId: string;
   resultCode: number;
   resultDescription: string;
 }
@@ -26,7 +28,13 @@ export class MpesaService {
     callbackUrl: string;
   }): Promise<StkInitiationResult> {
     const { apiBase, shortCode, passkey } = this.getConfiguration();
-    if (!Number.isSafeInteger(input.amountKes) || input.amountKes <= 0) {
+    if (
+      !Number.isSafeInteger(input.amountKes) ||
+      input.amountKes <= 0 ||
+      !/^254[17]\d{8}$/.test(input.phoneNumber) ||
+      !/^[A-Za-z0-9]{1,12}$/.test(input.accountReference) ||
+      !/^[A-Za-z0-9 ]{1,13}$/.test(input.description)
+    ) {
       throw new ServiceUnavailableException('M-Pesa payment initiation is unavailable.');
     }
     const accessToken = await this.getAccessToken(apiBase);
@@ -52,7 +60,11 @@ export class MpesaService {
     if (
       response.ResponseCode !== '0' ||
       typeof response.CheckoutRequestID !== 'string' ||
-      typeof response.MerchantRequestID !== 'string'
+      response.CheckoutRequestID.length === 0 ||
+      response.CheckoutRequestID.length > 100 ||
+      typeof response.MerchantRequestID !== 'string' ||
+      response.MerchantRequestID.length === 0 ||
+      response.MerchantRequestID.length > 100
     ) {
       throw new ServiceUnavailableException('M-Pesa did not accept the payment request.');
     }
@@ -77,10 +89,27 @@ export class MpesaService {
         CheckoutRequestID: checkoutRequestId,
       }),
     });
-    if (response.ResponseCode !== '0' || !/^\d+$/.test(String(response.ResultCode))) {
+    const resultCode = Number(response.ResultCode);
+    if (
+      response.ResponseCode !== '0' ||
+      typeof response.CheckoutRequestID !== 'string' ||
+      response.CheckoutRequestID.length === 0 ||
+      response.CheckoutRequestID.length > 100 ||
+      typeof response.MerchantRequestID !== 'string' ||
+      response.MerchantRequestID.length === 0 ||
+      response.MerchantRequestID.length > 100 ||
+      !/^\d+$/.test(String(response.ResultCode)) ||
+      !Number.isSafeInteger(resultCode) ||
+      typeof response.ResultDesc !== 'string'
+    ) {
       throw new ServiceUnavailableException('M-Pesa could not confirm the payment status.');
     }
-    return { resultCode: Number(response.ResultCode), resultDescription: String(response.ResultDesc ?? '') };
+    return {
+      checkoutRequestId: response.CheckoutRequestID,
+      merchantRequestId: response.MerchantRequestID,
+      resultCode,
+      resultDescription: response.ResultDesc,
+    };
   }
 
   private async getAccessToken(apiBase: string): Promise<string> {
@@ -98,7 +127,8 @@ export class MpesaService {
   }
 
   private getConfiguration(): { apiBase: string; shortCode: string; passkey: string } {
-    const environment = process.env.MPESA_ENVIRONMENT ?? 'sandbox';
+    const environment = process.env.MPESA_ENVIRONMENT;
+    if (!environment) throw new ServiceUnavailableException('M-Pesa environment is not configured.');
     if (environment === 'production' && process.env.MPESA_LIVE_ENABLED !== 'true') {
       throw new ServiceUnavailableException('Live M-Pesa processing is disabled.');
     }

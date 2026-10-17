@@ -1,6 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Prisma, PrismaClient } from '@prisma/client';
+import { assertDatabaseConfiguration } from '../src/database-config';
 
 const EXPECTED_TABLES = [
   'users',
@@ -34,6 +35,14 @@ const EXPECTED_TABLES = [
 ] as const;
 
 async function diagnoseDatabase(): Promise<void> {
+  try {
+    assertDatabaseConfiguration();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : 'Database configuration is invalid.');
+    process.exitCode = 1;
+    return;
+  }
+
   const prisma = new PrismaClient();
 
   try {

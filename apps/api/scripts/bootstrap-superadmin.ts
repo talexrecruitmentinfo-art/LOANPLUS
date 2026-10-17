@@ -1,5 +1,60 @@
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import { isEmail } from 'class-validator';
+
+interface SuperadminProvisioningClient {
+  superadminUser: {
+    findUnique(args: { where: { email: string }; select: { id: true } }): Promise<{ id: string } | null>;
+    create(args: {
+      data: { email: string; passwordHash: string; role: 'SUPERADMIN'; emailVerifiedAt: Date };
+    }): Promise<unknown>;
+  };
+}
+
+export class BootstrapInputError extends Error {}
+
+export async function provisionSuperadmin(
+  prisma: SuperadminProvisioningClient,
+  emailSetting: string | undefined,
+  emailVerifiedSetting: string | undefined,
+  password: string,
+): Promise<string> {
+  const configuredEmail = emailSetting?.trim().toLowerCase();
+  if (
+    !configuredEmail ||
+    configuredEmail.length > 254 ||
+    !isEmail(configuredEmail) ||
+    emailVerifiedSetting !== 'true'
+  ) {
+    throw new BootstrapInputError(
+      'Set SUPERADMIN_EMAIL to a valid address and explicitly confirm mailbox verification with SUPERADMIN_EMAIL_VERIFIED=true.',
+    );
+  }
+  if (Buffer.byteLength(password, 'utf8') < 12 || Buffer.byteLength(password, 'utf8') > 72) {
+    throw new BootstrapInputError('Password must be between 12 and 72 UTF-8 bytes.');
+  }
+
+  const existing = await prisma.superadminUser.findUnique({
+    where: { email: configuredEmail },
+    select: { id: true },
+  });
+  if (existing) {
+    throw new BootstrapInputError(
+      'A Superadmin already exists for SUPERADMIN_EMAIL; this command never changes an existing account.',
+    );
+  }
+
+  const passwordHash = await bcrypt.hash(password, 12);
+  await prisma.superadminUser.create({
+    data: {
+      email: configuredEmail,
+      passwordHash,
+      role: 'SUPERADMIN',
+      emailVerifiedAt: new Date(),
+    },
+  });
+  return configuredEmail;
+}
 
 function readHidden(label: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -39,31 +94,27 @@ function readHidden(label: string): Promise<string> {
 }
 
 async function bootstrap(): Promise<void> {
-  const configuredEmail = process.env.SUPERADMIN_EMAIL?.trim().toLowerCase();
-  if (!configuredEmail || process.env.SUPERADMIN_EMAIL_VERIFIED !== 'true') {
-    throw new Error('Set SUPERADMIN_EMAIL and explicitly confirm mailbox verification with SUPERADMIN_EMAIL_VERIFIED=true.');
-  }
-
   const password = await readHidden('New Superadmin password (hidden): ');
-  if (Buffer.byteLength(password, 'utf8') < 12 || Buffer.byteLength(password, 'utf8') > 72) {
-    throw new Error('Password must be between 12 and 72 UTF-8 bytes.');
-  }
-
   const prisma = new PrismaClient();
   try {
-    const existing = await prisma.superadminUser.findUnique({ where: { email: configuredEmail } });
-    if (existing) throw new Error('A Superadmin already exists for the configured email.');
-    const passwordHash = await bcrypt.hash(password, 12);
-    await prisma.superadminUser.create({
-      data: { email: configuredEmail, passwordHash, emailVerifiedAt: new Date() },
-    });
-    process.stdout.write(`Superadmin provisioned for ${configuredEmail}.\n`);
+    await provisionSuperadmin(
+      prisma,
+      process.env.SUPERADMIN_EMAIL,
+      process.env.SUPERADMIN_EMAIL_VERIFIED,
+      password,
+    );
+    process.stdout.write('Superadmin provisioned.\n');
   } finally {
     await prisma.$disconnect();
   }
 }
 
-void bootstrap().catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.message : 'Superadmin bootstrap failed.'}\n`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  void bootstrap().catch((error: unknown) => {
+    const message = error instanceof BootstrapInputError
+      ? error.message
+      : 'Superadmin provisioning failed; sensitive database error details are suppressed.';
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+  });
+}

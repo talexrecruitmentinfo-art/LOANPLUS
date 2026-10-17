@@ -18,15 +18,22 @@ describe('activation payment database integration', () => {
   let customerIds: string[] = [];
   let clearingAccountId: string;
   let callbackUrl = '';
+  let merchantRequestId = '';
   let providerResultCode = 0;
 
   const mpesa = {
     assertConfiguredForPayments: jest.fn(),
     initiateStkPush: jest.fn(async (input: { callbackUrl: string }) => {
       callbackUrl = input.callbackUrl;
-      return { checkoutRequestId: `ws_CO_${randomBytes(8).toString('hex')}`, merchantRequestId: `mr_${randomBytes(8).toString('hex')}` };
+      merchantRequestId = `mr_${randomBytes(8).toString('hex')}`;
+      return { checkoutRequestId: `ws_CO_${randomBytes(8).toString('hex')}`, merchantRequestId };
     }),
-    queryStkStatus: jest.fn(async () => ({ resultCode: providerResultCode, resultDescription: 'Test fixture provider response' })),
+    queryStkStatus: jest.fn(async (checkoutRequestId: string) => ({
+      checkoutRequestId,
+      merchantRequestId,
+      resultCode: providerResultCode,
+      resultDescription: 'Test fixture provider response',
+    })),
   } as unknown as MpesaService;
 
   beforeAll(async () => {
@@ -143,7 +150,13 @@ describe('activation payment database integration', () => {
           MerchantRequestID: request.merchantRequestId,
           ResultCode: 0,
           ResultDesc: 'Success',
-          CallbackMetadata: { Item: [{ Name: 'Amount', Value: 50 }, { Name: 'MpesaReceiptNumber', Value: 'TESTRECEIPT1' }] },
+          CallbackMetadata: {
+            Item: [
+              { Name: 'Amount', Value: 50 },
+              { Name: 'MpesaReceiptNumber', Value: 'TESTRECEIPT1' },
+              { Name: 'PhoneNumber', Value: 254712345678 },
+            ],
+          },
         },
       },
     };

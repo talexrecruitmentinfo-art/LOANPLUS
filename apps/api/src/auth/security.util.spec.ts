@@ -19,8 +19,17 @@ describe('authentication security utilities', () => {
   it('normalizes email and Kenyan phone numbers', () => {
     expect(normalizeEmail('  Loan.User@Example.com ')).toBe('loan.user@example.com');
     expect(normalizeKenyaPhone('0712 345 678')).toBe('+254712345678');
+    expect(normalizeKenyaPhone('0712-345-678')).toBe('+254712345678');
+    expect(normalizeKenyaPhone('(0712) 345 678')).toBe('+254712345678');
+    expect(normalizeKenyaPhone('+254712345678')).toBe('+254712345678');
     expect(normalizeKenyaPhone('+254112345678')).toBe('+254112345678');
+    expect(normalizeKenyaPhone('0112345678')).toBe('+254112345678');
+    expect(() => normalizeKenyaPhone('+712345678')).toThrow(BadRequestException);
+    expect(() => normalizeKenyaPhone('+112345678')).toThrow(BadRequestException);
+    expect(() => normalizeKenyaPhone('071234567')).toThrow(BadRequestException);
+    expect(() => normalizeKenyaPhone('07123456789')).toThrow(BadRequestException);
     expect(() => normalizeKenyaPhone('12345')).toThrow(BadRequestException);
+    expect(() => normalizeKenyaPhone('0712abc5678')).toThrow(BadRequestException);
   });
 
   it('normalizes National ID numbers without accepting malformed values', () => {
