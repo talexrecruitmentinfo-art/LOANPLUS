@@ -59,12 +59,25 @@ Applicant registration specifically requires:
 
 - `ID_HASH_KEY`: independent random secret of at least 32 bytes, used as the HMAC key to protect the National ID lookup digest. Missing or undersized values cause the generic “A required security setting is unavailable” 500 during registration.
 - `ID_ENCRYPTION_KEY_BASE64`: base64 encoding of exactly 32 random bytes, used for authenticated encryption of the National ID. Missing or invalid values cause the same generic 500 later in registration.
-- `TERMS_VERSION` and `PRIVACY_VERSION`: approved, non-draft versions, stored with consent records. Missing or `draft-` values block registration in production.
+- `TERMS_VERSION` and `PRIVACY_VERSION`: approved, non-draft versions, stored with consent records. Missing or `draft-` values block registration in production. The API rejects missing values and values beginning with `draft-` in production; it does not validate a particular version syntax or verify that a version corresponds to an approved document.
 - `DATABASE_URL`: reachable application/runtime PostgreSQL connection; required for lookup and transactional account/session/consent writes.
 - `WEB_ORIGIN`: exact deployed frontend origin for CORS and same-origin checks. For `loanplus-mnfs`, confirm `https://loanplus-mnfs.vercel.app` in Vercel Settings > Domains and configure exactly that origin (no path or trailing slash). A mismatch blocks browser registration.
 - `NODE_ENV=production`: ensures production cookies are Secure and cross-site compatible.
 
 `DIRECT_URL` is required for Prisma migration commands but is not used for applicant registration queries. `OTP_HASH_KEY` is for Superadmin OTP, not applicant registration. Resend is used for mail flows, but registration does not send a verification email. Keep all secrets in Render's environment settings. Do not replace missing values with defaults, sample values, or credentials from `.env.example`. Render provides `PORT`; do not hardcode it.
+
+## Terms and privacy documents: owner review required
+
+The customer-facing [Terms and Conditions](../apps/web/src/app/terms/page.tsx) and [Privacy Policy](../apps/web/src/app/privacy/page.tsx) are drafts pending owner and legal/compliance review. They are not legal approval, a production-ready customer contract, or evidence of a licence, registration, or regulatory approval. The example environment uses `TERMS_VERSION=draft-v1` and `PRIVACY_VERSION=draft-v1` for development only; do not copy these values into production.
+
+Before collecting real customer data, onboarding applicants, enabling lending, or enabling live payments:
+
+- Complete every bracketed owner-input item in both pages. In particular, confirm the contracting/controller entity and registration details, service and privacy contacts, registered address, eligibility/age rules, regulatory/licensing status and applicability, complaint and escalation process, and final approval/effective dates.
+- Have Kenyan legal/compliance reviewers verify the terms against actual loan offers, repayment operations, all product charges, disbursement, collection practices, activation payment/refund disclosures, and applicable consumer and financial-services requirements. The customer repayment collection flow is not currently implemented; repayment schedules and records exist in the data model, so confirm the actual operational contract before launch.
+- Have the privacy reviewer confirm purposes and lawful bases, actual processors and recipients, processing/cross-border locations and safeguards, any required controller/processor registration or DPO/impact assessment, retention and deletion schedule, rights-handling workflow, cookie disclosure, and incident/breach process. The implementation includes personal, identity, loan, payment, referral, support, authentication, and audit data; it does not currently perform identity-document verification or credit-reference bureau checks.
+- Publish the reviewed documents, assign each the exact approved version and effective date, and update the corresponding production environment variables to those approved version identifiers. Keep the registration validation in place: missing or `draft-` policy versions intentionally block production registration. Version identifiers are not a substitute for approval or for publishing the matching documents.
+
+The exact version values cannot be selected from the current repository: neither page contains an approved version, and both explicitly remain drafts. The owner must assign versions after approval and ensure the values configured in production exactly identify the published documents.
 
 The registration API logs only the failing security variable name or a generic database/unexpected dependency classification, with a per-request correlation ID. Registration responses include that ID in the `X-Request-Id` header so an applicant can provide it to an operator. Logs do not include environment values, connection URLs, query parameters, request bodies, or exception messages. The client receives a generic response for security-key failures and database errors.
 

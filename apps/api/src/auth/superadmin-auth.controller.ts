@@ -11,7 +11,14 @@ const ADMIN_SESSION_MS = 8 * 60 * 60 * 1000;
 
 function assertSameOrigin(request: AuthenticatedRequest): void {
   const expected = new URL(process.env.WEB_ORIGIN ?? 'http://localhost:3000').origin;
-  if (request.headers.origin !== expected) {
+  const requestOrigin = request.headers.origin;
+  if (!requestOrigin) return;
+
+  try {
+    if (new URL(requestOrigin).origin !== expected) {
+      throw new ForbiddenException('Request origin rejected.');
+    }
+  } catch {
     throw new ForbiddenException('Request origin rejected.');
   }
 }
