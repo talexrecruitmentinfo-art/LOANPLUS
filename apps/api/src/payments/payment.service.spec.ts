@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  InternalServerErrorException,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -190,7 +191,11 @@ describe('M-Pesa payment callback reconciliation', () => {
     function createService(
       amount: number | null,
       configuredPolicy: typeof policy | null,
-      destination: { businessShortCode: string; transactionType: 'CustomerPayBillOnline' } | null,
+      destination: {
+        businessShortCode: string;
+        tillNumber: string | null;
+        transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
+      } | null,
     ) {
       const prisma = {
         systemSetting: {
@@ -233,7 +238,60 @@ describe('M-Pesa payment callback reconciliation', () => {
       const service = createService(50, policy, null);
       await expect(service.getActivationTerms()).resolves.toMatchObject({
         available: false,
+        availabilityReason: null,
         terms: { termsVersion: 'activation-v1', customerDisclosure: policy.customerDisclosure },
+      });
+    });
+
+    it('surfaces a safe, actionable provider configuration reason to the activation page', async () => {
+      const prisma = {
+        systemSetting: {
+          findUnique: jest.fn(async ({ where }: { where: { key: string } }) =>
+            where.key === 'activation.amount_kes' ? { value: 50 } : { value: policy }),
+        },
+      } as unknown as PrismaService;
+      const service = new PaymentService(
+        prisma,
+        {
+          getCustomerPaymentDestination: jest.fn(() => {
+            throw new InternalServerErrorException('MPESA_CONSUMER_KEY must be configured in the API environment.');
+          }),
+        } as unknown as MpesaService,
+        {} as LedgerService,
+      );
+
+      await expect(service.getActivationTerms()).resolves.toMatchObject({
+        available: false,
+        availabilityReason: 'MPESA_CONSUMER_KEY must be configured in the API environment.',
+        terms: { termsVersion: 'activation-v1' },
+      });
+    });
+
+    it('reports the live-payment gate after validating the production destination settings', async () => {
+      const prisma = {
+        systemSetting: {
+          findUnique: jest.fn(async ({ where }: { where: { key: string } }) =>
+            where.key === 'activation.amount_kes' ? { value: 50 } : { value: policy }),
+        },
+      } as unknown as PrismaService;
+      const service = new PaymentService(
+        prisma,
+        {
+          getCustomerPaymentDestination: jest.fn(() => {
+            throw new ServiceUnavailableException(
+              'Production M-Pesa payments are disabled. Set MPESA_LIVE_ENABLED=true only after production configuration and deployment verification.',
+            );
+          }),
+        } as unknown as MpesaService,
+        {} as LedgerService,
+      );
+
+      await expect(service.getActivationTerms()).resolves.toMatchObject({
+        available: false,
+        availabilityReason: expect.stringContaining('MPESA_LIVE_ENABLED=true'),
+        amountKes: 50,
+        currency: 'KES',
+        terms: { termsVersion: 'activation-v1' },
       });
     });
 
@@ -241,14 +299,32 @@ describe('M-Pesa payment callback reconciliation', () => {
       process.env.MPESA_CALLBACK_URL = 'https://api.example.com/api/v1/payments/mpesa/callback';
       const service = createService(50, policy, {
         businessShortCode: '174379',
+        tillNumber: null,
         transactionType: 'CustomerPayBillOnline',
       });
       await expect(service.getActivationTerms()).resolves.toMatchObject({
         available: true,
         amountKes: 50,
         currency: 'KES',
-        destination: { businessShortCode: '174379', transactionType: 'CustomerPayBillOnline' },
+        destination: { businessShortCode: '174379', tillNumber: null, transactionType: 'CustomerPayBillOnline' },
         terms: { termsVersion: 'activation-v1' },
+      });
+    });
+
+    it('exposes the confirmed Buy Goods shortcode and Till independently', async () => {
+      process.env.MPESA_CALLBACK_URL = 'https://loanplus-api.onrender.com/api/v1/payments/mpesa/callback';
+      const service = createService(50, policy, {
+        businessShortCode: '5526990',
+        tillNumber: '3400188',
+        transactionType: 'CustomerBuyGoodsOnline',
+      });
+      await expect(service.getActivationTerms()).resolves.toMatchObject({
+        available: true,
+        destination: {
+          businessShortCode: '5526990',
+          tillNumber: '3400188',
+          transactionType: 'CustomerBuyGoodsOnline',
+        },
       });
     });
   });

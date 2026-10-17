@@ -63,6 +63,13 @@ describe('buildMpesaCallbackUrl', () => {
     );
   });
 
+  it('returns an actionable error for an invalid callback URL in production', () => {
+    process.env.MPESA_CALLBACK_URL = 'http://loanplus-api.onrender.com/api/v1/payments/mpesa/callback';
+    expect(() => buildMpesaCallbackUrl('opaque-token')).toThrow(
+      'MPESA_CALLBACK_URL must be a public HTTPS URL ending exactly in /api/v1/payments/mpesa/callback',
+    );
+  });
+
   it('allows an HTTPS public staging host when the runtime is not production', () => {
     process.env.NODE_ENV = 'staging';
     process.env.WEB_ORIGIN = 'https://loanplus-web-staging.onrender.com';

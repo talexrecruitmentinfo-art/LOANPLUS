@@ -8,6 +8,7 @@ describe('M-Pesa Daraja HTTP integration', () => {
     'MPESA_CONSUMER_KEY',
     'MPESA_CONSUMER_SECRET',
     'MPESA_SHORT_CODE',
+    'MPESA_TILL_NUMBER',
     'MPESA_PASSKEY',
     'MPESA_TRANSACTION_TYPE',
   ] as const;
@@ -92,6 +93,7 @@ describe('M-Pesa Daraja HTTP integration', () => {
   it('uses the production Daraja endpoint only when live processing is explicitly enabled', async () => {
     process.env.MPESA_ENVIRONMENT = 'production';
     process.env.MPESA_LIVE_ENABLED = 'true';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerPayBillOnline';
     fetchMock.mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }));
     fetchMock.mockResolvedValueOnce(mockJson({
       ResponseCode: '0',
@@ -114,8 +116,16 @@ describe('M-Pesa Daraja HTTP integration', () => {
 
   it('fails closed when live processing is not explicitly enabled', async () => {
     process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerPayBillOnline';
     expect(() => mpesa.assertConfiguredForPayments()).toThrow(ServiceUnavailableException);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports disabled production live payments in payment destination validation', () => {
+    process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_LIVE_ENABLED = 'false';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerPayBillOnline';
+    expect(() => mpesa.getCustomerPaymentDestination()).toThrow('MPESA_LIVE_ENABLED=true');
   });
 
   it('rejects invalid amount, phone, account reference, and transaction description before HTTP calls', async () => {
@@ -144,6 +154,17 @@ describe('M-Pesa Daraja HTTP integration', () => {
     delete process.env.MPESA_CONSUMER_SECRET;
     expect(() => mpesa.assertConfiguredForPayments()).toThrow('MPESA_CONSUMER_SECRET');
     expect(() => mpesa.assertConfiguredForPayments()).toThrow(InternalServerErrorException);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['MPESA_SHORT_CODE', 'Missing MPESA_SHORT_CODE'],
+    ['MPESA_PASSKEY', 'Missing MPESA_PASSKEY'],
+    ['MPESA_CONSUMER_KEY', 'Missing MPESA_CONSUMER_KEY'],
+    ['MPESA_CONSUMER_SECRET', 'Missing MPESA_CONSUMER_SECRET'],
+  ] as const)('returns an actionable configuration error when %s is missing', (name, _message) => {
+    delete process.env[name];
+    expect(() => mpesa.getCustomerPaymentDestination()).toThrow(name);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -184,6 +205,90 @@ describe('M-Pesa Daraja HTTP integration', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('requires an explicit production transaction type matching the configured business account', () => {
+    process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_LIVE_ENABLED = 'true';
+    delete process.env.MPESA_TRANSACTION_TYPE;
+    expect(() => mpesa.assertConfiguredForPayments()).toThrow('MPESA_TRANSACTION_TYPE');
+  });
+
+  it('accepts fully configured production PayBill and Buy Goods destinations without making HTTP requests', () => {
+    process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_LIVE_ENABLED = 'true';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerPayBillOnline';
+    expect(mpesa.getCustomerPaymentDestination()).toEqual({
+      businessShortCode: '174379',
+      tillNumber: null,
+      transactionType: 'CustomerPayBillOnline',
+    });
+
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerBuyGoodsOnline';
+    process.env.MPESA_SHORT_CODE = '5526990';
+    process.env.MPESA_TILL_NUMBER = '3400188';
+    expect(mpesa.getCustomerPaymentDestination()).toEqual({
+      businessShortCode: '5526990',
+      tillNumber: '3400188',
+      transactionType: 'CustomerBuyGoodsOnline',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('uses the confirmed production shortcode, Till, Buy Goods type, passkey, endpoints, and callback', async () => {
+    process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_LIVE_ENABLED = 'true';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerBuyGoodsOnline';
+    process.env.MPESA_SHORT_CODE = '5526990';
+    delete process.env.MPESA_TILL_NUMBER;
+
+    expect(() => mpesa.getCustomerPaymentDestination()).toThrow('MPESA_TILL_NUMBER');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    process.env.MPESA_TILL_NUMBER = '3400188';
+    fetchMock
+      .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
+      .mockResolvedValueOnce(mockJson({
+        ResponseCode: '0',
+        CheckoutRequestID: 'ws_CO_till',
+        MerchantRequestID: 'mr_till',
+      }));
+    await mpesa.initiateStkPush({
+      amountKes: 50,
+      phoneNumber: '254712345678',
+      accountReference: 'LPA123456789',
+      description: 'Activation',
+      callbackUrl: 'https://loanplus-api.onrender.com/api/v1/payments/mpesa/callback/token',
+    });
+
+    expect(fetchMock.mock.calls[0][0])
+      .toBe('https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials');
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe('https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest');
+    const body = JSON.parse(String(init.body)) as Record<string, string | number>;
+    expect(body).toMatchObject({
+      BusinessShortCode: '5526990',
+      TransactionType: 'CustomerBuyGoodsOnline',
+      PartyB: '3400188',
+      CallBackURL: 'https://loanplus-api.onrender.com/api/v1/payments/mpesa/callback/token',
+    });
+    expect(Buffer.from(String(body.Password), 'base64').toString())
+      .toBe(`5526990test-passkey-only${body.Timestamp}`);
+  });
+
+  it.each([
+    ['MPESA_SHORT_CODE', 'not-numeric', 'MPESA_SHORT_CODE'],
+    ['MPESA_TILL_NUMBER', '55-26990', 'MPESA_TILL_NUMBER'],
+  ] as const)('rejects malformed production destination setting %s', (name, value, errorSetting) => {
+    process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_LIVE_ENABLED = 'true';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerBuyGoodsOnline';
+    process.env.MPESA_SHORT_CODE = '123456';
+    process.env.MPESA_SHORT_CODE = '5526990';
+    process.env.MPESA_TILL_NUMBER = '3400188';
+    process.env[name] = value;
+    expect(() => mpesa.getCustomerPaymentDestination()).toThrow(errorSetting);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('queries the provider status using the configured shortcode and requires numeric result status', async () => {
     fetchMock
       .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
@@ -217,5 +322,55 @@ describe('M-Pesa Daraja HTTP integration', () => {
         ResultDesc: 'Invalid result',
       }));
     await expect(mpesa.queryStkStatus('ws_CO_test')).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('queries production STK status with the configured BusinessShortCode, not the Till number', async () => {
+    process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_LIVE_ENABLED = 'true';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerBuyGoodsOnline';
+    process.env.MPESA_SHORT_CODE = '5526990';
+    process.env.MPESA_TILL_NUMBER = '3400188';
+    fetchMock
+      .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
+      .mockResolvedValueOnce(mockJson({
+        ResponseCode: '0',
+        CheckoutRequestID: 'ws_CO_production',
+        MerchantRequestID: 'mr_production',
+        ResultCode: '0',
+        ResultDesc: 'Confirmed',
+      }));
+
+    await expect(mpesa.queryStkStatus('ws_CO_production')).resolves.toMatchObject({
+      checkoutRequestId: 'ws_CO_production',
+      resultCode: 0,
+    });
+    expect(fetchMock.mock.calls[0][0])
+      .toBe('https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials');
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe('https://api.safaricom.co.ke/mpesa/stkpushquery/v1/query');
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      BusinessShortCode: '5526990',
+      CheckoutRequestID: 'ws_CO_production',
+    });
+  });
+
+  it('allows status reconciliation when live STK initiation is disabled', async () => {
+    process.env.MPESA_ENVIRONMENT = 'production';
+    process.env.MPESA_LIVE_ENABLED = 'false';
+    process.env.MPESA_TRANSACTION_TYPE = 'CustomerBuyGoodsOnline';
+    process.env.MPESA_SHORT_CODE = '5526990';
+    process.env.MPESA_TILL_NUMBER = '3400188';
+    fetchMock
+      .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
+      .mockResolvedValueOnce(mockJson({
+        ResponseCode: '0',
+        CheckoutRequestID: 'ws_CO_reconcile',
+        MerchantRequestID: 'mr_reconcile',
+        ResultCode: '1032',
+        ResultDesc: 'Cancelled',
+      }));
+
+    await expect(mpesa.queryStkStatus('ws_CO_reconcile')).resolves.toMatchObject({ resultCode: 1032 });
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.safaricom.co.ke/mpesa/stkpushquery/v1/query');
   });
 });

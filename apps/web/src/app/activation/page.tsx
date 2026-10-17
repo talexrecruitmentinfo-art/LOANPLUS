@@ -7,10 +7,12 @@ import { apiRequest } from '@/lib/api';
 
 interface ActivationTerms {
   available: boolean;
+  availabilityReason: string | null;
   amountKes: number;
   currency: 'KES';
   destination: null | {
     businessShortCode: string;
+    tillNumber: string | null;
     transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
   };
   terms: null | {
@@ -191,8 +193,9 @@ export default function ActivationPage() {
                       <div>
                         <dt>M-Pesa business destination</dt>
                         <dd>
-                          {terms.destination.transactionType === 'CustomerBuyGoodsOnline' ? 'Till' : 'Paybill'}{' '}
-                          {terms.destination.businessShortCode}
+                          {terms.destination.transactionType === 'CustomerBuyGoodsOnline'
+                            ? `Till ${terms.destination.tillNumber}`
+                            : `Paybill ${terms.destination.businessShortCode}`}
                         </dd>
                       </div>
                     )}
@@ -208,9 +211,9 @@ export default function ActivationPage() {
                 <p className="eyebrow">PAYMENT NOT AVAILABLE</p>
                 <h2>Activation cannot be paid right now.</h2>
                 <p>
-                  {terms.terms
-                    ? 'The payment provider or business destination is not configured for this environment.'
-                    : 'Approved activation terms are not configured. No payment request has been created.'}
+                  {terms.availabilityReason ?? (terms.terms
+                    ? 'Payment provider configuration is incomplete.'
+                    : 'Approved activation terms are not configured.')}
                   {' '}Contact LoanPlus support before retrying.
                 </p>
               </div>

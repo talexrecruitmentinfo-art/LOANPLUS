@@ -60,21 +60,39 @@ export class PaymentService {
       policy.termsVersion.trim().length > 0 &&
       !/^draft(?:[-_. ]|$)/i.test(policy.termsVersion.trim()) &&
       amount?.value === ACTIVATION_AMOUNT_KES;
-    const destination = termsApproved ? this.mpesa.getCustomerPaymentDestination() : null;
-    let callbackConfigured = false;
+    if (!termsApproved) {
+      return {
+        available: false,
+        availabilityReason: 'Approved KES 50 activation policy is not configured.',
+        amountKes: ACTIVATION_AMOUNT_KES,
+        currency: 'KES',
+        destination: null,
+        terms: null,
+      };
+    }
+
+    let destination: ReturnType<MpesaService['getCustomerPaymentDestination']> | null = null;
+    let availabilityReason: string | null = null;
+    try {
+      destination = this.mpesa.getCustomerPaymentDestination();
+    } catch (error) {
+      if (error instanceof InternalServerErrorException || error instanceof ServiceUnavailableException) {
+        availabilityReason = error.message;
+      } else {
+        throw error;
+      }
+    }
     if (destination) {
       try {
         buildMpesaCallbackUrl('configuration-check');
-        callbackConfigured = true;
       } catch (error) {
-        if (!(error instanceof ServiceUnavailableException) && !(error instanceof InternalServerErrorException)) throw error;
+        if (error instanceof InternalServerErrorException) availabilityReason = error.message;
+        else throw error;
       }
     }
-    if (!termsApproved) {
-      return { available: false, amountKes: ACTIVATION_AMOUNT_KES, currency: 'KES', destination: null, terms: null };
-    }
     return {
-      available: destination !== null && callbackConfigured,
+      available: destination !== null && availabilityReason === null,
+      availabilityReason,
       amountKes: ACTIVATION_AMOUNT_KES,
       currency: 'KES',
       destination,

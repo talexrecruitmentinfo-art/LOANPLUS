@@ -14,6 +14,7 @@ export interface StkStatusResult {
 
 export interface MpesaCustomerPaymentDestination {
   businessShortCode: string;
+  tillNumber: string | null;
   transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
 }
 
@@ -23,18 +24,15 @@ export class MpesaService {
     this.getConfiguration();
     this.requiredSetting('MPESA_CONSUMER_KEY');
     this.requiredSetting('MPESA_CONSUMER_SECRET');
+    this.assertLivePaymentsEnabled();
   }
 
-  getCustomerPaymentDestination(): MpesaCustomerPaymentDestination | null {
-    try {
-      const { shortCode, transactionType } = this.getConfiguration();
-      this.requiredSetting('MPESA_CONSUMER_KEY');
-      this.requiredSetting('MPESA_CONSUMER_SECRET');
-      return { businessShortCode: shortCode, transactionType };
-    } catch (error) {
-      if (error instanceof ServiceUnavailableException || error instanceof InternalServerErrorException) return null;
-      throw error;
-    }
+  getCustomerPaymentDestination(): MpesaCustomerPaymentDestination {
+    const { shortCode, tillNumber, transactionType } = this.getConfiguration();
+    this.requiredSetting('MPESA_CONSUMER_KEY');
+    this.requiredSetting('MPESA_CONSUMER_SECRET');
+    this.assertLivePaymentsEnabled();
+    return { businessShortCode: shortCode, tillNumber, transactionType };
   }
 
   async initiateStkPush(input: {
@@ -44,7 +42,10 @@ export class MpesaService {
     description: string;
     callbackUrl: string;
   }): Promise<StkInitiationResult> {
-    const { apiBase, shortCode, passkey, transactionType } = this.getConfiguration();
+    const { apiBase, shortCode, partyB, passkey, transactionType } = this.getConfiguration();
+    this.requiredSetting('MPESA_CONSUMER_KEY');
+    this.requiredSetting('MPESA_CONSUMER_SECRET');
+    this.assertLivePaymentsEnabled();
     if (
       !Number.isSafeInteger(input.amountKes) ||
       input.amountKes <= 0 ||
@@ -67,7 +68,7 @@ export class MpesaService {
         TransactionType: transactionType,
         Amount: input.amountKes,
         PartyA: input.phoneNumber,
-        PartyB: shortCode,
+        PartyB: partyB,
         PhoneNumber: input.phoneNumber,
         CallBackURL: input.callbackUrl,
         AccountReference: input.accountReference,
@@ -93,6 +94,8 @@ export class MpesaService {
 
   async queryStkStatus(checkoutRequestId: string): Promise<StkStatusResult> {
     const { apiBase, shortCode, passkey } = this.getConfiguration();
+    this.requiredSetting('MPESA_CONSUMER_KEY');
+    this.requiredSetting('MPESA_CONSUMER_SECRET');
     const accessToken = await this.getAccessToken(apiBase);
     const timestamp = this.formatTimestamp(new Date());
     const password = Buffer.from(`${shortCode}${passkey}${timestamp}`).toString('base64');
@@ -146,6 +149,8 @@ export class MpesaService {
   private getConfiguration(): {
     apiBase: string;
     shortCode: string;
+    partyB: string;
+    tillNumber: string | null;
     passkey: string;
     transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
   } {
@@ -153,24 +158,47 @@ export class MpesaService {
     if (!environment) {
       throw new InternalServerErrorException('MPESA_ENVIRONMENT must be set to sandbox or production.');
     }
-    if (environment === 'production' && process.env.MPESA_LIVE_ENABLED !== 'true') {
-      throw new ServiceUnavailableException('Live M-Pesa processing is disabled.');
-    }
     if (environment !== 'sandbox' && environment !== 'production') {
       throw new InternalServerErrorException('MPESA_ENVIRONMENT must be set to sandbox or production.');
     }
-    const transactionType = process.env.MPESA_TRANSACTION_TYPE ?? 'CustomerPayBillOnline';
+    const transactionType = process.env.MPESA_TRANSACTION_TYPE ??
+      (environment === 'sandbox' ? 'CustomerPayBillOnline' : undefined);
+    if (!transactionType) {
+      throw new InternalServerErrorException(
+        'MPESA_TRANSACTION_TYPE must explicitly match the production Safaricom business account.',
+      );
+    }
     if (transactionType !== 'CustomerPayBillOnline' && transactionType !== 'CustomerBuyGoodsOnline') {
       throw new InternalServerErrorException(
-        'MPESA_TRANSACTION_TYPE must be CustomerPayBillOnline or CustomerBuyGoodsOnline.',
+        'MPESA_TRANSACTION_TYPE must be CustomerPayBillOnline or CustomerBuyGoodsOnline and match the Safaricom business account.',
       );
+    }
+    const shortCode = this.requiredSetting('MPESA_SHORT_CODE');
+    if (!/^\d{1,20}$/.test(shortCode)) {
+      throw new InternalServerErrorException('MPESA_SHORT_CODE must contain only digits.');
+    }
+    const tillNumber = transactionType === 'CustomerBuyGoodsOnline'
+      ? this.requiredSetting('MPESA_TILL_NUMBER')
+      : null;
+    if (tillNumber !== null && !/^\d{1,20}$/.test(tillNumber)) {
+      throw new InternalServerErrorException('MPESA_TILL_NUMBER must contain only digits.');
     }
     return {
       apiBase: environment === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke',
-      shortCode: this.requiredSetting('MPESA_SHORT_CODE'),
+      shortCode,
+      partyB: tillNumber ?? shortCode,
+      tillNumber,
       passkey: this.requiredSetting('MPESA_PASSKEY'),
       transactionType,
     };
+  }
+
+  private assertLivePaymentsEnabled(): void {
+    if (process.env.MPESA_ENVIRONMENT === 'production' && process.env.MPESA_LIVE_ENABLED !== 'true') {
+      throw new ServiceUnavailableException(
+        'Production M-Pesa payments are disabled. Set MPESA_LIVE_ENABLED=true only after production configuration and deployment verification.',
+      );
+    }
   }
 
   private requiredSetting(name: string): string {
