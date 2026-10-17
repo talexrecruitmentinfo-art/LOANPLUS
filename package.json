@@ -1,0 +1,14 @@
+{
+  "name": "loanplus",
+  "private": true,
+  "packageManager": "pnpm@12.3.4",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @loanplus/api --filter @loanplus/web dev",
+    "build": "pnpm --recursive build",
+    "lint": "pnpm --recursive lint",
+    "typecheck": "pnpm --recursive typecheck",
+    "test": "pnpm --recursive test",
+    "db:generate": "pnpm --filter @loanplus/api db:generate",
+    "db:migrate": "pnpm --filter @loanplus/api db:migrate"
+  }
+}

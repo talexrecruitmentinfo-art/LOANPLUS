@@ -1,0 +1,5 @@
+import Link from 'next/link';
+
+export default function TermsPage() {
+  return <main className="legal-page"><Link className="wordmark" href="/"><span className="brand-mark">L+</span> loanplus</Link><p className="eyebrow">LEGAL INFORMATION · DRAFT</p><h1>Terms and Conditions</h1><p className="legal-warning">This draft is not approved for production use. LoanPlus must publish reviewed legal terms and configure their version before onboarding real customers.</p><h2>Applications and lending</h2><p>Submitting an application does not guarantee eligibility, approval, a loan offer or disbursement. Any offer must clearly state the principal, applicable charges, total repayment amount and due dates before acceptance.</p><h2>Payments</h2><p>No activation amount or payment requirement is currently configured. Payment terms, refundability and accounting treatment must be approved and disclosed before payment processing is enabled.</p><h2>Contact</h2><p>Customer support channels are not yet configured. Do not use this development build for financial transactions.</p></main>;
+}
