@@ -8,7 +8,8 @@ import {
 } from '@nestjs/common';
 import { LoanApplicationStatus, LoanStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { AcceptLoanOfferDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
+import { LedgerService } from '../ledger/ledger.service';
+import { AcceptLoanOfferDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
 
 const OPEN_LOAN_STATUSES = [
   LoanStatus.DISBURSEMENT_PENDING,
@@ -19,7 +20,10 @@ const OPEN_LOAN_STATUSES = [
 
 @Injectable()
 export class LoanService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly ledger: LedgerService,
+  ) {}
 
   async listAvailableProducts() {
     return this.prisma.loanProduct.findMany({
@@ -137,6 +141,24 @@ export class LoanService {
     });
   }
 
+  listLoansAwaitingDisbursement() {
+    return this.prisma.loan.findMany({
+      where: { status: LoanStatus.DISBURSEMENT_PENDING, disbursement: null },
+      select: {
+        id: true,
+        principalKes: true,
+        chargesKes: true,
+        totalRepayableKes: true,
+        status: true,
+        acceptedTermsVersion: true,
+        createdAt: true,
+        user: { select: { id: true, fullName: true, email: true } },
+        application: { select: { product: { select: { name: true, durationDays: true } } } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
   async reviewApplication(id: string, dto: ReviewLoanApplicationDto, reviewerId: string, ipAddress?: string) {
     const application = await this.prisma.loanApplication.findUnique({
       where: { id },
@@ -240,6 +262,87 @@ export class LoanService {
       });
       return loan;
     });
+  }
+
+  async confirmManualDisbursement(
+    loanId: string,
+    dto: ConfirmManualDisbursementDto,
+    reviewerId: string,
+    ipAddress?: string,
+  ) {
+    const loan = await this.prisma.loan.findUnique({
+      where: { id: loanId },
+      include: { application: { include: { product: true } }, disbursement: true },
+    });
+    if (!loan) throw new NotFoundException('Loan account was not found.');
+    if (loan.status !== LoanStatus.DISBURSEMENT_PENDING || loan.disbursement) {
+      throw new ConflictException('This loan is not awaiting manual disbursement confirmation.');
+    }
+    const [cashAccount, receivableAccount] = await Promise.all([
+      this.prisma.ledgerAccount.findUnique({ where: { code: 'DISBURSEMENT_CASH' } }),
+      this.prisma.ledgerAccount.findUnique({ where: { code: 'LOAN_RECEIVABLE' } }),
+    ]);
+    if (
+      !cashAccount || !receivableAccount ||
+      !cashAccount.isActive || !receivableAccount.isActive ||
+      cashAccount.currency !== 'KES' || receivableAccount.currency !== 'KES' ||
+      cashAccount.accountType !== 'ASSET' || receivableAccount.accountType !== 'ASSET'
+    ) {
+      throw new ConflictException('Required KES disbursement ledger accounts are not configured.');
+    }
+    const now = new Date();
+    const dueAt = new Date(now.getTime() + loan.application.product.durationDays * 24 * 60 * 60 * 1000);
+    return this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.loan.updateMany({
+        where: { id: loanId, status: LoanStatus.DISBURSEMENT_PENDING },
+        data: { status: LoanStatus.DISBURSED, disbursedAt: now },
+      });
+      if (claimed.count !== 1) throw new ConflictException('This loan has already been disbursed or cancelled.');
+      const disbursement = await tx.loanDisbursement.create({
+        data: {
+          loanId,
+          amountKes: loan.principalKes,
+          status: 'CONFIRMED',
+          paymentReference: dto.paymentReference.trim(),
+          recordedById: reviewerId,
+          reason: dto.reason.trim(),
+          confirmedAt: now,
+        },
+      });
+      await tx.repaymentSchedule.create({
+        data: {
+          loanId,
+          sequence: 1,
+          principalDueKes: loan.principalKes,
+          chargesDueKes: loan.chargesKes,
+          amountDueKes: loan.totalRepayableKes,
+          dueAt,
+        },
+      });
+      await this.ledger.postWithinTransaction(tx, {
+        idempotencyKey: `loan-disbursement:${loanId}`,
+        transactionType: 'LOAN_DISBURSEMENT',
+        actorType: 'SUPERADMIN',
+        actorId: reviewerId,
+        reason: dto.reason.trim(),
+        lines: [
+          { accountId: receivableAccount.id, debitKes: loan.principalKes, creditKes: 0 },
+          { accountId: cashAccount.id, debitKes: 0, creditKes: loan.principalKes },
+        ],
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId: reviewerId,
+          action: 'LOAN_MANUAL_DISBURSEMENT_CONFIRMED',
+          subjectType: 'LOAN',
+          subjectId: loanId,
+          outcome: 'SUCCESS',
+          reason: dto.reason.trim(),
+          ipAddress: ipAddress?.slice(0, 64),
+        },
+      });
+      return { disbursement, dueAt, status: LoanStatus.DISBURSED };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   private validateProductBounds(minimum: number, maximum: number): void {

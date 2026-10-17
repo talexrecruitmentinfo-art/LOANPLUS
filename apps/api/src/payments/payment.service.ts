@@ -72,10 +72,18 @@ export class PaymentService {
     if (!idempotencyKey || !/^[a-zA-Z0-9._:-]{16,128}$/.test(idempotencyKey)) {
       throw new BadRequestException('A valid Idempotency-Key header is required.');
     }
+    const phoneNumber = normalizeKenyaPhone(dto.phoneNumber);
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ userId, phoneNumber }))
+      .digest('hex');
     const scopedKey = `activation:${userId}:${idempotencyKey}`;
     const existing = await this.prisma.paymentTransaction.findUnique({ where: { idempotencyKey: scopedKey } });
     if (existing) {
-      if (existing.userId !== userId || existing.type !== PaymentType.ACTIVATION) {
+      if (
+        existing.userId !== userId ||
+        existing.type !== PaymentType.ACTIVATION ||
+        existing.requestHash !== requestHash
+      ) {
         throw new ConflictException('The idempotency key has already been used.');
       }
       return { reference: existing.internalReference, status: existing.status, amountKes: existing.amountKes, currency: existing.currency };
@@ -94,7 +102,6 @@ export class PaymentService {
       throw new ServiceUnavailableException('Activation payment terms are not configured.');
     }
 
-    const phoneNumber = normalizeKenyaPhone(dto.phoneNumber);
     const callbackToken = randomBytes(32).toString('base64url');
     const callbackUrl = this.makeCallbackUrl(callbackToken);
     this.mpesa.assertConfiguredForPayments();
@@ -108,6 +115,7 @@ export class PaymentService {
         data: {
           internalReference: `LPA${randomBytes(16).toString('hex').toUpperCase()}`,
           idempotencyKey: scopedKey,
+          requestHash,
           userId,
           type: PaymentType.ACTIVATION,
           amountKes,

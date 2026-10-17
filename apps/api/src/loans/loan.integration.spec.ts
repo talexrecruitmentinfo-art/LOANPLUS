@@ -1,7 +1,8 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { LedgerService } from '../ledger/ledger.service';
 import { LoanService } from './loan.service';
-import { AcceptLoanOfferDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto } from './loan.dto';
+import { AcceptLoanOfferDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto } from './loan.dto';
 import { randomInt, randomBytes } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 
@@ -14,6 +15,7 @@ describe('loan workflow database integration', () => {
   let adminId: string;
   let userId: string;
   let productId: string;
+  let disbursementAccountIds: string[] = [];
 
   beforeAll(async () => {
     if (!databaseUrl) return;
@@ -24,7 +26,7 @@ describe('loan workflow database integration', () => {
     }
     prisma = new PrismaService();
     await prisma.$connect();
-    loans = new LoanService(prisma);
+    loans = new LoanService(prisma, new LedgerService(prisma));
     const suffix = `${Date.now()}-${randomBytes(4).toString('hex')}`;
     const [admin, user] = await Promise.all([
       prisma.superadminUser.create({
@@ -51,13 +53,42 @@ describe('loan workflow database integration', () => {
     ]);
     adminId = admin.id;
     userId = user.id;
+    const accounts = await Promise.all([
+      prisma.ledgerAccount.create({
+        data: { code: 'DISBURSEMENT_CASH', name: 'Test disbursement cash', accountType: 'ASSET' },
+        select: { id: true },
+      }),
+      prisma.ledgerAccount.create({
+        data: { code: 'LOAN_RECEIVABLE', name: 'Test loan receivables', accountType: 'ASSET' },
+        select: { id: true },
+      }),
+    ]);
+    disbursementAccountIds = accounts.map((account) => account.id);
   });
 
   afterAll(async () => {
     if (!databaseUrl || !prisma) return;
     if (userId) {
+      const loans = await prisma.loan.findMany({ where: { userId }, select: { id: true } });
+      const loanIds = loans.map((loan) => loan.id);
+      if (loanIds.length) {
+        await prisma.loanDisbursement.deleteMany({ where: { loanId: { in: loanIds } } });
+        await prisma.repaymentSchedule.deleteMany({ where: { loanId: { in: loanIds } } });
+        const transactions = await prisma.ledgerTransaction.findMany({
+          where: { idempotencyKey: { in: loanIds.map((id) => `loan-disbursement:${id}`) } },
+          select: { id: true },
+        });
+        const transactionIds = transactions.map((transaction) => transaction.id);
+        if (transactionIds.length) {
+          await prisma.ledgerEntry.deleteMany({ where: { ledgerTransactionId: { in: transactionIds } } });
+          await prisma.ledgerTransaction.deleteMany({ where: { id: { in: transactionIds } } });
+        }
+      }
       await prisma.loan.deleteMany({ where: { userId } });
       await prisma.loanApplication.deleteMany({ where: { userId } });
+    }
+    if (disbursementAccountIds.length) {
+      await prisma.ledgerAccount.deleteMany({ where: { id: { in: disbursementAccountIds } } });
     }
     if (productId) await prisma.loanProduct.deleteMany({ where: { id: productId } });
     await prisma.adminAuditLog.deleteMany({ where: { superadminId: adminId } });
@@ -111,5 +142,15 @@ describe('loan workflow database integration', () => {
     expect(loan.totalRepayableKes).toBe(3310);
     expect(loan.status).toBe('DISBURSEMENT_PENDING');
     await expect(loans.acceptOffer(userId, application.id, acceptance)).rejects.toBeInstanceOf(ConflictException);
+
+    const manualDisbursement = Object.assign(new ConfirmManualDisbursementDto(), {
+      paymentReference: `TEST-DISBURSE-${randomBytes(6).toString('hex')}`,
+      reason: 'Integration test records an operator-confirmed manual payout.',
+    });
+    const disbursed = await loans.confirmManualDisbursement(loan.id, manualDisbursement, adminId);
+    expect(disbursed.status).toBe('DISBURSED');
+    expect((await prisma.repaymentSchedule.findUniqueOrThrow({ where: { loanId_sequence: { loanId: loan.id, sequence: 1 } } })).amountDueKes).toBe(3310);
+    expect((await prisma.loan.findUniqueOrThrow({ where: { id: loan.id } })).disbursedAt).not.toBeNull();
+    await expect(loans.confirmManualDisbursement(loan.id, manualDisbursement, adminId)).rejects.toBeInstanceOf(ConflictException);
   });
 });

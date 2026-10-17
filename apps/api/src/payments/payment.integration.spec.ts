@@ -1,4 +1,4 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import { ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { randomBytes, randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -126,6 +126,11 @@ describe('activation payment database integration', () => {
     expect(started.amountKes).toBe(50);
     const repeated = await payments.initiateActivationPayment(customerIds[0], input, 'activation-test-key-0001');
     expect(repeated.reference).toBe(started.reference);
+    await expect(payments.initiateActivationPayment(
+      customerIds[0],
+      Object.assign(new InitiateActivationPaymentDto(), { phoneNumber: '0712345679', termsAccepted: true }),
+      'activation-test-key-0001',
+    )).rejects.toBeInstanceOf(ConflictException);
     expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(1);
 
     const payment = await prisma.paymentTransaction.findUniqueOrThrow({ where: { internalReference: started.reference } });

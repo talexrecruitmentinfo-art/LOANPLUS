@@ -31,7 +31,7 @@ services:
       dockerfile: apps/api/Dockerfile
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://loanplus:${POSTGRES_PASSWORD:-loanplus_dev_only}@postgres:5432/loanplus?schema=public
+      DATABASE_URL: postgresql://loanplus:${POSTGRES_PASSWORD:-loanplus_dev_only}@${DATABASE_HOST:-postgres}:5432/loanplus?schema=public
       REDIS_URL: redis://redis:6379
       API_PORT: 4000
       WEB_ORIGIN: http://localhost:3000
@@ -54,6 +54,8 @@ services:
       MPESA_SHORT_CODE: ${MPESA_SHORT_CODE:-}
       MPESA_PASSKEY: ${MPESA_PASSKEY:-}
       MPESA_CALLBACK_URL: ${MPESA_CALLBACK_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "4000:4000"
     depends_on:
@@ -61,7 +63,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["sh", "-c", "pnpm --filter @loanplus/api db:deploy && pnpm --filter @loanplus/api start:prod"]
+    command: ["sh", "-c", "./apps/api/node_modules/.bin/prisma migrate deploy --schema apps/api/prisma/schema.prisma && node apps/api/dist/src/main.js"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/v1/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s

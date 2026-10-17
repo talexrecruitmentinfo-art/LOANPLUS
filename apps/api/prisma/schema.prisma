@@ -45,6 +45,13 @@ enum LoanStatus {
   CANCELLED
 }
 
+enum DisbursementStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  REVERSED
+}
+
 enum PaymentStatus {
   PENDING
   CONFIRMED
@@ -191,6 +198,7 @@ model SuperadminUser {
   auditEvents AdminAuditLog[]
   reviewedLoanApplications LoanApplication[]
   systemSettings SystemSetting[]
+  loanDisbursements LoanDisbursement[]
 
   @@map("superadmin_users")
 }
@@ -317,15 +325,35 @@ model Loan {
   user                  User       @relation(fields: [userId], references: [id], onDelete: Restrict)
   repaymentSchedules    RepaymentSchedule[]
   repayments            Repayment[]
+  disbursement           LoanDisbursement?
 
   @@index([userId, status])
   @@map("loans")
+}
+
+model LoanDisbursement {
+  id               String             @id @default(cuid())
+  loanId           String             @unique
+  amountKes        Int
+  currency         String             @default("KES") @db.Char(3)
+  status           DisbursementStatus @default(PENDING)
+  paymentReference String             @unique @db.VarChar(100)
+  recordedById     String
+  reason           String             @db.VarChar(500)
+  createdAt        DateTime           @default(now())
+  confirmedAt      DateTime?
+  loan             Loan               @relation(fields: [loanId], references: [id], onDelete: Restrict)
+  recordedBy       SuperadminUser     @relation(fields: [recordedById], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@map("loan_disbursements")
 }
 
 model PaymentTransaction {
   id                String        @id @default(cuid())
   internalReference String        @unique @db.VarChar(40)
   idempotencyKey    String        @unique @db.VarChar(128)
+  requestHash       String?       @db.VarChar(64)
   userId            String
   type              PaymentType
   amountKes         Int

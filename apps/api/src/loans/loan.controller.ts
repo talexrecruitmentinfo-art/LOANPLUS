@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard, SuperadminSessionGuard } from '../auth/session.guard';
-import { AcceptLoanOfferDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
+import { AcceptLoanOfferDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
 import { LoanService } from './loan.service';
 
 @Controller('loans')
@@ -65,6 +65,11 @@ export class AdminLoanController {
     return { data: await this.loans.listApplicationsForReview() };
   }
 
+  @Get('disbursements/pending')
+  async listPendingDisbursements() {
+    return { data: await this.loans.listLoansAwaitingDisbursement() };
+  }
+
   @Patch('applications/:id/decision')
   async review(
     @Param('id') id: string,
@@ -72,5 +77,16 @@ export class AdminLoanController {
     @Req() request: AuthenticatedRequest,
   ) {
     return { data: await this.loans.reviewApplication(id, dto, request.principal!.id, request.ip) };
+  }
+
+  @Post(':id/disbursement/confirm')
+  async confirmManualDisbursement(
+    @Param('id') id: string,
+    @Body() dto: ConfirmManualDisbursementDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return {
+      data: await this.loans.confirmManualDisbursement(id, dto, request.principal!.id, request.ip),
+    };
   }
 }
