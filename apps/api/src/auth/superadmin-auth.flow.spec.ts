@@ -46,8 +46,8 @@ describe('Superadmin email OTP authentication flow', () => {
     email: string;
     passwordHash: string;
     isActive: boolean;
-    emailVerifiedAt: Date;
-    role: 'SUPERADMIN';
+    emailVerifiedAt: Date | null;
+    role: 'SUPERADMIN' | 'NORMAL_USER';
   };
 
   beforeEach(async () => {
@@ -133,7 +133,8 @@ describe('Superadmin email OTP authentication flow', () => {
     };
     const prismaMock = {
       superadminUser: {
-        findUnique: jest.fn(async () => admin),
+        findUnique: jest.fn(async ({ where }: { where: { email: string } }) =>
+          where.email === admin.email ? admin : null),
       },
       superadminOtpChallenge: {
         updateMany: updateChallenges,
@@ -201,6 +202,44 @@ describe('Superadmin email OTP authentication flow', () => {
       ...passwordDto(),
       password: 'incorrect-password',
     })).rejects.toBeInstanceOf(UnauthorizedException);
+
+    expect(sendOtp).not.toHaveBeenCalled();
+    expect(challenges).toHaveLength(0);
+    expect(sessions).toHaveLength(0);
+  });
+
+  it.each(['inactive', 'unverified', 'wrong-role'] as const)(
+    'rejects a %s account before issuing an OTP',
+    async (condition) => {
+      if (condition === 'inactive') admin.isActive = false;
+      if (condition === 'unverified') admin.emailVerifiedAt = null;
+      if (condition === 'wrong-role') admin.role = 'NORMAL_USER';
+
+      await expect(auth.requestSuperadminOtp(passwordDto()))
+        .rejects.toBeInstanceOf(UnauthorizedException);
+
+      expect(sendOtp).not.toHaveBeenCalled();
+      expect(challenges).toHaveLength(0);
+      expect(sessions).toHaveLength(0);
+    },
+  );
+
+  it('rejects an email that does not match the database account', async () => {
+    await expect(auth.requestSuperadminOtp({
+      ...passwordDto(),
+      email: 'different-operator@example.invalid',
+    })).rejects.toBeInstanceOf(UnauthorizedException);
+
+    expect(sendOtp).not.toHaveBeenCalled();
+    expect(challenges).toHaveLength(0);
+    expect(sessions).toHaveLength(0);
+  });
+
+  it('rejects a database account email that does not match SUPERADMIN_EMAIL', async () => {
+    process.env.SUPERADMIN_EMAIL = 'different-operator@example.invalid';
+
+    await expect(auth.requestSuperadminOtp(passwordDto()))
+      .rejects.toBeInstanceOf(UnauthorizedException);
 
     expect(sendOtp).not.toHaveBeenCalled();
     expect(challenges).toHaveLength(0);

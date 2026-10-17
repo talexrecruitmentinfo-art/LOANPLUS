@@ -294,7 +294,14 @@ export class AuthService {
     if (!configuredEmail) logger.error('Required Superadmin setting SUPERADMIN_EMAIL is missing.');
     const admin = configuredEmail ? await this.prisma.superadminUser.findUnique({ where: { email } }) : null;
     const passwordMatches = await bcrypt.compare(dto.password, admin?.passwordHash ?? DUMMY_PASSWORD_HASH);
-    if (!admin || email !== configuredEmail || !admin.isActive || !admin.emailVerifiedAt || !passwordMatches) {
+    if (
+      !admin ||
+      email !== configuredEmail ||
+      admin.role !== 'SUPERADMIN' ||
+      !admin.isActive ||
+      !admin.emailVerifiedAt ||
+      !passwordMatches
+    ) {
       await this.recordAdminAudit(admin?.id, 'LOGIN_PASSWORD', 'FAILURE', ipAddress);
       await this.recordAuthAudit('SUPERADMIN', admin?.id, 'LOGIN_PASSWORD', 'FAILURE', ipAddress);
       throw new UnauthorizedException('Email or password is incorrect.');
