@@ -336,6 +336,25 @@ describe('M-Pesa Daraja HTTP integration', () => {
     await expect(mpesa.queryStkStatus('ws_CO_test')).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
+  it('preserves Safaricom STK Query result code 4999 as a provider processing result', async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
+      .mockResolvedValueOnce(mockJson({
+        ResponseCode: '0',
+        CheckoutRequestID: 'ws_CO_pending',
+        MerchantRequestID: 'mr_pending',
+        ResultCode: '4999',
+        ResultDesc: 'The transaction is being processed.',
+      }));
+
+    await expect(mpesa.queryStkStatus('ws_CO_pending')).resolves.toEqual({
+      checkoutRequestId: 'ws_CO_pending',
+      merchantRequestId: 'mr_pending',
+      resultCode: 4999,
+      resultDescription: 'The transaction is being processed.',
+    });
+  });
+
   it('queries production STK status with the configured BusinessShortCode, not the Till number', async () => {
     process.env.MPESA_ENVIRONMENT = 'production';
     process.env.MPESA_LIVE_ENABLED = 'true';

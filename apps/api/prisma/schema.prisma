@@ -113,34 +113,34 @@ enum SupportTicketStatus {
 }
 
 model User {
-  id                    String                    @id @default(cuid())
-  role                  Role                      @default(NORMAL_USER)
-  fullName              String                    @db.VarChar(160)
-  email                 String                    @unique @db.VarChar(254)
-  phone                 String                    @unique @db.VarChar(16)
-  nationalIdCiphertext  String                    @db.Text
-  nationalIdHash        String                    @unique @db.VarChar(64)
-  referralCode          String?                   @unique @db.VarChar(24)
-  passwordHash          String                    @db.VarChar(100)
-  identityStatus        IdentityStatus            @default(NOT_STARTED)
-  activationStatus      ActivationStatus          @default(PENDING)
-  isActive              Boolean                   @default(true)
-  termsVersion          String                    @db.VarChar(40)
-  privacyVersion        String                    @db.VarChar(40)
-  createdAt             DateTime                  @default(now())
-  updatedAt             DateTime                  @updatedAt
-  sessions              CustomerSession[]
-  consents              ConsentRecord[]
-  passwordResetTokens   PasswordResetToken[]
-  loanApplications      LoanApplication[]
-  loans                 Loan[]
-  paymentTransactions   PaymentTransaction[]
-  activationPayments    ActivationPaymentRequest[]
-  ledgerAccounts        LedgerAccount[]
-  referralsSent         Referral[]                @relation("ReferralReferrer")
-  referralReceived      Referral?                 @relation("ReferralReferred")
-  withdrawalRequests    WithdrawalRequest[]
-  supportTickets        SupportTicket[]
+  id                   String                     @id @default(cuid())
+  role                 Role                       @default(NORMAL_USER)
+  fullName             String                     @db.VarChar(160)
+  email                String                     @unique @db.VarChar(254)
+  phone                String                     @unique @db.VarChar(16)
+  nationalIdCiphertext String                     @db.Text
+  nationalIdHash       String                     @unique @db.VarChar(64)
+  referralCode         String?                    @unique @db.VarChar(24)
+  passwordHash         String                     @db.VarChar(100)
+  identityStatus       IdentityStatus             @default(NOT_STARTED)
+  activationStatus     ActivationStatus           @default(PENDING)
+  isActive             Boolean                    @default(true)
+  termsVersion         String                     @db.VarChar(40)
+  privacyVersion       String                     @db.VarChar(40)
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  sessions             CustomerSession[]
+  consents             ConsentRecord[]
+  passwordResetTokens  PasswordResetToken[]
+  loanApplications     LoanApplication[]
+  loans                Loan[]
+  paymentTransactions  PaymentTransaction[]
+  activationPayments   ActivationPaymentRequest[]
+  ledgerAccounts       LedgerAccount[]
+  referralsSent        Referral[]                 @relation("ReferralReferrer")
+  referralReceived     Referral?                  @relation("ReferralReferred")
+  withdrawalRequests   WithdrawalRequest[]
+  supportTickets       SupportTicket[]
 
   @@index([createdAt])
   @@index([identityStatus])
@@ -187,34 +187,35 @@ model PasswordResetToken {
 }
 
 model SuperadminUser {
-  id          String                    @id @default(cuid())
-  role        Role                      @default(SUPERADMIN)
-  email       String                    @unique @db.VarChar(254)
-  passwordHash String                   @db.VarChar(100)
-  isActive    Boolean                   @default(true)
-  emailVerifiedAt DateTime?
-  createdAt   DateTime                  @default(now())
-  updatedAt   DateTime                  @updatedAt
-  sessions    SuperadminSession[]
-  challenges  SuperadminOtpChallenge[]
-  auditEvents AdminAuditLog[]
-  reviewedLoanApplications LoanApplication[]
-  systemSettings SystemSetting[]
-  loanDisbursements LoanDisbursement[]
+  id                            String                         @id @default(cuid())
+  role                          Role                           @default(SUPERADMIN)
+  email                         String                         @unique @db.VarChar(254)
+  passwordHash                  String                         @db.VarChar(100)
+  isActive                      Boolean                        @default(true)
+  emailVerifiedAt               DateTime?
+  createdAt                     DateTime                       @default(now())
+  updatedAt                     DateTime                       @updatedAt
+  sessions                      SuperadminSession[]
+  challenges                    SuperadminOtpChallenge[]
+  auditEvents                   AdminAuditLog[]
+  reviewedLoanApplications      LoanApplication[]
+  systemSettings                SystemSetting[]
+  loanDisbursements             LoanDisbursement[]
+  paymentReconciliationAttempts PaymentReconciliationAttempt[]
 
   @@map("superadmin_users")
 }
 
 model SuperadminOtpChallenge {
-  id            String          @id @default(cuid())
+  id            String         @id @default(cuid())
   superadminId  String
-  otpHash       String          @db.VarChar(64)
+  otpHash       String         @db.VarChar(64)
   expiresAt     DateTime
-  attempts      Int             @default(0)
+  attempts      Int            @default(0)
   consumedAt    DateTime?
   invalidatedAt DateTime?
-  createdAt     DateTime        @default(now())
-  superadmin    SuperadminUser  @relation(fields: [superadminId], references: [id], onDelete: Restrict)
+  createdAt     DateTime       @default(now())
+  superadmin    SuperadminUser @relation(fields: [superadminId], references: [id], onDelete: Restrict)
 
   @@index([superadminId, expiresAt])
   @@map("superadmin_otp_challenges")
@@ -234,16 +235,16 @@ model SuperadminSession {
 }
 
 model AdminAuditLog {
-  id             String          @id @default(cuid())
-  superadminId   String?
-  action         String          @db.VarChar(80)
-  subjectType    String?         @db.VarChar(80)
-  subjectId      String?         @db.VarChar(80)
-  outcome        String          @db.VarChar(40)
-  reason         String?         @db.VarChar(500)
-  ipAddress      String?         @db.VarChar(64)
-  createdAt      DateTime        @default(now())
-  superadmin     SuperadminUser? @relation(fields: [superadminId], references: [id], onDelete: Restrict)
+  id           String          @id @default(cuid())
+  superadminId String?
+  action       String          @db.VarChar(80)
+  subjectType  String?         @db.VarChar(80)
+  subjectId    String?         @db.VarChar(80)
+  outcome      String          @db.VarChar(40)
+  reason       String?         @db.VarChar(500)
+  ipAddress    String?         @db.VarChar(64)
+  createdAt    DateTime        @default(now())
+  superadmin   SuperadminUser? @relation(fields: [superadminId], references: [id], onDelete: Restrict)
 
   @@index([createdAt])
   @@index([superadminId, createdAt])
@@ -251,13 +252,13 @@ model AdminAuditLog {
 }
 
 model AuthAuditLog {
-  id          String   @id @default(cuid())
-  actorType   String   @db.VarChar(20)
-  actorId     String?  @db.VarChar(80)
-  action      String   @db.VarChar(80)
-  outcome     String   @db.VarChar(40)
-  ipAddress   String?  @db.VarChar(64)
-  createdAt   DateTime @default(now())
+  id        String   @id @default(cuid())
+  actorType String   @db.VarChar(20)
+  actorId   String?  @db.VarChar(80)
+  action    String   @db.VarChar(80)
+  outcome   String   @db.VarChar(40)
+  ipAddress String?  @db.VarChar(64)
+  createdAt DateTime @default(now())
 
   @@index([createdAt])
   @@index([actorType, actorId, createdAt])
@@ -285,24 +286,24 @@ model LoanProduct {
 }
 
 model LoanApplication {
-  id                    String                 @id @default(cuid())
+  id                    String                @id @default(cuid())
   userId                String
   productId             String
   reviewerId            String?
   requestedPrincipalKes Int
   approvedPrincipalKes  Int?
   approvedChargesKes    Int?
-  status                LoanApplicationStatus  @default(SUBMITTED)
-  applicationData       Json                   @default("{}")
-  decisionReason        String?                @db.VarChar(1000)
-  requestedInformation String?                 @db.VarChar(1000)
-  submittedAt           DateTime               @default(now())
+  status                LoanApplicationStatus @default(SUBMITTED)
+  applicationData       Json                  @default("{}")
+  decisionReason        String?               @db.VarChar(1000)
+  requestedInformation  String?               @db.VarChar(1000)
+  submittedAt           DateTime              @default(now())
   reviewedAt            DateTime?
   offerExpiresAt        DateTime?
   acceptedAt            DateTime?
-  user                  User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
-  product               LoanProduct            @relation(fields: [productId], references: [id], onDelete: Restrict)
-  reviewer              SuperadminUser?        @relation(fields: [reviewerId], references: [id], onDelete: Restrict)
+  user                  User                  @relation(fields: [userId], references: [id], onDelete: Restrict)
+  product               LoanProduct           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  reviewer              SuperadminUser?       @relation(fields: [reviewerId], references: [id], onDelete: Restrict)
   loan                  Loan?
 
   @@index([userId, submittedAt])
@@ -311,23 +312,23 @@ model LoanApplication {
 }
 
 model Loan {
-  id                    String     @id @default(cuid())
-  applicationId         String     @unique
-  userId                String
-  principalKes          Int
-  chargesKes            Int
-  totalRepayableKes     Int
-  outstandingKes        Int
-  status                LoanStatus @default(DISBURSEMENT_PENDING)
-  acceptedTermsVersion  String     @db.VarChar(40)
-  createdAt             DateTime   @default(now())
-  disbursedAt           DateTime?
-  repaidAt              DateTime?
-  application           LoanApplication @relation(fields: [applicationId], references: [id], onDelete: Restrict)
-  user                  User       @relation(fields: [userId], references: [id], onDelete: Restrict)
-  repaymentSchedules    RepaymentSchedule[]
-  repayments            Repayment[]
-  disbursement           LoanDisbursement?
+  id                   String              @id @default(cuid())
+  applicationId        String              @unique
+  userId               String
+  principalKes         Int
+  chargesKes           Int
+  totalRepayableKes    Int
+  outstandingKes       Int
+  status               LoanStatus          @default(DISBURSEMENT_PENDING)
+  acceptedTermsVersion String              @db.VarChar(40)
+  createdAt            DateTime            @default(now())
+  disbursedAt          DateTime?
+  repaidAt             DateTime?
+  application          LoanApplication     @relation(fields: [applicationId], references: [id], onDelete: Restrict)
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  repaymentSchedules   RepaymentSchedule[]
+  repayments           Repayment[]
+  disbursement         LoanDisbursement?
 
   @@index([userId, status])
   @@map("loans")
@@ -352,29 +353,30 @@ model LoanDisbursement {
 }
 
 model PaymentTransaction {
-  id                String        @id @default(cuid())
-  internalReference String        @unique @db.VarChar(40)
-  idempotencyKey    String        @unique @db.VarChar(128)
-  requestHash       String?       @db.VarChar(64)
-  userId            String
-  type              PaymentType
-  amountKes         Int
-  currency          String        @default("KES") @db.Char(3)
-  status            PaymentStatus @default(PENDING)
-  provider          String        @default("MPESA_DARAJA") @db.VarChar(32)
-  providerReference String?       @unique @db.VarChar(100)
-  receiptReference  String?       @unique @db.VarChar(32)
-  confirmedAt       DateTime?
-  failureCode       String?       @db.VarChar(40)
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
-  user              User          @relation(fields: [userId], references: [id], onDelete: Restrict)
-  activationRequest ActivationPaymentRequest?
-  callbackEvents    PaymentCallbackEvent[]
-  ledgerTransaction LedgerTransaction?
-  idempotencyRecord IdempotencyRecord?
-  repayments        Repayment[]
-  withdrawals       WithdrawalRequest[]
+  id                     String                         @id @default(cuid())
+  internalReference      String                         @unique @db.VarChar(40)
+  idempotencyKey         String                         @unique @db.VarChar(128)
+  requestHash            String?                        @db.VarChar(64)
+  userId                 String
+  type                   PaymentType
+  amountKes              Int
+  currency               String                         @default("KES") @db.Char(3)
+  status                 PaymentStatus                  @default(PENDING)
+  provider               String                         @default("MPESA_DARAJA") @db.VarChar(32)
+  providerReference      String?                        @unique @db.VarChar(100)
+  receiptReference       String?                        @unique @db.VarChar(32)
+  confirmedAt            DateTime?
+  failureCode            String?                        @db.VarChar(40)
+  createdAt              DateTime                       @default(now())
+  updatedAt              DateTime                       @updatedAt
+  user                   User                           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  activationRequest      ActivationPaymentRequest?
+  callbackEvents         PaymentCallbackEvent[]
+  reconciliationAttempts PaymentReconciliationAttempt[]
+  ledgerTransaction      LedgerTransaction?
+  idempotencyRecord      IdempotencyRecord?
+  repayments             Repayment[]
+  withdrawals            WithdrawalRequest[]
 
   @@index([userId, createdAt])
   @@index([status, createdAt])
@@ -382,20 +384,20 @@ model PaymentTransaction {
 }
 
 model ActivationPaymentRequest {
-  id                    String            @id @default(cuid())
-  paymentTransactionId  String            @unique
+  id                    String                 @id @default(cuid())
+  paymentTransactionId  String                 @unique
   userId                String
-  checkoutRequestId     String?           @unique @db.VarChar(100)
-  merchantRequestId     String?           @db.VarChar(100)
-  callbackTokenHash     String?           @unique @db.VarChar(64)
+  checkoutRequestId     String?                @unique @db.VarChar(100)
+  merchantRequestId     String?                @db.VarChar(100)
+  callbackTokenHash     String?                @unique @db.VarChar(64)
   policySnapshot        Json?
-  termsAcceptedVersion  String?           @db.VarChar(40)
+  termsAcceptedVersion  String?                @db.VarChar(40)
   termsAcceptedAt       DateTime?
-  phoneNumberCiphertext String?           @db.Text
+  phoneNumberCiphertext String?                @db.Text
   expiresAt             DateTime
-  createdAt             DateTime          @default(now())
-  user                  User              @relation(fields: [userId], references: [id], onDelete: Restrict)
-  paymentTransaction   PaymentTransaction @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
+  createdAt             DateTime               @default(now())
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
+  paymentTransaction    PaymentTransaction     @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
   callbackEvents        PaymentCallbackEvent[]
 
   @@index([userId, createdAt])
@@ -404,32 +406,52 @@ model ActivationPaymentRequest {
 }
 
 model PaymentCallbackEvent {
-  id                       String                  @id @default(cuid())
+  id                         String                   @id @default(cuid())
   activationPaymentRequestId String
-  paymentTransactionId     String
-  payloadHash              String                  @db.VarChar(64)
-  providerResultCode       String?                 @db.VarChar(40)
-  providerReceiptReference String?                 @db.VarChar(32)
-  receivedAt               DateTime                @default(now())
-  activationPaymentRequest ActivationPaymentRequest @relation(fields: [activationPaymentRequestId], references: [id], onDelete: Restrict)
-  paymentTransaction       PaymentTransaction       @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
+  paymentTransactionId       String
+  payloadHash                String                   @db.VarChar(64)
+  providerResultCode         String?                  @db.VarChar(40)
+  providerReceiptReference   String?                  @db.VarChar(32)
+  receivedAt                 DateTime                 @default(now())
+  activationPaymentRequest   ActivationPaymentRequest @relation(fields: [activationPaymentRequestId], references: [id], onDelete: Restrict)
+  paymentTransaction         PaymentTransaction       @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
 
   @@unique([activationPaymentRequestId, payloadHash])
   @@index([receivedAt])
   @@map("payment_callback_events")
 }
 
+model PaymentReconciliationAttempt {
+  id                   String             @id @default(cuid())
+  paymentTransactionId String
+  superadminId         String
+  idempotencyKey       String             @db.VarChar(128)
+  operatorNote         String             @db.VarChar(500)
+  outcome              String             @default("STARTED") @db.VarChar(40)
+  providerResultCode   String?            @db.VarChar(40)
+  reasonCode           String?            @db.VarChar(80)
+  requestedAt          DateTime           @default(now())
+  completedAt          DateTime?
+  paymentTransaction   PaymentTransaction @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
+  superadmin           SuperadminUser     @relation(fields: [superadminId], references: [id], onDelete: Restrict)
+
+  @@unique([paymentTransactionId, idempotencyKey])
+  @@index([paymentTransactionId, requestedAt])
+  @@index([outcome, requestedAt])
+  @@map("payment_reconciliation_attempts")
+}
+
 model LedgerAccount {
-  id             String            @id @default(cuid())
-  code           String            @unique @db.VarChar(40)
-  name           String            @db.VarChar(120)
-  accountType    LedgerAccountType
-  currency       String            @default("KES") @db.Char(3)
-  userId         String?
-  isActive       Boolean           @default(true)
-  createdAt      DateTime          @default(now())
-  user           User?             @relation(fields: [userId], references: [id], onDelete: Restrict)
-  entries        LedgerEntry[]
+  id          String            @id @default(cuid())
+  code        String            @unique @db.VarChar(40)
+  name        String            @db.VarChar(120)
+  accountType LedgerAccountType
+  currency    String            @default("KES") @db.Char(3)
+  userId      String?
+  isActive    Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  user        User?             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  entries     LedgerEntry[]
 
   @@index([userId, accountType])
   @@map("ledger_accounts")
@@ -455,14 +477,14 @@ model LedgerTransaction {
 }
 
 model LedgerEntry {
-  id                   String           @id @default(cuid())
-  ledgerTransactionId  String
-  ledgerAccountId      String
-  debitKes             Int              @default(0)
-  creditKes            Int              @default(0)
-  createdAt            DateTime         @default(now())
-  transaction          LedgerTransaction @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
-  account              LedgerAccount   @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
+  id                  String            @id @default(cuid())
+  ledgerTransactionId String
+  ledgerAccountId     String
+  debitKes            Int               @default(0)
+  creditKes           Int               @default(0)
+  createdAt           DateTime          @default(now())
+  transaction         LedgerTransaction @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  account             LedgerAccount     @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
 
   @@index([ledgerAccountId, createdAt])
   @@index([ledgerTransactionId])
@@ -478,7 +500,7 @@ model IdempotencyRecord {
   responseJson         Json?
   expiresAt            DateTime
   createdAt            DateTime            @default(now())
-  paymentTransaction  PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
+  paymentTransaction   PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
 
   @@unique([scope, key])
   @@index([expiresAt])
@@ -486,27 +508,27 @@ model IdempotencyRecord {
 }
 
 model SystemSetting {
-  id            String         @id @default(cuid())
-  key           String         @unique @db.VarChar(80)
-  value         Json
-  updatedById   String?
-  updatedAt     DateTime       @updatedAt
-  updatedBy     SuperadminUser? @relation(fields: [updatedById], references: [id], onDelete: Restrict)
+  id          String          @id @default(cuid())
+  key         String          @unique @db.VarChar(80)
+  value       Json
+  updatedById String?
+  updatedAt   DateTime        @updatedAt
+  updatedBy   SuperadminUser? @relation(fields: [updatedById], references: [id], onDelete: Restrict)
 
   @@map("system_settings")
 }
 
 model Referral {
-  id             String         @id @default(cuid())
-  code           String         @db.VarChar(24)
+  id             String          @id @default(cuid())
+  code           String          @db.VarChar(24)
   referrerId     String
-  referredUserId String         @unique
-  status         ReferralStatus @default(REGISTERED)
-  riskReview     String         @default("NOT_REVIEWED") @db.VarChar(30)
-  qualifiedAt   DateTime?
-  createdAt      DateTime       @default(now())
-  referrer       User           @relation("ReferralReferrer", fields: [referrerId], references: [id], onDelete: Restrict)
-  referredUser   User           @relation("ReferralReferred", fields: [referredUserId], references: [id], onDelete: Restrict)
+  referredUserId String          @unique
+  status         ReferralStatus  @default(REGISTERED)
+  riskReview     String          @default("NOT_REVIEWED") @db.VarChar(30)
+  qualifiedAt    DateTime?
+  createdAt      DateTime        @default(now())
+  referrer       User            @relation("ReferralReferrer", fields: [referrerId], references: [id], onDelete: Restrict)
+  referredUser   User            @relation("ReferralReferred", fields: [referredUserId], references: [id], onDelete: Restrict)
   reward         ReferralReward?
 
   @@index([referrerId, createdAt])
@@ -516,32 +538,32 @@ model Referral {
 }
 
 model ReferralReward {
-  id                 String       @id @default(cuid())
-  referralId         String       @unique
-  amountKes          Int
-  status             String       @default("PENDING") @db.VarChar(24)
-  ledgerTransactionId String?      @unique
-  createdAt          DateTime     @default(now())
-  referral           Referral     @relation(fields: [referralId], references: [id], onDelete: Restrict)
+  id                  String   @id @default(cuid())
+  referralId          String   @unique
+  amountKes           Int
+  status              String   @default("PENDING") @db.VarChar(24)
+  ledgerTransactionId String?  @unique
+  createdAt           DateTime @default(now())
+  referral            Referral @relation(fields: [referralId], references: [id], onDelete: Restrict)
 
   @@index([status, createdAt])
   @@map("referral_rewards")
 }
 
 model WithdrawalRequest {
-  id                   String           @id @default(cuid())
+  id                   String              @id @default(cuid())
   userId               String
-  paymentTransactionId String?          @unique
+  paymentTransactionId String?             @unique
   amountKes            Int
-  payoutPhone          String           @db.VarChar(16)
-  status               WithdrawalStatus @default(REQUESTED)
-  decisionReason       String?          @db.VarChar(500)
+  payoutPhone          String              @db.VarChar(16)
+  status               WithdrawalStatus    @default(REQUESTED)
+  decisionReason       String?             @db.VarChar(500)
   reviewedById         String?
-  requestedAt          DateTime         @default(now())
+  requestedAt          DateTime            @default(now())
   reviewedAt           DateTime?
   completedAt          DateTime?
-  user                 User             @relation(fields: [userId], references: [id], onDelete: Restrict)
-  paymentTransaction  PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  paymentTransaction   PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
 
   @@index([userId, requestedAt])
   @@index([status, requestedAt])
@@ -549,15 +571,15 @@ model WithdrawalRequest {
 }
 
 model RepaymentSchedule {
-  id              String   @id @default(cuid())
+  id              String      @id @default(cuid())
   loanId          String
   sequence        Int
   principalDueKes Int
   chargesDueKes   Int
   amountDueKes    Int
   dueAt           DateTime
-  createdAt       DateTime @default(now())
-  loan            Loan     @relation(fields: [loanId], references: [id], onDelete: Restrict)
+  createdAt       DateTime    @default(now())
+  loan            Loan        @relation(fields: [loanId], references: [id], onDelete: Restrict)
   repayments      Repayment[]
 
   @@unique([loanId, sequence])
@@ -566,32 +588,32 @@ model RepaymentSchedule {
 }
 
 model Repayment {
-  id                    String              @id @default(cuid())
-  loanId                String
-  scheduleId            String?
-  paymentTransactionId  String              @unique
-  principalPaidKes      Int
-  chargesPaidKes        Int
-  amountKes             Int
-  createdAt             DateTime            @default(now())
-  loan                  Loan                @relation(fields: [loanId], references: [id], onDelete: Restrict)
-  schedule              RepaymentSchedule?  @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
-  paymentTransaction   PaymentTransaction  @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
+  id                   String             @id @default(cuid())
+  loanId               String
+  scheduleId           String?
+  paymentTransactionId String             @unique
+  principalPaidKes     Int
+  chargesPaidKes       Int
+  amountKes            Int
+  createdAt            DateTime           @default(now())
+  loan                 Loan               @relation(fields: [loanId], references: [id], onDelete: Restrict)
+  schedule             RepaymentSchedule? @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  paymentTransaction   PaymentTransaction @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
 
   @@index([loanId, createdAt])
   @@map("repayments")
 }
 
 model SupportTicket {
-  id          String             @id @default(cuid())
-  reference   String             @unique @db.VarChar(20)
-  userId      String
-  subject     String             @db.VarChar(160)
-  status      SupportTicketStatus @default(OPEN)
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
-  user        User               @relation(fields: [userId], references: [id], onDelete: Restrict)
-  messages    SupportMessage[]
+  id        String              @id @default(cuid())
+  reference String              @unique @db.VarChar(20)
+  userId    String
+  subject   String              @db.VarChar(160)
+  status    SupportTicketStatus @default(OPEN)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  user      User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  messages  SupportMessage[]
 
   @@index([userId, createdAt])
   @@index([status, updatedAt])
@@ -599,13 +621,13 @@ model SupportTicket {
 }
 
 model SupportMessage {
-  id               String        @id @default(cuid())
-  ticketId         String
-  authorType       String        @db.VarChar(20)
-  authorId         String        @db.VarChar(80)
-  message          String        @db.VarChar(4000)
-  createdAt        DateTime      @default(now())
-  ticket           SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Restrict)
+  id         String        @id @default(cuid())
+  ticketId   String
+  authorType String        @db.VarChar(20)
+  authorId   String        @db.VarChar(80)
+  message    String        @db.VarChar(4000)
+  createdAt  DateTime      @default(now())
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Restrict)
 
   @@index([ticketId, createdAt])
   @@map("support_messages")

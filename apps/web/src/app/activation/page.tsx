@@ -1,9 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
+import { formatMoney as formatKes } from '@/lib/currency';
 
 interface ActivationTerms {
   available: boolean;
@@ -52,8 +53,6 @@ interface CustomerProfile {
   phone: string;
 }
 
-const formatKes = (amount: number) => `KSh ${new Intl.NumberFormat('en-KE').format(amount)}`;
-
 export default function ActivationPage() {
   const router = useRouter();
   const [terms, setTerms] = useState<ActivationTerms | null>(null);
@@ -68,19 +67,30 @@ export default function ActivationPage() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const statusRequestId = useRef(0);
 
   const refreshStatus = useCallback(async () => {
-    const result = await apiRequest<ActivationStatus>('/payments/activation/status');
-    setActivation(result);
-    setStatusLoaded(true);
-    setPaymentAttemptUnresolved((current) => current && !result.payment);
-    setStatusError('');
+    const requestId = ++statusRequestId.current;
     try {
-      setWallet(await apiRequest<Wallet>('/wallet'));
-    } catch {
-      setWallet(null);
+      const result = await apiRequest<ActivationStatus>('/payments/activation/status', { cache: 'no-store' });
+      if (requestId !== statusRequestId.current) return result;
+      setActivation(result);
+      setStatusLoaded(true);
+      setPaymentAttemptUnresolved((current) => current && !result.payment);
+      setStatusError('');
+      try {
+        const latestWallet = await apiRequest<Wallet>('/wallet', { cache: 'no-store' });
+        if (requestId === statusRequestId.current) setWallet(latestWallet);
+      } catch {
+        return result;
+      }
+      return result;
+    } catch (reason) {
+      if (requestId === statusRequestId.current) {
+        setStatusError(reason instanceof Error ? reason.message : 'Payment status could not be refreshed.');
+      }
+      throw reason;
     }
-    return result;
   }, []);
 
   useEffect(() => {
@@ -104,22 +114,19 @@ export default function ActivationPage() {
           setError(reason instanceof Error ? reason.message : 'Activation details could not be loaded.');
         }
       }
-      try {
-        await refreshStatus();
-      } catch (reason) {
-        if (!cancelled) setStatusError(reason instanceof Error ? reason.message : 'Payment status could not be loaded.');
-      }
+      await refreshStatus().catch(() => undefined);
     }
     void load();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      statusRequestId.current += 1;
+    };
   }, [refreshStatus, router]);
 
   useEffect(() => {
     if (activation?.payment?.status !== 'PENDING') return;
     const timer = window.setInterval(() => {
-      refreshStatus().catch((reason: unknown) => {
-        setStatusError(reason instanceof Error ? reason.message : 'Payment status could not be refreshed.');
-      });
+      refreshStatus().catch(() => undefined);
     }, 15_000);
     return () => window.clearInterval(timer);
   }, [activation?.payment?.status, refreshStatus]);
@@ -130,6 +137,7 @@ export default function ActivationPage() {
     setBusy(true);
     setError('');
     setMessage('');
+    statusRequestId.current += 1;
     try {
       const response = await apiRequest<{ message?: string }>('/payments/activation', {
         method: 'POST',
@@ -142,19 +150,11 @@ export default function ActivationPage() {
       });
       setPaymentAttemptUnresolved(true);
       setMessage(response.message ?? 'The payment request was submitted. This does not confirm payment.');
-      try {
-        await refreshStatus();
-      } catch {
-        setStatusError('Payment status could not be refreshed. Do not submit another payment while the result is uncertain.');
-      }
+      await refreshStatus().catch(() => undefined);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The payment request could not be started.');
       setPaymentAttemptUnresolved(true);
-      try {
-        await refreshStatus();
-      } catch {
-        setStatusError('The payment outcome and current status could not be verified. Refresh status before trying again.');
-      }
+      await refreshStatus().catch(() => undefined);
     } finally {
       setBusy(false);
     }
@@ -308,11 +308,10 @@ export default function ActivationPage() {
             disabled={statusRefreshing}
             onClick={async () => {
               setStatusRefreshing(true);
-              setStatusError('');
               try {
                 await refreshStatus();
-              } catch (reason) {
-                setStatusError(reason instanceof Error ? reason.message : 'Payment status could not be refreshed.');
+              } catch {
+                return;
               } finally {
                 setStatusRefreshing(false);
               }

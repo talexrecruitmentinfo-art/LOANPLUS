@@ -156,7 +156,14 @@ export class PaymentService {
     this.mpesa.assertConfiguredForPayments();
     const payment = await this.prisma.$transaction(async (tx) => {
       const pending = await tx.paymentTransaction.findFirst({
-        where: { userId, type: PaymentType.ACTIVATION, status: PaymentStatus.PENDING },
+        where: {
+          userId,
+          type: PaymentType.ACTIVATION,
+          OR: [
+            { status: PaymentStatus.PENDING },
+            { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
+          ],
+        },
         select: { id: true },
       });
       if (pending) throw new ConflictException('An activation payment is already awaiting confirmation.');
@@ -234,7 +241,7 @@ export class PaymentService {
   }
 
   async listCustomerPayments(userId: string) {
-    return this.prisma.paymentTransaction.findMany({
+    const payments = await this.prisma.paymentTransaction.findMany({
       where: { userId },
       select: {
         internalReference: true,
@@ -242,6 +249,7 @@ export class PaymentService {
         amountKes: true,
         currency: true,
         status: true,
+        failureCode: true,
         providerReference: true,
         receiptReference: true,
         confirmedAt: true,
@@ -249,6 +257,319 @@ export class PaymentService {
       },
       orderBy: { createdAt: 'desc' },
       take: 100,
+    });
+    return payments.map((payment) => {
+      const { failureCode, ...customerPayment } = payment;
+      const unresolvedLegacyProcessing =
+        payment.status === PaymentStatus.FAILED &&
+        failureCode === 'MPESA_RESULT_4999' &&
+        payment.receiptReference === null;
+      const status = unresolvedLegacyProcessing ? PaymentStatus.PENDING : payment.status;
+      const resultCode = payment.receiptReference ? 0 : this.getPersistedProviderResultCode(failureCode);
+      return {
+        ...customerPayment,
+        status,
+        providerResult: {
+          code: resultCode,
+          message: this.getCustomerPaymentMessage(status, resultCode),
+        },
+      };
+    });
+  }
+
+  async listReconciliationQueue(cursor?: string, requestedLimit = 50) {
+    const limit = Math.min(Math.max(Math.floor(requestedLimit || 50), 1), 100);
+    const setting = await this.prisma.systemSetting.findUnique({
+      where: { key: 'payments.reconciliation.pending_minutes' },
+      select: { value: true },
+    });
+    const configuredMinutes = typeof setting?.value === 'number' ? setting.value : 5;
+    const thresholdMinutes = Number.isInteger(configuredMinutes) && configuredMinutes >= 1 && configuredMinutes <= 1440
+      ? configuredMinutes
+      : 5;
+    const cutoff = new Date(Date.now() - thresholdMinutes * 60_000);
+    const rows = await this.prisma.paymentTransaction.findMany({
+      where: {
+        type: PaymentType.ACTIVATION,
+        OR: [
+          { status: PaymentStatus.PENDING, createdAt: { lte: cutoff } },
+          { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
+        ],
+      },
+      select: {
+        id: true,
+        internalReference: true,
+        amountKes: true,
+        currency: true,
+        status: true,
+        failureCode: true,
+        providerReference: true,
+        receiptReference: true,
+        createdAt: true,
+        updatedAt: true,
+        user: { select: { fullName: true, email: true } },
+        activationRequest: {
+          select: {
+            checkoutRequestId: true,
+            merchantRequestId: true,
+            callbackEvents: {
+              select: { providerResultCode: true, providerReceiptReference: true, receivedAt: true },
+              orderBy: { receivedAt: 'desc' },
+              take: 5,
+            },
+          },
+        },
+        reconciliationAttempts: {
+          select: {
+            id: true,
+            outcome: true,
+            providerResultCode: true,
+            reasonCode: true,
+                operatorNote: true,
+            requestedAt: true,
+            completedAt: true,
+            superadmin: { select: { email: true } },
+          },
+          orderBy: { requestedAt: 'desc' },
+          take: 5,
+        },
+        _count: { select: { reconciliationAttempts: true } },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: limit + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    return {
+      items: items.map((payment) => {
+        const { failureCode, ...queuePayment } = payment;
+        return {
+          ...queuePayment,
+          recordedStatus: payment.status,
+          status: payment.status === PaymentStatus.FAILED && failureCode === 'MPESA_RESULT_4999'
+            ? PaymentStatus.PENDING
+            : payment.status,
+          reconciliationStatus: failureCode === 'MPESA_RESULT_4999' ? 'LEGACY_UNRESOLVED_4999' : 'PENDING',
+        };
+      }),
+      nextCursor: hasMore ? items.at(-1)?.id ?? null : null,
+      pendingThresholdMinutes: thresholdMinutes,
+    };
+  }
+
+  async reconcileActivationPayment(
+    paymentId: string,
+    idempotencyKey: string | undefined,
+    superadminId: string,
+    operatorNote: string,
+    ipAddress?: string,
+  ) {
+    if (!idempotencyKey || !/^[a-zA-Z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+      throw new BadRequestException('A valid Idempotency-Key header is required.');
+    }
+    const sanitizedNote = operatorNote.trim();
+    if (sanitizedNote.length < 10 || sanitizedNote.length > 500) {
+      throw new BadRequestException('An investigation note between 10 and 500 characters is required.');
+    }
+
+    const now = new Date();
+    let attempt: { id: string; outcome: string; providerResultCode: string | null; reasonCode: string | null };
+    let payment: Prisma.PaymentTransactionGetPayload<{ include: { activationRequest: true } }> | null;
+    try {
+      const started = await this.prisma.$transaction(async (tx) => {
+        const existing = await tx.paymentReconciliationAttempt.findUnique({
+          where: { paymentTransactionId_idempotencyKey: { paymentTransactionId: paymentId, idempotencyKey } },
+          select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, superadminId: true },
+        });
+        if (existing) {
+          if (existing.superadminId !== superadminId) {
+            throw new ConflictException('This idempotency key belongs to another administrator.');
+          }
+          return { attempt: existing, payment: null, duplicate: true };
+        }
+
+        const currentPayment = await tx.paymentTransaction.findUnique({
+          where: { id: paymentId },
+          include: { activationRequest: true },
+        });
+        if (!currentPayment) throw new NotFoundException('Payment was not found.');
+        this.assertActivationPaymentAssociation(currentPayment, {
+          paymentTransactionId: currentPayment.id,
+          userId: currentPayment.activationRequest?.userId ?? '',
+        });
+        const isLegacyUnresolved =
+          currentPayment.status === PaymentStatus.FAILED &&
+          currentPayment.failureCode === 'MPESA_RESULT_4999' &&
+          currentPayment.receiptReference === null;
+        if (currentPayment.status !== PaymentStatus.PENDING && !isLegacyUnresolved) {
+          throw new ConflictException('Only unresolved activation payments can be reconciled.');
+        }
+        const recentAttempt = await tx.paymentReconciliationAttempt.findFirst({
+          where: {
+            paymentTransactionId: paymentId,
+            outcome: 'STARTED',
+            requestedAt: { gt: new Date(now.getTime() - 60_000) },
+          },
+          select: { id: true },
+        });
+        if (recentAttempt) throw new ConflictException('A status refresh is already in progress for this payment.');
+
+        const createdAttempt = await tx.paymentReconciliationAttempt.create({
+          data: { paymentTransactionId: paymentId, superadminId, idempotencyKey, operatorNote: sanitizedNote },
+          select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, operatorNote: true },
+        });
+        await tx.adminAuditLog.create({
+          data: {
+            superadminId,
+            action: 'PAYMENT_RECONCILIATION_STARTED',
+            subjectType: 'PAYMENT_TRANSACTION',
+            subjectId: paymentId,
+            outcome: 'STARTED',
+            reason: sanitizedNote,
+            ipAddress: ipAddress?.slice(0, 64),
+          },
+        });
+        return { attempt: createdAttempt, payment: currentPayment, duplicate: false };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      attempt = started.attempt;
+      payment = started.payment;
+      if (started.duplicate || !payment) return attempt;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const duplicate = await this.prisma.paymentReconciliationAttempt.findUnique({
+          where: { paymentTransactionId_idempotencyKey: { paymentTransactionId: paymentId, idempotencyKey } },
+          select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, operatorNote: true, superadminId: true },
+        });
+        if (duplicate) {
+          if (duplicate.superadminId !== superadminId) {
+            throw new ConflictException('This idempotency key belongs to another administrator.');
+          }
+          return duplicate;
+        }
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+        throw new ConflictException('Another reconciliation request is being processed. Try again shortly.');
+      }
+      throw error;
+    }
+
+    const activationRequest = payment.activationRequest;
+    if (!activationRequest?.checkoutRequestId || !activationRequest.merchantRequestId) {
+      return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'UNRESOLVED_MISSING_IDENTIFIERS',
+        reasonCode: 'PROVIDER_IDENTIFIERS_MISSING',
+      });
+    }
+
+    let providerStatus: Awaited<ReturnType<MpesaService['queryStkStatus']>>;
+    try {
+      providerStatus = await this.mpesa.queryStkStatus(activationRequest.checkoutRequestId);
+    } catch (error) {
+      if (!(error instanceof ServiceUnavailableException) && !(error instanceof InternalServerErrorException)) {
+        await this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+          outcome: 'QUERY_ERROR',
+          reasonCode: 'INTERNAL_QUERY_ERROR',
+        });
+        throw error;
+      }
+      return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'UNRESOLVED_PROVIDER_UNAVAILABLE',
+        reasonCode: 'PROVIDER_UNAVAILABLE',
+      });
+    }
+
+    if (
+      providerStatus.checkoutRequestId !== activationRequest.checkoutRequestId ||
+      providerStatus.merchantRequestId !== activationRequest.merchantRequestId
+    ) {
+      return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH',
+        providerResultCode: String(providerStatus.resultCode),
+        reasonCode: 'PROVIDER_IDENTIFIERS_MISMATCH',
+      });
+    }
+
+    if (providerStatus.resultCode === 4999) {
+      return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'UNRESOLVED_PROCESSING',
+        providerResultCode: '4999',
+        reasonCode: 'PROVIDER_STILL_PROCESSING',
+      });
+    }
+    if (providerStatus.resultCode === 0) {
+      return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'SUCCESS_AWAITING_VERIFIED_CALLBACK',
+        providerResultCode: '0',
+        reasonCode: 'QUERY_SUCCESS_CALLBACK_METADATA_REQUIRED',
+      });
+    }
+    const terminalStatus = this.getTerminalProviderStatus(providerStatus.resultCode);
+    if (!terminalStatus) {
+      return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'UNRESOLVED_UNKNOWN_RESULT',
+        providerResultCode: String(providerStatus.resultCode),
+        reasonCode: 'UNRECOGNIZED_PROVIDER_RESULT',
+      });
+    }
+
+    let outcome: string;
+    let reasonCode: string;
+    try {
+      await this.settleActivationPayment(payment, activationRequest, providerStatus);
+      outcome = `RESOLVED_${terminalStatus}`;
+      reasonCode = 'AUTHORITATIVE_TERMINAL_QUERY';
+    } catch (error) {
+      const current = await this.prisma.paymentTransaction.findUnique({ where: { id: paymentId }, select: { status: true } });
+      if (current && current.status !== PaymentStatus.PENDING) {
+        outcome = `ALREADY_RESOLVED_${current.status}`;
+        reasonCode = 'PAYMENT_RESOLVED_CONCURRENTLY';
+      } else {
+        await this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+          outcome: 'QUERY_ERROR',
+          providerResultCode: String(providerStatus.resultCode),
+          reasonCode: 'SETTLEMENT_CONFLICT',
+        });
+        throw error;
+      }
+    }
+    return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+      outcome,
+      providerResultCode: String(providerStatus.resultCode),
+      reasonCode,
+    });
+  }
+
+  private async completeReconciliationAttempt(
+    attemptId: string,
+    paymentId: string,
+    superadminId: string,
+    ipAddress: string | undefined,
+    result: { outcome: string; providerResultCode?: string; reasonCode: string },
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const attempt = await tx.paymentReconciliationAttempt.update({
+        where: { id: attemptId },
+        data: {
+          outcome: result.outcome,
+          providerResultCode: result.providerResultCode ?? null,
+          reasonCode: result.reasonCode,
+          completedAt: new Date(),
+        },
+        select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, operatorNote: true, requestedAt: true, completedAt: true },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId,
+          action: 'PAYMENT_RECONCILIATION_COMPLETED',
+          subjectType: 'PAYMENT_TRANSACTION',
+          subjectId: paymentId,
+          outcome: result.outcome,
+          reason: result.reasonCode,
+          ipAddress: ipAddress?.slice(0, 64),
+        },
+      });
+      return attempt;
     });
   }
 
@@ -265,8 +586,12 @@ export class PaymentService {
     if (!transaction) return { activationStatus: user.activationStatus, payment: null };
 
     let statusCheckMessage: string | null = null;
+    const previouslyMisclassifiedAsFailed =
+      transaction.status === PaymentStatus.FAILED &&
+      transaction.failureCode === 'MPESA_RESULT_4999' &&
+      transaction.receiptReference === null;
     if (
-      transaction.status === PaymentStatus.PENDING &&
+      (transaction.status === PaymentStatus.PENDING || previouslyMisclassifiedAsFailed) &&
       transaction.type === PaymentType.ACTIVATION &&
       transaction.amountKes === ACTIVATION_AMOUNT_KES &&
       transaction.currency === 'KES' &&
@@ -294,10 +619,14 @@ export class PaymentService {
             providerStatus.merchantRequestId !== merchantRequestId
           ) {
             statusCheckMessage = 'Payment is still pending because its provider status could not be verified.';
-          } else if (providerStatus.resultCode !== 0) {
-            await this.settleActivationPayment(transaction, request, providerStatus);
-          } else {
+          } else if (providerStatus.resultCode === 4999) {
+            statusCheckMessage = 'Safaricom reports that the payment request is still processing. Do not submit another payment.';
+          } else if (providerStatus.resultCode === 0) {
             statusCheckMessage = 'Safaricom has not yet sent the payment confirmation. The payment remains pending.';
+          } else if (this.getTerminalProviderStatus(providerStatus.resultCode) === null) {
+            statusCheckMessage = 'Safaricom returned a result that does not conclusively resolve this payment. It remains pending; do not submit another payment.';
+          } else {
+            await this.settleActivationPayment(transaction, request, providerStatus);
           }
         }
       }
@@ -315,6 +644,12 @@ export class PaymentService {
     const providerResultCode = latestTransaction.receiptReference
       ? 0
       : this.getPersistedProviderResultCode(latestTransaction.failureCode);
+    const effectiveStatus =
+      latestTransaction.status === PaymentStatus.FAILED &&
+      latestTransaction.failureCode === 'MPESA_RESULT_4999' &&
+      latestTransaction.receiptReference === null
+        ? PaymentStatus.PENDING
+        : latestTransaction.status;
     return {
       activationStatus: refreshedUser.activationStatus,
       payment: {
@@ -322,7 +657,7 @@ export class PaymentService {
         type: latestTransaction.type,
         purpose: 'Account activation',
         reference: latestTransaction.internalReference,
-        status: latestTransaction.status,
+        status: effectiveStatus,
         amountKes: latestTransaction.amountKes,
         currency: latestTransaction.currency,
         createdAt: latestTransaction.createdAt,
@@ -330,10 +665,10 @@ export class PaymentService {
         providerResult: {
           code: providerResultCode,
           receiptReference: latestTransaction.receiptReference,
-          message: this.getCustomerPaymentMessage(latestTransaction.status, providerResultCode),
+          message: this.getCustomerPaymentMessage(effectiveStatus, providerResultCode),
         },
         accountActivated:
-          latestTransaction.status === PaymentStatus.CONFIRMED &&
+          effectiveStatus === PaymentStatus.CONFIRMED &&
           refreshedUser.activationStatus === 'ACTIVE',
         statusCheckMessage,
       },
@@ -347,6 +682,9 @@ export class PaymentService {
 
   private getCustomerPaymentMessage(status: PaymentStatus, resultCode: number | null): string {
     if (status === PaymentStatus.CONFIRMED) return 'Safaricom confirmed this payment.';
+    if (status === PaymentStatus.PENDING && resultCode === 4999) {
+      return 'Safaricom reports that the payment request is still processing. Do not submit another payment.';
+    }
     if (status === PaymentStatus.CANCELLED) return 'The M-Pesa payment was cancelled.';
     if (status === PaymentStatus.EXPIRED) return 'The M-Pesa payment expired without confirmation.';
     if (status === PaymentStatus.REVERSED) return 'This payment was reversed.';
@@ -423,12 +761,17 @@ export class PaymentService {
     }
   }
 
-  private getTerminalProviderStatus(resultCode: number): PaymentStatus {
-    if (resultCode === 1032) return PaymentStatus.CANCELLED;
-    if (resultCode === 1037) return PaymentStatus.EXPIRED;
-    return PaymentStatus.FAILED;
+  private getTerminalProviderStatus(_resultCode: number): PaymentStatus | null {
+    // No source-verified nonzero Daraja result-code mapping is configured yet.
+    return null;
   }
 
+  /**
+  * Request acceptance, result 4999, unknown provider results, and temporary query errors remain unresolved.
+   * Query-only success remains pending until a token-bound callback supplies verifiable success metadata.
+   * Only PENDING and legacy FAILED/MPESA_RESULT_4999 records may transition; other verified terminal outcomes stay immutable.
+   * Provider outcome, receipt, balanced ledger posting, and activation commit together in one serializable transaction.
+   */
   private async settleActivationPayment(
     payment: {
       id: string;
@@ -461,7 +804,13 @@ export class PaymentService {
       throw new ServiceUnavailableException('M-Pesa payment status did not match the stored request.');
     }
     const isConfirmed = providerStatus.resultCode === 0;
-    const targetStatus = isConfirmed ? PaymentStatus.CONFIRMED : this.getTerminalProviderStatus(providerStatus.resultCode);
+    const targetStatus = isConfirmed
+      ? PaymentStatus.CONFIRMED
+      : this.getTerminalProviderStatus(providerStatus.resultCode);
+    if (targetStatus === null) {
+      if (payloadHash) await this.recordUnresolvedCallback(request, providerStatus.resultCode, payloadHash);
+      return;
+    }
     let policy: ActivationPolicy | null = null;
     if (isConfirmed) {
       policy = this.parsePolicy(request.policySnapshot ?? undefined);
@@ -512,7 +861,13 @@ export class PaymentService {
           });
         }
         const changed = await tx.paymentTransaction.updateMany({
-          where: { id: request.paymentTransactionId, status: PaymentStatus.PENDING },
+          where: {
+            id: request.paymentTransactionId,
+            OR: [
+              { status: PaymentStatus.PENDING },
+              { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
+            ],
+          },
           data: {
             status: targetStatus,
             providerReference: request.checkoutRequestId,
@@ -580,6 +935,51 @@ export class PaymentService {
       }
       throw error;
     }
+  }
+
+  private async recordUnresolvedCallback(
+    request: {
+      id: string;
+      paymentTransactionId: string;
+      userId: string;
+      checkoutRequestId: string | null;
+      merchantRequestId: string | null;
+    },
+    resultCode: number,
+    payloadHash: string,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      const boundRequest = await tx.activationPaymentRequest.updateMany({
+        where: {
+          id: request.id,
+          paymentTransactionId: request.paymentTransactionId,
+          userId: request.userId,
+          OR: [
+            { checkoutRequestId: null, merchantRequestId: null },
+            {
+              checkoutRequestId: request.checkoutRequestId,
+              merchantRequestId: request.merchantRequestId,
+            },
+          ],
+        },
+        data: {
+          checkoutRequestId: request.checkoutRequestId,
+          merchantRequestId: request.merchantRequestId,
+        },
+      });
+      if (boundRequest.count !== 1) {
+        throw new ConflictException('Payment provider identifiers could not be safely associated.');
+      }
+      await tx.paymentCallbackEvent.create({
+        data: {
+          activationPaymentRequestId: request.id,
+          paymentTransactionId: request.paymentTransactionId,
+          payloadHash,
+          providerResultCode: String(resultCode),
+          providerReceiptReference: null,
+        },
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   private validateSuccessfulCallback(

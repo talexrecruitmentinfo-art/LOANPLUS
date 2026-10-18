@@ -20,6 +20,7 @@ describe('M-Pesa payment callback reconciliation', () => {
   const checkoutRequestId = 'ws_CO_test';
   const merchantRequestId = 'mr_test';
   let paymentStatus: 'PENDING' | 'CONFIRMED' | 'FAILED' | 'CANCELLED' | 'EXPIRED';
+  let paymentFailureCode: string | null;
   let events: Set<string>;
   let transactionCount: number;
   let failNextTransaction: boolean;
@@ -61,6 +62,7 @@ describe('M-Pesa payment callback reconciliation', () => {
   beforeEach(() => {
     process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
     paymentStatus = 'PENDING';
+    paymentFailureCode = null;
     events = new Set();
     transactionCount = 0;
     failNextTransaction = false;
@@ -120,9 +122,14 @@ describe('M-Pesa payment callback reconciliation', () => {
       },
       paymentTransaction: {
         updateMany: jest.fn(async ({ data }: { data: Record<string, unknown> & { status: 'CONFIRMED' | 'FAILED' | 'CANCELLED' | 'EXPIRED' } }) => {
-          if (paymentStatus !== 'PENDING') return { count: 0 };
+          const canRecoverLegacyProcessing =
+            paymentStatus === 'FAILED' &&
+            paymentFailureCode === 'MPESA_RESULT_4999' &&
+            data.status === 'CONFIRMED';
+          if (paymentStatus !== 'PENDING' && !canRecoverLegacyProcessing) return { count: 0 };
           paymentUpdateData = data;
           paymentStatus = data.status;
+          paymentFailureCode = typeof data.failureCode === 'string' ? data.failureCode : null;
           transactionCount += 1;
           return { count: 1 };
         }),
@@ -331,7 +338,7 @@ describe('M-Pesa payment callback reconciliation', () => {
     });
   });
 
-  it('does not allow a later success to credit a payment already failed or cancelled', async () => {
+  it('keeps an unverified nonzero callback unresolved and allows later verified success', async () => {
     providerResultCode = 1032;
     await paymentService.handleMpesaCallback(callbackToken, {
       Body: {
@@ -343,14 +350,13 @@ describe('M-Pesa payment callback reconciliation', () => {
         },
       },
     });
-    expect(paymentStatus).toBe('CANCELLED');
+    expect(paymentStatus).toBe('PENDING');
 
     providerResultCode = 0;
-    await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
-      .rejects.toThrow('Payment has already been reconciled.');
-    expect(paymentStatus).toBe('CANCELLED');
-    expect(postLedger).not.toHaveBeenCalled();
-    expect(userUpdate).not.toHaveBeenCalled();
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(userUpdate).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -550,7 +556,11 @@ describe('M-Pesa payment callback reconciliation', () => {
     });
   });
 
-  it('keeps a query-only success pending until a verified callback is received', async () => {
+  it.each([
+    [0, 'Safaricom has not yet sent the payment confirmation. The payment remains pending.'],
+    [4999, 'Safaricom reports that the payment request is still processing. Do not submit another payment.'],
+    [999999, 'Safaricom returned a result that does not conclusively resolve this payment. It remains pending; do not submit another payment.'],
+  ] as const)('keeps STK Query result %s pending until a verified callback is received', async (resultCode, statusCheckMessage) => {
     const request = {
       id: 'activation-request-id',
       paymentTransactionId: 'payment-id',
@@ -590,7 +600,7 @@ describe('M-Pesa payment callback reconciliation', () => {
     const query = jest.fn(async () => ({
       checkoutRequestId,
       merchantRequestId,
-      resultCode: 0,
+      resultCode,
       resultDescription: 'Provider confirmed payment.',
     }));
     const post = jest.fn(async () => undefined);
@@ -612,6 +622,7 @@ describe('M-Pesa payment callback reconciliation', () => {
         currency: 'KES',
         providerResult: { code: null, receiptReference: null },
         accountActivated: false,
+        statusCheckMessage,
       },
     });
     expect(query).toHaveBeenCalledWith(checkoutRequestId);
@@ -643,6 +654,33 @@ describe('M-Pesa payment callback reconciliation', () => {
       include: { activationRequest: true },
       orderBy: { createdAt: 'desc' },
     });
+  });
+
+  it('returns the legacy 4999 payment as pending in the customer payment list', async () => {
+    const findMany = jest.fn(async () => [{
+      internalReference: 'LPA_LEGACY_4999',
+      type: PaymentType.ACTIVATION,
+      amountKes: 50,
+      currency: 'KES',
+      status: 'FAILED',
+      failureCode: 'MPESA_RESULT_4999',
+      providerReference: 'checkout-id',
+      receiptReference: null,
+      confirmedAt: null,
+      createdAt: new Date(),
+    }]);
+    const service = new PaymentService({
+      paymentTransaction: { findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    await expect(service.listCustomerPayments('current-user')).resolves.toMatchObject([{
+      internalReference: 'LPA_LEGACY_4999',
+      status: 'PENDING',
+      providerResult: {
+        code: 4999,
+        message: 'Safaricom reports that the payment request is still processing. Do not submit another payment.',
+      },
+    }]);
   });
 
   it('returns the persisted pending payment when a status refresh times out', async () => {
@@ -690,6 +728,58 @@ describe('M-Pesa payment callback reconciliation', () => {
     });
     expect(query).toHaveBeenCalledWith(checkoutRequestId);
     expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledTimes(2);
+  });
+
+  it('exposes the legacy 4999 failure as pending while provider status is still processing', async () => {
+    const payment = {
+      id: 'payment-id',
+      internalReference: 'LPA_LEGACY_PROCESSING',
+      userId: 'current-user',
+      type: PaymentType.ACTIVATION,
+      amountKes: 50,
+      currency: 'KES',
+      status: 'FAILED',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      failureCode: 'MPESA_RESULT_4999',
+      receiptReference: null,
+      activationRequest: {
+        id: 'activation-request-id',
+        paymentTransactionId: 'payment-id',
+        userId: 'current-user',
+        checkoutRequestId,
+        merchantRequestId,
+      },
+    };
+    const prisma = {
+      user: { findUnique: jest.fn(async () => ({ activationStatus: 'PENDING' })) },
+      paymentTransaction: { findFirst: jest.fn(async () => payment) },
+    } as unknown as PrismaService;
+    const query = jest.fn(async () => ({
+      checkoutRequestId,
+      merchantRequestId,
+      resultCode: 4999,
+      resultDescription: 'Request is still processing.',
+    }));
+    const service = new PaymentService(
+      prisma,
+      { queryStkStatus: query } as unknown as MpesaService,
+      {} as LedgerService,
+    );
+
+    const result = await service.getCustomerActivationStatus('current-user');
+
+    expect(result.payment).toMatchObject({
+      status: 'PENDING',
+      providerResult: {
+        code: 4999,
+        message: 'Safaricom reports that the payment request is still processing. Do not submit another payment.',
+      },
+      statusCheckMessage: 'Safaricom reports that the payment request is still processing. Do not submit another payment.',
+      accountActivated: false,
+    });
+    expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledWith(checkoutRequestId);
   });
 
   it('explains missing provider identifiers while keeping the payment pending', async () => {
@@ -799,6 +889,43 @@ describe('M-Pesa payment callback reconciliation', () => {
     }));
   });
 
+  it('keeps a 4999 callback unresolved and later settles its verified success once', async () => {
+    providerResultCode = 4999;
+    await expect(paymentService.handleMpesaCallback(callbackToken, {
+      Body: { stkCallback: {
+        CheckoutRequestID: checkoutRequestId,
+        MerchantRequestID: merchantRequestId,
+        ResultCode: 4999,
+        ResultDesc: 'Request is still processing.',
+      } },
+    })).resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+    expect(paymentStatus).toBe('PENDING');
+    expect(callbackEventData).toMatchObject({ providerResultCode: '4999', providerReceiptReference: null });
+    expect(postLedger).not.toHaveBeenCalled();
+    expect(userUpdate).not.toHaveBeenCalled();
+
+    providerResultCode = 0;
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(queryStkStatus).toHaveBeenCalledTimes(2);
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(userUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers only the legacy 4999 failure after a fully verified success callback', async () => {
+    paymentStatus = 'FAILED';
+    paymentFailureCode = 'MPESA_RESULT_4999';
+    (activationRequestRecord.paymentTransaction as { status: string }).status = 'FAILED';
+
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(paymentUpdateData).toMatchObject({ status: 'CONFIRMED', failureCode: null });
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(userUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it('recovers missing initiation request IDs from the token-bound callback and provider query atomically', async () => {
     activationRequestRecord.checkoutRequestId = null;
     activationRequestRecord.merchantRequestId = null;
@@ -858,6 +985,21 @@ describe('M-Pesa payment callback reconciliation', () => {
   });
 
   it.each([
+    ['ownership', 'userId', 'different-user'],
+    ['currency', 'currency', 'USD'],
+  ] as const)('rejects a successful callback with mismatched payment %s', async (_field, field, value) => {
+    const linkedPayment = activationRequestRecord.paymentTransaction as Record<string, string>;
+    linkedPayment[field] = value;
+
+    await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
+      .rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(queryStkStatus).not.toHaveBeenCalled();
+    expect(postLedger).not.toHaveBeenCalled();
+    expect(userUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ['string amount', [{ Name: 'Amount', Value: '50' }, { Name: 'MpesaReceiptNumber', Value: 'TESTRECEIPT1' }, { Name: 'PhoneNumber', Value: 254712345678 }]],
     ['wrong amount', [{ Name: 'Amount', Value: 49 }, { Name: 'MpesaReceiptNumber', Value: 'TESTRECEIPT1' }, { Name: 'PhoneNumber', Value: 254712345678 }]],
     ['wrong phone', [{ Name: 'Amount', Value: 50 }, { Name: 'MpesaReceiptNumber', Value: 'TESTRECEIPT1' }, { Name: 'PhoneNumber', Value: 254112345678 }]],
@@ -873,10 +1015,10 @@ describe('M-Pesa payment callback reconciliation', () => {
   });
 
   it.each([
-    [1032, 'CANCELLED'],
-    [1037, 'EXPIRED'],
-    [1, 'FAILED'],
-  ] as const)('records provider result %s as %s without ledger effects', async (resultCode, expectedStatus) => {
+    1032,
+    1037,
+    1,
+  ])('keeps provider result %s unresolved until its semantics are verified', async (resultCode) => {
     providerResultCode = resultCode;
     await expect(paymentService.handleMpesaCallback(callbackToken, {
       Body: {
@@ -888,7 +1030,25 @@ describe('M-Pesa payment callback reconciliation', () => {
         },
       },
     })).resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
-    expect(paymentStatus).toBe(expectedStatus);
+    expect(paymentStatus).toBe('PENDING');
+    expect(callbackEventData).toMatchObject({ providerResultCode: String(resultCode), providerReceiptReference: null });
+    expect(postLedger).not.toHaveBeenCalled();
+    expect(userUpdate).not.toHaveBeenCalled();
+  });
+
+  it('records an unknown callback result without resolving or crediting the payment', async () => {
+    providerResultCode = 999999;
+    await paymentService.handleMpesaCallback(callbackToken, {
+      Body: { stkCallback: {
+        CheckoutRequestID: checkoutRequestId,
+        MerchantRequestID: merchantRequestId,
+        ResultCode: 999999,
+        ResultDesc: 'Unrecognized provider result.',
+      } },
+    });
+
+    expect(paymentStatus).toBe('PENDING');
+    expect(callbackEventData).toMatchObject({ providerResultCode: '999999', providerReceiptReference: null });
     expect(postLedger).not.toHaveBeenCalled();
     expect(userUpdate).not.toHaveBeenCalled();
   });

@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
+import { formatMoney as formatKes } from '@/lib/currency';
 
 interface PendingDisbursement {
   id: string;
@@ -15,8 +16,6 @@ interface PendingDisbursement {
   user: { id: string; fullName: string; email: string };
   application: { product: { name: string; durationDays: number } };
 }
-
-const formatKes = (amount: number) => `KSh ${new Intl.NumberFormat('en-KE').format(amount)}`;
 
 export default function AdminDisbursementsPage() {
   const router = useRouter();

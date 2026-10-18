@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
+import { formatMoney as formatKes } from '@/lib/currency';
 
 interface Product {
   id: string;
@@ -26,8 +27,6 @@ interface Application {
   product: { name: string };
   user: { fullName: string; email: string; activationStatus: string; identityStatus: string };
 }
-
-const formatKes = (amount: number) => `KSh ${new Intl.NumberFormat('en-KE').format(amount)}`;
 
 export default function AdminLoansPage() {
   const router = useRouter();

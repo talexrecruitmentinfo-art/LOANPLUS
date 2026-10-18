@@ -95,6 +95,7 @@ describe('activation payment database integration', () => {
     const ids = paymentIds.map((payment) => payment.id);
     if (ids.length) {
       await prisma.paymentCallbackEvent.deleteMany({ where: { paymentTransactionId: { in: ids } } });
+      await prisma.paymentReconciliationAttempt.deleteMany({ where: { paymentTransactionId: { in: ids } } });
       await prisma.ledgerEntry.deleteMany({ where: { transaction: { paymentId: { in: ids } } } });
       await prisma.ledgerTransaction.deleteMany({ where: { paymentId: { in: ids } } });
       await prisma.idempotencyRecord.deleteMany({ where: { paymentTransactionId: { in: ids } } });
@@ -156,7 +157,54 @@ describe('activation payment database integration', () => {
     const request = await prisma.activationPaymentRequest.findUniqueOrThrow({ where: { paymentTransactionId: payment.id } });
     expect(request.termsAcceptedVersion).toBe('test-activation-v1');
     expect(request.termsAcceptedAt).toBeInstanceOf(Date);
+    await prisma.paymentTransaction.update({
+      where: { id: payment.id },
+      data: { status: 'FAILED', failureCode: 'MPESA_RESULT_4999' },
+    });
+    await expect(payments.initiateActivationPayment(
+      customerIds[0],
+      input,
+      'activation-test-key-0003',
+    )).rejects.toBeInstanceOf(ConflictException);
+    expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(1);
+    await prisma.paymentTransaction.update({
+      where: { id: payment.id },
+      data: { status: 'PENDING', failureCode: null },
+    });
     const token = new URL(callbackUrl).pathname.split('/').at(-1)!;
+    providerResultCode = 4999;
+    await payments.handleMpesaCallback(token, {
+      Body: { stkCallback: {
+        CheckoutRequestID: request.checkoutRequestId,
+        MerchantRequestID: request.merchantRequestId,
+        ResultCode: 4999,
+        ResultDesc: 'Request is still processing.',
+      } },
+    });
+    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } })).status).toBe('PENDING');
+    expect(await prisma.paymentCallbackEvent.count({
+      where: { paymentTransactionId: payment.id, providerResultCode: '4999' },
+    })).toBe(1);
+    const reconciliationKey = 'reconciliation-payment-test-0001';
+    const firstReconciliation = await payments.reconcileActivationPayment(
+      payment.id,
+      reconciliationKey,
+      adminId,
+      'Investigate delayed callback without resolving the payment',
+      '127.0.0.1',
+    );
+    const repeatedReconciliation = await payments.reconcileActivationPayment(
+      payment.id,
+      reconciliationKey,
+      adminId,
+      'Investigate delayed callback without resolving the payment',
+      '127.0.0.1',
+    );
+    expect(firstReconciliation).toMatchObject({ outcome: 'UNRESOLVED_PROCESSING', providerResultCode: '4999' });
+    expect(repeatedReconciliation.id).toBe(firstReconciliation.id);
+    expect(await prisma.paymentReconciliationAttempt.count({ where: { paymentTransactionId: payment.id } })).toBe(1);
+    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } })).status).toBe('PENDING');
+    expect(await prisma.ledgerTransaction.count({ where: { paymentId: payment.id } })).toBe(0);
     const callback = {
       Body: {
         stkCallback: {
@@ -177,7 +225,7 @@ describe('activation payment database integration', () => {
     providerResultCode = 0;
     await payments.handleMpesaCallback(token, callback);
     await payments.handleMpesaCallback(token, callback);
-    expect(mpesa.queryStkStatus).toHaveBeenCalledTimes(1);
+    expect(mpesa.queryStkStatus).toHaveBeenCalledTimes(3);
     const confirmedPayment = await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } });
     expect(confirmedPayment).toMatchObject({
       status: 'CONFIRMED',
@@ -218,7 +266,8 @@ describe('activation payment database integration', () => {
         },
       },
     });
-    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: failedPayment.id } })).status).toBe('CANCELLED');
+    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: failedPayment.id } })).status).toBe('PENDING');
+    expect(await prisma.paymentReconciliationAttempt.count({ where: { paymentTransactionId: failedPayment.id } })).toBe(0);
     expect((await prisma.user.findUniqueOrThrow({ where: { id: customerIds[1] } })).activationStatus).toBe('PENDING');
   });
 });

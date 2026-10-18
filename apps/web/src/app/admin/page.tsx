@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
+import { formatMoney } from '@/lib/currency';
 
 interface Admin { id: string; email: string; role: string }
 interface DashboardData {
@@ -18,6 +19,8 @@ interface DashboardData {
     referrals: { registered: number; qualified: number };
     pendingReferralRewards: number;
     openSupportTickets: number;
+    verifiedPaymentsKes: number;
+    walletLiabilitiesKes: number;
   };
   recentActivity: Array<{ id: string; action: string; subjectType: string | null; outcome: string; createdAt: string }>;
 }
@@ -41,6 +44,8 @@ export default function AdminPage() {
   const metrics = dashboard.metrics;
   const metricItems = [
     ['Customers', metrics.customers.total, `${metrics.customers.active} active`],
+    ['Verified receipts', formatMoney(metrics.verifiedPaymentsKes), 'Confirmed activation and repayment payments'],
+    ['Wallet liabilities', formatMoney(metrics.walletLiabilitiesKes), 'Posted wallet ledger balances'],
     ['Identity reviews', metrics.pendingIdentityReviews, 'Pending review'],
     ['Activation payments', metrics.activationPayments.pending, `${metrics.activationPayments.confirmed} confirmed`],
     ['Payment exceptions', metrics.paymentReconciliation.pending + metrics.paymentReconciliation.failed, `${metrics.paymentReconciliation.failed} failed`],

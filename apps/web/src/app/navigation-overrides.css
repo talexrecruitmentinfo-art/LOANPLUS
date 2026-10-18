@@ -1,0 +1,4 @@
+.customer-app-shell,.admin-app-shell{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
+@media(min-width:760px){.customer-app-shell,.admin-app-shell{padding-bottom:0}}
+.platform-settings-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media(max-width:700px){.platform-settings-grid{grid-template-columns:1fr}}

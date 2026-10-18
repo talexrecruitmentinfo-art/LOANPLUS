@@ -10,7 +10,7 @@ test('activation page does not render internal M-Pesa destination details', () =
 });
 
 test('activation payment display is loaded from the authenticated status endpoint', () => {
-  assert.match(page, /apiRequest<ActivationStatus>\('\/payments\/activation\/status'\)/);
+  assert.match(page, /apiRequest<ActivationStatus>\('\/payments\/activation\/status', \{ cache: 'no-store' \}\)/);
   assert.match(page, /activation\?\.payment/);
   assert.doesNotMatch(page, /createdAt:\s*new Date\(\)\.toISOString\(\)/);
 });
@@ -21,4 +21,14 @@ test('pending requests cannot be replaced by another payment attempt', () => {
   assert.match(page, /!statusLoaded/);
   assert.match(page, /Boolean\(statusError\)/);
   assert.match(page, /Refresh payment status/);
+});
+
+test('payment and wallet refreshes keep the latest authoritative response', () => {
+  assert.match(page, /const statusRequestId = useRef\(0\)/);
+  assert.match(page, /if \(requestId !== statusRequestId\.current\) return result/);
+  assert.match(page, /if \(requestId === statusRequestId\.current\) setWallet\(latestWallet\)/);
+  assert.match(page, /apiRequest<ActivationStatus>\('\/payments\/activation\/status', \{ cache: 'no-store' \}\)/);
+  assert.match(page, /apiRequest<Wallet>\('\/wallet', \{ cache: 'no-store' \}\)/);
+  assert.match(page, /activation\.payment\.status\.toLowerCase\(\)/);
+  assert.match(page, /activation\.payment\.providerResult\.message/);
 });

@@ -1,4 +1,4 @@
-import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { Controller, Get, Header, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from './prisma/prisma.service';
 
 @Controller('health')
@@ -10,6 +10,19 @@ export class HealthController {
     return { status: 'ok' };
   }
 
+  getVersion(): { releaseId: string; source: 'configured' | 'render' | 'unknown' } {
+    const configuredRelease = process.env.APP_RELEASE_SHA;
+    const renderRelease = process.env.RENDER_GIT_COMMIT;
+    const candidate = configuredRelease ?? renderRelease;
+    if (!candidate || !/^[a-f0-9]{7,40}$/i.test(candidate)) {
+      return { releaseId: 'unknown', source: 'unknown' };
+    }
+    return {
+      releaseId: candidate,
+      source: configuredRelease ? 'configured' : 'render',
+    };
+  }
+
   @Get('ready')
   async getReadiness(): Promise<{ status: string }> {
     try {
@@ -18,5 +31,11 @@ export class HealthController {
     } catch {
       throw new ServiceUnavailableException({ status: 'unavailable' });
     }
+  }
+
+  @Get('version')
+  @Header('Cache-Control', 'no-store, max-age=0')
+  getReleaseVersion() {
+    return this.getVersion();
   }
 }
