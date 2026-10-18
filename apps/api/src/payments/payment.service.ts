@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   InternalServerErrorException,
   Injectable,
   NotFoundException,
@@ -57,6 +58,19 @@ interface MpesaCallback {
   CallbackMetadata?: { Item?: Array<{ Name: string; Value?: string | number }> };
 }
 
+function hasAcceptedProductTerms(applicationData: Prisma.JsonValue, productId: string, requestedPrincipalKes: number): boolean {
+  if (!applicationData || typeof applicationData !== 'object' || Array.isArray(applicationData)) return false;
+  const snapshot = applicationData.productTermsSnapshot;
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+  return applicationData.termsAccepted === true &&
+    typeof applicationData.termsAcceptedAt === 'string' &&
+    Number.isFinite(Date.parse(applicationData.termsAcceptedAt)) &&
+    snapshot.productId === productId &&
+    snapshot.requestedPrincipalKes === requestedPrincipalKes &&
+    typeof snapshot.termsVersion === 'string' &&
+    snapshot.termsVersion.length > 0;
+}
+
 @Injectable()
 export class PaymentService {
   constructor(
@@ -64,6 +78,53 @@ export class PaymentService {
     private readonly mpesa: MpesaService,
     private readonly ledger: LedgerService,
   ) {}
+
+  async getLoanProcessingFeeQuote() {
+    const policy = getLoanProcessingFeePolicy();
+    const [revenueSetting, clearing] = await Promise.all([
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
+      this.prisma.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } }),
+    ]);
+    const revenueCode = typeof revenueSetting?.value === 'string' ? revenueSetting.value : null;
+    const revenue = revenueCode
+      ? await this.prisma.ledgerAccount.findUnique({ where: { code: revenueCode } })
+      : null;
+    const unavailableReasons: string[] = [];
+    if (policy.status !== 'CONFIGURED') {
+      unavailableReasons.push('Approved processing-fee policy approval, version, or customer disclosure is not configured.');
+    }
+    if (!clearing?.isActive || clearing.currency !== 'KES' || clearing.accountType !== LedgerAccountType.ASSET) {
+      unavailableReasons.push('An active KES M-Pesa clearing asset account is required.');
+    }
+    if (!revenueCode) {
+      unavailableReasons.push('An active KES processing-fee revenue account has not been configured by an administrator.');
+    } else if (!revenue?.isActive || revenue.currency !== 'KES' || revenue.accountType !== LedgerAccountType.REVENUE) {
+      unavailableReasons.push('The configured processing-fee destination must be an active KES revenue account.');
+    }
+    try {
+      this.mpesa.assertConfiguredForPayments();
+      buildMpesaCallbackUrl('readinesschecktoken');
+    } catch (error) {
+      if (!(error instanceof HttpException)) throw error;
+      const response = error.getResponse();
+      if (typeof response === 'string') unavailableReasons.push(response);
+      else if (typeof response === 'object' && response !== null && 'message' in response) {
+        const message = response.message;
+        unavailableReasons.push(Array.isArray(message) ? message.join(' ') : String(message));
+      } else {
+        unavailableReasons.push(error.message);
+      }
+    }
+    return {
+      amountKes: LOAN_PROCESSING_FEE_KES,
+      currency: 'KES',
+      refundPolicyStatus: policy.status,
+      refundPolicyVersion: policy.version,
+      refundPolicyDisclosure: policy.disclosure,
+      paymentAvailable: unavailableReasons.length === 0,
+      unavailableReasons,
+    };
+  }
 
   async initiateLoanProcessingFee(userId: string, dto: InitiateLoanProcessingFeeDto, idempotencyKey: string | undefined) {
     if (dto.reviewConfirmed !== true) {
@@ -102,12 +163,22 @@ export class PaymentService {
       this.prisma.user.findUnique({ where: { id: userId }, select: { isActive: true, phone: true } }),
       this.prisma.loanApplication.findFirst({
         where: { id: dto.applicationId, userId },
-        select: { id: true, status: true, processingFeePayment: { select: { id: true, internalReference: true, status: true, amountKes: true, currency: true } } },
+        select: {
+          id: true,
+          productId: true,
+          requestedPrincipalKes: true,
+          applicationData: true,
+          status: true,
+          processingFeePayment: { select: { id: true, internalReference: true, status: true, amountKes: true, currency: true } },
+        },
       }),
       this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
     ]);
     if (!user || !user.isActive) throw new ForbiddenException('This account cannot apply for a loan.');
     if (!application) throw new NotFoundException('Loan application was not found.');
+    if (!hasAcceptedProductTerms(application.applicationData, application.productId, application.requestedPrincipalKes)) {
+      throw new ConflictException('This application has no recorded acceptance of its product terms. Review and submit a new application before paying.');
+    }
     const phoneNumber = normalizeKenyaPhone(user.phone);
     if (application.processingFeePayment) {
       return {
@@ -120,6 +191,20 @@ export class PaymentService {
     }
     if (application.status !== 'DRAFT') {
       throw new ConflictException('Only an unpaid draft application can begin processing-fee payment.');
+    }
+    const unresolvedPayment = await this.prisma.paymentTransaction.findFirst({
+      where: {
+        userId,
+        type: PaymentType.LOAN_PROCESSING_FEE,
+        OR: [
+          { status: PaymentStatus.PENDING },
+          { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
+        ],
+      },
+      select: { internalReference: true },
+    });
+    if (unresolvedPayment) {
+      throw new ConflictException(`Processing-fee payment ${unresolvedPayment.internalReference} is unresolved. Do not start another payment until it is reconciled.`);
     }
     const revenueCode = typeof revenueSetting?.value === 'string' ? revenueSetting.value : null;
     if (!revenueCode) throw new ServiceUnavailableException('Loan processing-fee accounting is not configured.');
@@ -139,6 +224,20 @@ export class PaymentService {
     let payment: { id: string; internalReference: string };
     try {
       payment = await this.prisma.$transaction(async (tx) => {
+        const unresolved = await tx.paymentTransaction.findFirst({
+          where: {
+            userId,
+            type: PaymentType.LOAN_PROCESSING_FEE,
+            OR: [
+              { status: PaymentStatus.PENDING },
+              { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
+            ],
+          },
+          select: { internalReference: true },
+        });
+        if (unresolved) {
+          throw new ConflictException(`Processing-fee payment ${unresolved.internalReference} is unresolved. Do not start another payment until it is reconciled.`);
+        }
         const claimed = await tx.loanApplication.updateMany({
           where: { id: application.id, userId, status: 'DRAFT' },
           data: { status: 'PROCESSING_PAYMENT_PENDING' },
@@ -189,6 +288,20 @@ export class PaymentService {
             currency: current.processingFeePayment.currency,
             message: 'This application already has a processing-fee payment attempt. Its outcome must be resolved before another payment is considered.',
           };
+        }
+        const unresolved = await this.prisma.paymentTransaction.findFirst({
+          where: {
+            userId,
+            type: PaymentType.LOAN_PROCESSING_FEE,
+            OR: [
+              { status: PaymentStatus.PENDING },
+              { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
+            ],
+          },
+          select: { internalReference: true },
+        });
+        if (unresolved) {
+          throw new ConflictException(`Processing-fee payment ${unresolved.internalReference} is unresolved. Do not start another payment until it is reconciled.`);
         }
       }
       throw error;
@@ -920,7 +1033,7 @@ export class PaymentService {
   /**
   * Request acceptance, result 4999, unknown provider results, and temporary query errors remain unresolved.
    * Query-only success remains pending until a token-bound callback supplies verifiable success metadata.
-   * Only PENDING and legacy FAILED/MPESA_RESULT_4999 records may transition; other verified terminal outcomes stay immutable.
+   * Historical FAILED/MPESA_RESULT_4999 records remain unchanged pending an approved recovery procedure.
    * Provider outcome, receipt, balanced ledger posting, and activation commit together in one serializable transaction.
    */
   private async settleActivationPayment(
@@ -931,6 +1044,7 @@ export class PaymentService {
       amountKes: number;
       currency: string;
       status: PaymentStatus;
+      failureCode: string | null;
     },
     request: {
       id: string;
@@ -954,6 +1068,24 @@ export class PaymentService {
       providerStatus.merchantRequestId !== request.merchantRequestId
     ) {
       throw new ServiceUnavailableException('M-Pesa payment status did not match the stored request.');
+    }
+    if (payment.status === PaymentStatus.FAILED && payment.failureCode === 'MPESA_RESULT_4999') {
+      if (payloadHash && callback) {
+        const receiptReference = providerStatus.resultCode === 0
+          ? this.validateSuccessfulCallback(callback, payment, request.phoneNumberCiphertext)
+          : null;
+        await this.prisma.paymentCallbackEvent.createMany({
+          data: [{
+            activationPaymentRequestId: request.id,
+            paymentTransactionId: request.paymentTransactionId,
+            payloadHash,
+            providerResultCode: String(providerStatus.resultCode),
+            providerReceiptReference: receiptReference,
+          }],
+          skipDuplicates: true,
+        });
+      }
+      return;
     }
     const isConfirmed = providerStatus.resultCode === 0;
     const targetStatus = isConfirmed
@@ -1015,13 +1147,7 @@ export class PaymentService {
           });
         }
         const changed = await tx.paymentTransaction.updateMany({
-          where: {
-            id: request.paymentTransactionId,
-            OR: [
-              { status: PaymentStatus.PENDING },
-              { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
-            ],
-          },
+          where: { id: request.paymentTransactionId, status: PaymentStatus.PENDING },
           data: {
             status: targetStatus,
             providerReference: request.checkoutRequestId,

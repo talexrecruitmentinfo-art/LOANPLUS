@@ -5,6 +5,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -242,6 +243,89 @@ export class AuthService {
     } catch {
       await this.prisma.passwordResetToken.updateMany({ where: { id: reset.id, usedAt: null }, data: { usedAt: now } });
     }
+  }
+
+  async requestCustomerPasswordReset(
+    customerId: string,
+    adminId: string,
+    reason: string,
+    ipAddress?: string,
+  ): Promise<{ requested: boolean; delivery: 'SENT' | 'UNAVAILABLE' }> {
+    const safeReason = reason.trim();
+    if (safeReason.length < 10 || safeReason.length > 500) {
+      throw new BadRequestException('A password-reset reason between 10 and 500 characters is required.');
+    }
+    const user = await this.prisma.user.findUnique({
+      where: { id: customerId },
+      select: { id: true, email: true, role: true, isActive: true },
+    });
+    if (!user || user.role !== 'NORMAL_USER') throw new NotFoundException('Customer account was not found.');
+    if (!user.isActive) throw new BadRequestException('Password reset is unavailable for a disabled account.');
+
+    const token = createOpaqueToken();
+    const now = new Date();
+    const reset = await this.prisma.$transaction(async (tx) => {
+      await tx.passwordResetToken.updateMany({
+        where: { userId: user.id, usedAt: null },
+        data: { usedAt: now },
+      });
+      const created = await tx.passwordResetToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: hashToken(token),
+          expiresAt: new Date(now.getTime() + 30 * 60 * 1000),
+        },
+        select: { id: true },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId: adminId,
+          action: 'CUSTOMER_PASSWORD_RESET_REQUESTED',
+          subjectType: 'CUSTOMER',
+          subjectId: user.id,
+          outcome: 'PENDING_DELIVERY',
+          reason: safeReason,
+          ipAddress: ipAddress?.slice(0, 64),
+        },
+      });
+      return { tokenId: created.id };
+    });
+
+    try {
+      await this.mail.sendPasswordReset(user.email, token);
+    } catch {
+      const failedAt = new Date();
+      await this.prisma.$transaction(async (tx) => {
+        await tx.passwordResetToken.updateMany({
+          where: { id: reset.tokenId, usedAt: null },
+          data: { usedAt: failedAt },
+        });
+        await tx.adminAuditLog.create({
+          data: {
+            superadminId: adminId,
+            action: 'CUSTOMER_PASSWORD_RESET_DELIVERY',
+            subjectType: 'CUSTOMER',
+            subjectId: user.id,
+            outcome: 'UNAVAILABLE',
+            reason: 'Reset email delivery failed; the reset token was invalidated.',
+            ipAddress: ipAddress?.slice(0, 64),
+          },
+        });
+      });
+      return { requested: true, delivery: 'UNAVAILABLE' };
+    }
+    await this.prisma.adminAuditLog.create({
+      data: {
+        superadminId: adminId,
+        action: 'CUSTOMER_PASSWORD_RESET_DELIVERY',
+        subjectType: 'CUSTOMER',
+        subjectId: user.id,
+        outcome: 'SENT',
+        reason: 'Password reset instructions were sent to the registered email address.',
+        ipAddress: ipAddress?.slice(0, 64),
+      },
+    });
+    return { requested: true, delivery: 'SENT' };
   }
 
   async completePasswordReset(dto: PasswordResetCompleteDto, ipAddress?: string): Promise<void> {

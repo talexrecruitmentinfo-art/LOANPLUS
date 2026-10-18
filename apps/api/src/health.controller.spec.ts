@@ -53,20 +53,42 @@ describe('HealthController', () => {
   });
 
   it('reports readiness after a minimal database query', async () => {
-    const prisma = { $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]) };
+    const queryRaw = jest.fn().mockResolvedValue([{ '?column?': 1 }]);
+    const prisma = {
+      $transaction: jest.fn(async (callback: (tx: { $queryRaw: typeof queryRaw }) => Promise<void>) =>
+        callback({ $queryRaw: queryRaw })),
+    };
     const controller = new HealthController(prisma as unknown as PrismaService);
 
     await expect(controller.getReadiness()).resolves.toEqual({ status: 'ok' });
-    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 3_000, timeout: 3_000 });
+    expect(queryRaw).toHaveBeenCalledTimes(1);
   });
 
   it('returns a generic unavailable response when the database query fails', async () => {
-    const prisma = { $queryRaw: jest.fn().mockRejectedValue(new Error('sensitive database details')) };
+    const prisma = { $transaction: jest.fn().mockRejectedValue(new Error('sensitive database details')) };
     const controller = new HealthController(prisma as unknown as PrismaService);
     const result = await controller.getReadiness().catch((error: unknown) => error);
 
     expect(result).toBeInstanceOf(ServiceUnavailableException);
     if (!(result instanceof ServiceUnavailableException)) throw result;
     expect(result.getResponse()).toEqual({ status: 'unavailable' });
+  });
+
+  it('returns unavailable when the readiness query exceeds its timeout', async () => {
+    jest.useFakeTimers();
+    const prisma = { $transaction: jest.fn(() => new Promise<never>(() => undefined)) };
+    const controller = new HealthController(prisma as unknown as PrismaService);
+
+    try {
+      const readiness = controller.getReadiness().catch((error: unknown) => error);
+      await jest.advanceTimersByTimeAsync(3_000);
+      const result = await readiness;
+      expect(result).toBeInstanceOf(ServiceUnavailableException);
+      if (!(result instanceof ServiceUnavailableException)) throw result;
+      expect(result.getResponse()).toEqual({ status: 'unavailable' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

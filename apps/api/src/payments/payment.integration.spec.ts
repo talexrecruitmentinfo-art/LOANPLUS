@@ -44,6 +44,10 @@ describe('loan processing-fee payment database integration', () => {
     process.env.NODE_ENV = 'test';
     process.env.MPESA_CALLBACK_URL = 'https://callbacks.example.com/api/v1/payments/mpesa/callback';
     process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
+    process.env.LOAN_PROCESSING_FEE_POLICY_APPROVED = 'true';
+    process.env.LOAN_PROCESSING_FEE_POLICY_VERSION = 'test-approved-v1';
+    process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE =
+      'Test-only approved processing-fee policy for isolated integration verification.';
     const parsedUrl = new URL(databaseUrl);
     if (!['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname) || !parsedUrl.pathname.endsWith('_test')) {
       throw new Error('TEST_DATABASE_URL must point to a local database whose name ends in _test.');
@@ -142,6 +146,7 @@ describe('loan processing-fee payment database integration', () => {
   databaseTest('submits only after confirmed fee, posts revenue without wallet credit, and settles callbacks once', async () => {
     const applicationDto = Object.assign(new CreateLoanApplicationDto(), {
       productId,
+      termsAccepted: true,
       requestedPrincipalKes: 3000,
       guarantorOneName: 'First Guarantor',
       guarantorOnePhone: '0712345678',

@@ -8,6 +8,6 @@ import { SuperadminAuthController } from './superadmin-auth.controller';
 @Module({
   controllers: [AuthController, SuperadminAuthController],
   providers: [AuthService, MailService, CustomerSessionGuard, SuperadminSessionGuard],
-  exports: [CustomerSessionGuard, SuperadminSessionGuard],
+  exports: [AuthService, CustomerSessionGuard, SuperadminSessionGuard, MailService],
 })
 export class AuthModule {}

@@ -22,16 +22,19 @@ describe('PaymentController', () => {
   });
 
   it('returns the backend processing-fee amount and explicit refund-policy status', async () => {
-    const controller = new PaymentController({} as PaymentService);
+    const quote = {
+      amountKes: LOAN_PROCESSING_FEE_KES,
+      currency: 'KES',
+      refundPolicyStatus: 'NOT_CONFIGURED',
+      refundPolicyVersion: null,
+      refundPolicyDisclosure: null,
+      paymentAvailable: false,
+      unavailableReasons: ['Approved processing-fee policy approval is not configured.'],
+    };
+    const controller = new PaymentController({ getLoanProcessingFeeQuote: jest.fn(async () => quote) } as unknown as PaymentService);
 
     await expect(controller.getLoanProcessingFeeQuote()).resolves.toEqual({
-      data: {
-        amountKes: LOAN_PROCESSING_FEE_KES,
-        currency: 'KES',
-        refundPolicyStatus: 'NOT_CONFIGURED',
-        refundPolicyVersion: null,
-        refundPolicyDisclosure: null,
-      },
+      data: quote,
     });
   });
 
@@ -39,13 +42,24 @@ describe('PaymentController', () => {
     process.env.LOAN_PROCESSING_FEE_POLICY_APPROVED = 'true';
     process.env.LOAN_PROCESSING_FEE_POLICY_VERSION = 'approved-v1';
     process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE = 'Refunds follow the approved loan processing-fee policy.';
-    const controller = new PaymentController({} as PaymentService);
+    const quote = {
+      amountKes: LOAN_PROCESSING_FEE_KES,
+      currency: 'KES',
+      refundPolicyStatus: 'CONFIGURED',
+      refundPolicyVersion: 'approved-v1',
+      refundPolicyDisclosure: 'Refunds follow the approved loan processing-fee policy.',
+      paymentAvailable: false,
+      unavailableReasons: ['M-Pesa is not configured.'],
+    };
+    const controller = new PaymentController({ getLoanProcessingFeeQuote: jest.fn(async () => quote) } as unknown as PaymentService);
 
     await expect(controller.getLoanProcessingFeeQuote()).resolves.toMatchObject({
       data: {
         refundPolicyStatus: 'CONFIGURED',
         refundPolicyVersion: 'approved-v1',
         refundPolicyDisclosure: 'Refunds follow the approved loan processing-fee policy.',
+        paymentAvailable: false,
+        unavailableReasons: ['M-Pesa is not configured.'],
       },
     });
 

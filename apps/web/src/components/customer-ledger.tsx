@@ -147,7 +147,15 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
             <article className="customer-ledger-row" key={entry.id}>
               <div className="customer-ledger-primary">
                 <b>{entry.transaction.transactionType.replaceAll('_', ' ')}</b>
-                <small>{entry.transaction.internalReference} · {new Date(entry.createdAt).toLocaleString(PLATFORM_CURRENCY.locale)}</small>
+                <small>Ref {entry.transaction.internalReference.slice(-8)} · {new Date(entry.createdAt).toLocaleDateString(PLATFORM_CURRENCY.locale)}</small>
+                <details className="transaction-details">
+                  <summary>Details</summary>
+                  <dl>
+                    <div><dt>Reference</dt><dd>{entry.transaction.internalReference}</dd></div>
+                    <div><dt>Ledger account</dt><dd>{entry.account.name} ({entry.account.code})</dd></div>
+                    <div><dt>Recorded</dt><dd>{new Date(entry.createdAt).toLocaleString(PLATFORM_CURRENCY.locale)}</dd></div>
+                  </dl>
+                </details>
               </div>
               <strong className={incoming ? 'ledger-credit' : 'ledger-debit'}>
                 {incoming ? '+' : '−'}{formatMoney(amount)}
@@ -165,11 +173,18 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
           <p>No payment attempts have been recorded.</p>
         ) : payments.map((payment) => (
           <article key={payment.internalReference}>
-            <div><b>{payment.type.replaceAll('_', ' ')}</b><small>{payment.internalReference} · {new Date(payment.createdAt).toLocaleString(PLATFORM_CURRENCY.locale)}</small></div>
+            <div><b>{payment.type.replaceAll('_', ' ')}</b><small>Ref {payment.internalReference.slice(-8)} · {new Date(payment.createdAt).toLocaleDateString(PLATFORM_CURRENCY.locale)}</small></div>
             <strong>{formatMoney(payment.amountKes)}</strong>
             <span className={`status-label status-${payment.status.toLowerCase()}`}>{payment.status}</span>
-            <p>{payment.providerResult.message}</p>
-            {payment.receiptReference && <small>Verified receipt {payment.receiptReference}</small>}
+            <details className="transaction-details">
+              <summary>Details</summary>
+              <dl>
+                <div><dt>Full reference</dt><dd>{payment.internalReference}</dd></div>
+                <div><dt>Provider status</dt><dd>{payment.providerResult.message}</dd></div>
+                {payment.receiptReference && <div><dt>Verified receipt</dt><dd>{payment.receiptReference}</dd></div>}
+                <div><dt>Created</dt><dd>{new Date(payment.createdAt).toLocaleString(PLATFORM_CURRENCY.locale)}</dd></div>
+              </dl>
+            </details>
           </article>
         ))}
       </section>

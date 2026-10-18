@@ -117,6 +117,7 @@ describe('loan workflow database integration', () => {
 
     const applicationDto = Object.assign(new CreateLoanApplicationDto(), {
       productId: product.id,
+      termsAccepted: true,
       requestedPrincipalKes: 3000,
       guarantorOneName: 'First Test Guarantor',
       guarantorOnePhone: '0712345678',
@@ -136,6 +137,12 @@ describe('loan workflow database integration', () => {
       where: { id: draft.id },
       data: { status: 'SUBMITTED' },
     });
+    await loans.updateProduct(product.id, {
+      durationDays: 90,
+      interestRateBps: 5000,
+      flatFeeKes: 100,
+      termsVersion: 'test-product-v2',
+    }, adminId);
 
     const reviewDto = Object.assign(new ReviewLoanApplicationDto(), {
       decision: 'APPROVE',
@@ -152,12 +159,6 @@ describe('loan workflow database integration', () => {
       flatFeeKes: 10,
     });
     await expect(loans.reviewApplication(application.id, reviewDto, adminId)).rejects.toBeInstanceOf(ConflictException);
-    await loans.updateProduct(product.id, {
-      durationDays: 90,
-      interestRateBps: 5000,
-      flatFeeKes: 100,
-      termsVersion: 'test-product-v2',
-    }, adminId);
 
     const acceptance = Object.assign(new AcceptLoanOfferDto(), { termsAccepted: true });
     const loan = await loans.acceptOffer(userId, application.id, acceptance);

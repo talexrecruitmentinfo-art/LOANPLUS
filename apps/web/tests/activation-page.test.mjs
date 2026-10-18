@@ -16,7 +16,13 @@ test('loan application requires the five fields and review before the processing
   }
   assert.match(loanPage, /Review your application/);
   assert.match(loanPage, /loan-processing-fee-quote/);
-  assert.match(loanPage, /Pay Loan Processing Fee — \$\{processingFeeQuote/);
+  assert.match(loanPage, /product-apply-button/);
+  assert.match(loanPage, /signedIn && product/);
+  assert.match(loanPage, /function selectProduct/);
+  assert.match(loanPage, /termsAccepted,/);
+  assert.match(loanPage, /flat, full term/);
+  assert.match(loanPage, /feeUnavailableReason/);
+  assert.match(loanPage, /Pay Loan Processing Fee — \$\{feeQuoteAmount\}/);
   assert.match(loanPage, /refundPolicyStatus/);
   assert.match(loanPage, /\/payments\/loan-processing-fee/);
   assert.match(loanPage, /reviewConfirmed: true/);

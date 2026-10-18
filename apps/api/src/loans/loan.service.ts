@@ -6,12 +6,12 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { LoanApplicationStatus, LoanStatus, Prisma } from '@prisma/client';
+import { LedgerAccountType, LoanApplicationStatus, LoanStatus, Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { normalizeKenyaPhone } from '../auth/security.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
-import { LOAN_PROCESSING_FEE_KES } from '../payments/processing-fee.constants';
+import { getLoanProcessingFeePolicy, LOAN_PROCESSING_FEE_KES } from '../payments/processing-fee.constants';
 import { AcceptLoanOfferDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
 
 const OPEN_LOAN_STATUSES = [
@@ -102,6 +102,9 @@ export class LoanService {
     if (!idempotencyKey || !/^[a-zA-Z0-9._:-]{16,128}$/.test(idempotencyKey)) {
       throw new BadRequestException('A valid Idempotency-Key header is required.');
     }
+    if (dto.termsAccepted !== true) {
+      throw new BadRequestException('Review and accept the selected product terms before continuing.');
+    }
     const [user, product] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } }),
       this.prisma.loanProduct.findFirst({ where: { id: dto.productId, isAvailable: true } }),
@@ -133,9 +136,44 @@ export class LoanService {
       throw new UnprocessableEntityException('Guarantors must have different phone numbers.');
     }
     const creationIdempotencyKey = createHash('sha256').update(`${userId}:${idempotencyKey}`).digest('hex');
-    const applicationData = { guarantorOneName, guarantorOnePhone, guarantorTwoName, guarantorTwoPhone };
+    const productTermsSnapshot = {
+      productId: product.id,
+      productName: product.name,
+      termsVersion: product.termsVersion,
+      minimumPrincipalKes: product.minimumPrincipalKes,
+      maximumPrincipalKes: product.maximumPrincipalKes,
+      durationDays: product.durationDays,
+      interestRateBps: product.interestRateBps,
+      flatFeeKes: product.flatFeeKes,
+      requestedPrincipalKes: dto.requestedPrincipalKes,
+      estimatedInterestKes: Math.ceil(dto.requestedPrincipalKes * product.interestRateBps / 10_000),
+      estimatedTotalRepaymentKes:
+        dto.requestedPrincipalKes +
+        Math.ceil(dto.requestedPrincipalKes * product.interestRateBps / 10_000) +
+        product.flatFeeKes,
+    };
+    if (!Number.isSafeInteger(productTermsSnapshot.estimatedTotalRepaymentKes)) {
+      throw new UnprocessableEntityException('Configured product terms exceed supported monetary limits.');
+    }
+    const applicationData = {
+      termsAccepted: true,
+      termsAcceptedAt: new Date().toISOString(),
+      guarantorOneName,
+      guarantorOnePhone,
+      guarantorTwoName,
+      guarantorTwoPhone,
+      productTermsSnapshot,
+    };
     const creationRequestHash = createHash('sha256')
-      .update(JSON.stringify({ productId: product.id, requestedPrincipalKes: dto.requestedPrincipalKes, ...applicationData }))
+      .update(JSON.stringify({
+        productId: product.id,
+        requestedPrincipalKes: dto.requestedPrincipalKes,
+        guarantorOneName,
+        guarantorOnePhone,
+        guarantorTwoName,
+        guarantorTwoPhone,
+        productTermsSnapshot,
+      }))
       .digest('hex');
     const existing = await this.prisma.loanApplication.findUnique({ where: { creationIdempotencyKey } });
     if (existing) {
@@ -233,8 +271,34 @@ export class LoanService {
   }
 
   async getProcessingFeeSettings() {
-    const setting = await this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } });
-    return { revenueAccountCode: typeof setting?.value === 'string' ? setting.value : null, amountKes: LOAN_PROCESSING_FEE_KES, currency: 'KES' };
+    const [setting, clearing] = await Promise.all([
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
+      this.prisma.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } }),
+    ]);
+    const revenueAccountCode = typeof setting?.value === 'string' ? setting.value : null;
+    const revenue = revenueAccountCode
+      ? await this.prisma.ledgerAccount.findUnique({ where: { code: revenueAccountCode } })
+      : null;
+    const policy = getLoanProcessingFeePolicy();
+    const unavailableReasons: string[] = [];
+    const clearingReady = Boolean(clearing?.isActive && clearing.currency === 'KES' && clearing.accountType === LedgerAccountType.ASSET);
+    const revenueReady = Boolean(revenue?.isActive && revenue.currency === 'KES' && revenue.accountType === LedgerAccountType.REVENUE);
+    if (policy.status !== 'CONFIGURED') unavailableReasons.push('Approved processing-fee policy approval, version, or disclosure is not configured.');
+    if (!clearingReady) {
+      unavailableReasons.push('An active KES asset account with code MPESA_CLEARING is required.');
+    }
+    if (!revenueAccountCode) unavailableReasons.push('A processing-fee revenue account has not been selected.');
+    else if (!revenueReady) {
+      unavailableReasons.push('The selected processing-fee destination must be an active KES revenue account.');
+    }
+    return {
+      revenueAccountCode,
+      amountKes: LOAN_PROCESSING_FEE_KES,
+      currency: 'KES',
+      policy,
+      accountingReady: clearingReady && revenueReady,
+      unavailableReasons,
+    };
   }
 
   async configureProcessingFeeRevenueAccount(accountCode: string, reason: string, reviewerId: string, ipAddress?: string) {
@@ -263,7 +327,7 @@ export class LoanService {
         },
       });
     });
-    return { revenueAccountCode: normalizedCode, amountKes: LOAN_PROCESSING_FEE_KES, currency: 'KES' };
+    return this.getProcessingFeeSettings();
   }
 
   listLoansAwaitingDisbursement() {
@@ -287,7 +351,6 @@ export class LoanService {
   async reviewApplication(id: string, dto: ReviewLoanApplicationDto, reviewerId: string, ipAddress?: string) {
     const application = await this.prisma.loanApplication.findUnique({
       where: { id },
-      include: { product: true },
     });
     if (!application) throw new NotFoundException('Loan application was not found.');
     if (
@@ -302,25 +365,26 @@ export class LoanService {
     let approvedChargesKes: number | undefined;
     let approvedTermsSnapshot: ApprovedLoanTermsSnapshot | undefined;
     if (dto.decision === 'APPROVE') {
+      const acceptedProductTerms = this.parseAcceptedProductTerms(application.applicationData);
       approvedPrincipalKes = dto.approvedPrincipalKes ?? application.requestedPrincipalKes;
       if (
-        approvedPrincipalKes < application.product.minimumPrincipalKes ||
-        approvedPrincipalKes > application.product.maximumPrincipalKes ||
+        approvedPrincipalKes < acceptedProductTerms.minimumPrincipalKes ||
+        approvedPrincipalKes > acceptedProductTerms.maximumPrincipalKes ||
         approvedPrincipalKes > application.requestedPrincipalKes
       ) {
-        throw new UnprocessableEntityException('Approved principal is outside the requested or configured limits.');
+        throw new UnprocessableEntityException('Approved principal is outside the accepted product limits.');
       }
-      approvedChargesKes = Math.ceil((approvedPrincipalKes * application.product.interestRateBps) / 10_000) +
-        application.product.flatFeeKes;
+      approvedChargesKes = Math.ceil((approvedPrincipalKes * acceptedProductTerms.interestRateBps) / 10_000) +
+        acceptedProductTerms.flatFeeKes;
       if (!Number.isSafeInteger(approvedChargesKes + approvedPrincipalKes)) {
         throw new UnprocessableEntityException('Configured loan terms exceed supported monetary limits.');
       }
       approvedTermsSnapshot = {
-        productName: application.product.name,
-        termsVersion: application.product.termsVersion,
-        durationDays: application.product.durationDays,
-        interestRateBps: application.product.interestRateBps,
-        flatFeeKes: application.product.flatFeeKes,
+        productName: acceptedProductTerms.productName,
+        termsVersion: acceptedProductTerms.termsVersion,
+        durationDays: acceptedProductTerms.durationDays,
+        interestRateBps: acceptedProductTerms.interestRateBps,
+        flatFeeKes: acceptedProductTerms.flatFeeKes,
         approvedPrincipalKes,
         approvedChargesKes,
         totalRepayableKes: approvedPrincipalKes + approvedChargesKes,
@@ -511,6 +575,57 @@ export class LoanService {
 
   private validateProductBounds(minimum: number, maximum: number): void {
     if (minimum > maximum) throw new UnprocessableEntityException('Minimum principal cannot exceed maximum principal.');
+  }
+
+  private parseAcceptedProductTerms(
+    applicationData: Prisma.JsonValue,
+  ): {
+    productName: string;
+    termsVersion: string;
+    minimumPrincipalKes: number;
+    maximumPrincipalKes: number;
+    durationDays: number;
+    interestRateBps: number;
+    flatFeeKes: number;
+  } {
+    if (!applicationData || typeof applicationData !== 'object' || Array.isArray(applicationData)) {
+      throw new ConflictException('This application has no accepted product-terms snapshot and requires staff review.');
+    }
+    const snapshot = applicationData.productTermsSnapshot;
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      throw new ConflictException('This application has no accepted product-terms snapshot and requires staff review.');
+    }
+    const {
+      productName,
+      termsVersion,
+      minimumPrincipalKes,
+      maximumPrincipalKes,
+      durationDays,
+      interestRateBps,
+      flatFeeKes,
+    } = snapshot;
+    if (
+      typeof productName !== 'string' || productName.trim().length === 0 ||
+      typeof termsVersion !== 'string' || termsVersion.trim().length === 0 ||
+      typeof minimumPrincipalKes !== 'number' || !Number.isSafeInteger(minimumPrincipalKes) ||
+      typeof maximumPrincipalKes !== 'number' || !Number.isSafeInteger(maximumPrincipalKes) ||
+      typeof durationDays !== 'number' || !Number.isSafeInteger(durationDays) ||
+      typeof interestRateBps !== 'number' || !Number.isSafeInteger(interestRateBps) ||
+      typeof flatFeeKes !== 'number' || !Number.isSafeInteger(flatFeeKes) ||
+      minimumPrincipalKes < 1 || maximumPrincipalKes < minimumPrincipalKes ||
+      durationDays < 1 || interestRateBps < 0 || flatFeeKes < 0
+    ) {
+      throw new ConflictException('The accepted product terms snapshot is invalid and requires staff review.');
+    }
+    return {
+      productName,
+      termsVersion,
+      minimumPrincipalKes,
+      maximumPrincipalKes,
+      durationDays,
+      interestRateBps,
+      flatFeeKes,
+    };
   }
 
   private parseApprovedTermsSnapshot(value: Prisma.JsonValue | null): ApprovedLoanTermsSnapshot | null {

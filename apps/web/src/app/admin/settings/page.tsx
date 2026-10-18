@@ -19,12 +19,25 @@ interface ProcessingFeeSettings {
   revenueAccountCode: string | null;
   amountKes: number;
   currency: string;
+  policy: {
+    status: 'CONFIGURED' | 'NOT_CONFIGURED';
+    version: string | null;
+    disclosure: string | null;
+  };
+  accountingReady: boolean;
+  unavailableReasons: string[];
+}
+
+interface ProcessingFeeReadiness {
+  paymentAvailable: boolean;
+  unavailableReasons: string[];
 }
 
 export default function AdminSettingsPage() {
   const router = useRouter();
   const [accounts, setAccounts] = useState<LedgerAccount[]>([]);
   const [processingFee, setProcessingFee] = useState<ProcessingFeeSettings | null>(null);
+  const [paymentReadiness, setPaymentReadiness] = useState<ProcessingFeeReadiness | null>(null);
   const [revenueAccountCode, setRevenueAccountCode] = useState('');
   const [newAccountCode, setNewAccountCode] = useState('');
   const [newAccountName, setNewAccountName] = useState('');
@@ -36,11 +49,13 @@ export default function AdminSettingsPage() {
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
-    const [settings, nextAccounts] = await Promise.all([
+    const [settings, nextAccounts, readiness] = await Promise.all([
       apiRequest<ProcessingFeeSettings>('/admin/loans/processing-fee-settings'),
       apiRequest<LedgerAccount[]>('/admin/ledger/accounts'),
+      apiRequest<ProcessingFeeReadiness>('/payments/loan-processing-fee-quote'),
     ]);
     setProcessingFee(settings);
+    setPaymentReadiness(readiness);
     setRevenueAccountCode(settings.revenueAccountCode ?? '');
     setAccounts(nextAccounts);
   }
@@ -108,7 +123,7 @@ export default function AdminSettingsPage() {
       <section className="dashboard-welcome">
         <p className="eyebrow">SYSTEM CONFIGURATION</p>
         <h1>Settings &amp; policy.</h1>
-        <p>Customer accounts do not require an activation fee. Configure the KSh 50 loan processing-fee accounting destination before enabling fee payments.</p>
+        <p>Customer accounts do not require an activation fee. Configure the authoritative loan processing-fee accounting destination before enabling fee payments.</p>
       </section>
       {error && <p className="admin-inline-error" role="alert">{error}</p>}
       {notice && <p className="admin-inline-notice" role="status">{notice}</p>}
@@ -117,7 +132,7 @@ export default function AdminSettingsPage() {
           <div><p className="eyebrow">CHART OF ACCOUNTS · KES</p><h2>System accounts</h2></div>
           <span>{accounts.length} accounts</span>
         </div>
-        <p className="settings-copy">A verified KSh 50 processing fee posts between <code>MPESA_CLEARING</code> and a Finance-approved KES revenue account; it never credits the customer wallet.</p>
+        <p className="settings-copy">A verified processing fee posts between <code>MPESA_CLEARING</code> and the configured KES revenue account; it never credits the customer wallet.</p>
         <form className="product-config-form" onSubmit={createAccount}>
           <label>Account code<input value={newAccountCode} onChange={(event) => setNewAccountCode(event.target.value)} pattern="[A-Z][A-Z0-9_]{2,39}" placeholder="LOAN_PROCESSING_FEES" required /></label>
           <label>Account name<input value={newAccountName} onChange={(event) => setNewAccountName(event.target.value)} minLength={3} maxLength={120} required /></label>
@@ -133,9 +148,13 @@ export default function AdminSettingsPage() {
       <section className="admin-workspace">
         <div className="admin-workspace-heading">
           <div><p className="eyebrow">LOAN PROCESSING FEE</p><h2>Payment accounting</h2></div>
-          <span>{processingFee?.revenueAccountCode ? 'Configured' : 'Not configured'}</span>
+          <span>{processingFee ? processingFee.accountingReady ? 'Accounting ready' : 'Accounting incomplete' : 'Loading'}</span>
         </div>
-        <p className="settings-copy">Fee amount: KSh {processingFee?.amountKes ?? 50}. Payment does not guarantee approval or disbursement. Both the clearing and revenue accounts must be active and classified in KES.</p>
+        <p className="settings-copy">Authoritative fee amount: {processingFee ? `${processingFee.currency} ${processingFee.amountKes.toLocaleString('en-KE')}` : 'Loading from payment service…'}. Payment does not guarantee approval or disbursement. This screen cannot approve the external policy.</p>
+        <p className="settings-copy">Approved policy: {processingFee?.policy.status === 'CONFIGURED' ? `Configured · version ${processingFee.policy.version}` : 'Not configured'}{processingFee?.policy.disclosure ? ` · ${processingFee.policy.disclosure}` : ''}</p>
+        {processingFee && processingFee.unavailableReasons.map((reason) => <p className="form-error" role="status" key={reason}>{reason}</p>)}
+        <p className="settings-copy">Payment initiation readiness: {paymentReadiness ? paymentReadiness.paymentAvailable ? 'Available' : 'Unavailable' : 'Checking…'}</p>
+        {paymentReadiness?.unavailableReasons.map((reason) => <p className="form-error" role="status" key={reason}>{reason}</p>)}
         {!clearingReady && <p className="form-error" role="alert">Configure an active KES asset account with code MPESA_CLEARING before processing fees can be paid.</p>}
         <form className="product-config-form" onSubmit={saveProcessingFeeAccount}>
           <label>Processing-fee revenue account<select value={revenueAccountCode} onChange={(event) => setRevenueAccountCode(event.target.value)} required>

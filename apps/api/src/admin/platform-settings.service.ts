@@ -56,6 +56,10 @@ export class PlatformSettingsService {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      const previous = await tx.systemSetting.findUnique({
+        where: { key: CURRENCY_SETTING_KEY },
+        select: { value: true },
+      });
       await tx.systemSetting.upsert({
         where: { key: CURRENCY_SETTING_KEY },
         create: {
@@ -73,6 +77,7 @@ export class PlatformSettingsService {
           subjectId: CURRENCY_SETTING_KEY,
           outcome: 'SUCCESS',
           reason: auditReason,
+          details: { before: { currency: previous ? 'KES' : 'default KES' }, after: { currency: 'KES' } },
           ipAddress: ipAddress?.slice(0, 64),
         },
       });
@@ -111,6 +116,15 @@ export class PlatformSettingsService {
   async updateInstallPolicy(enabled: boolean, reason: string, superadminId: string, ipAddress?: string) {
     const auditReason = this.validateReason(reason);
     await this.prisma.$transaction(async (tx) => {
+      const previous = await tx.systemSetting.findUnique({
+        where: { key: INSTALL_SETTING_KEY },
+        select: { value: true },
+      });
+      const previousEnabled = previous?.value && typeof previous.value === 'object' &&
+        !Array.isArray(previous.value) && 'enabled' in previous.value &&
+        typeof previous.value.enabled === 'boolean'
+        ? previous.value.enabled
+        : true;
       await tx.systemSetting.upsert({
         where: { key: INSTALL_SETTING_KEY },
         create: {
@@ -128,6 +142,7 @@ export class PlatformSettingsService {
           subjectId: INSTALL_SETTING_KEY,
           outcome: 'SUCCESS',
           reason: auditReason,
+          details: { before: { enabled: previousEnabled }, after: { enabled } },
           ipAddress: ipAddress?.slice(0, 64),
         },
       });
@@ -163,6 +178,14 @@ export class PlatformSettingsService {
       throw new UnprocessableEntityException('The reconciliation pending threshold must be between 1 and 1440 minutes.');
     }
     await this.prisma.$transaction(async (tx) => {
+      const previous = await tx.systemSetting.findUnique({
+        where: { key: RECONCILIATION_SETTING_KEY },
+        select: { value: true },
+      });
+      const previousMinutes = typeof previous?.value === 'number' &&
+        Number.isInteger(previous.value) && previous.value >= 1 && previous.value <= 1440
+        ? previous.value
+        : 5;
       await tx.systemSetting.upsert({
         where: { key: RECONCILIATION_SETTING_KEY },
         create: { key: RECONCILIATION_SETTING_KEY, value: pendingThresholdMinutes, updatedById: superadminId },
@@ -176,6 +199,10 @@ export class PlatformSettingsService {
           subjectId: RECONCILIATION_SETTING_KEY,
           outcome: 'SUCCESS',
           reason: auditReason,
+          details: {
+            before: { pendingThresholdMinutes: previousMinutes },
+            after: { pendingThresholdMinutes },
+          },
           ipAddress: ipAddress?.slice(0, 64),
         },
       });

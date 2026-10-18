@@ -75,6 +75,9 @@ export class CreateLoanApplicationDto {
   @Length(1, 40)
   productId!: string;
 
+  @Equals(true)
+  termsAccepted!: boolean;
+
   @IsInt()
   @Min(1)
   @Max(1_000_000_000)

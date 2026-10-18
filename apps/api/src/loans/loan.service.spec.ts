@@ -67,8 +67,12 @@ describe('LoanService approved terms snapshot', () => {
         loanProduct: { findFirst: jest.fn(async () => ({
           id: 'product-id',
           name: 'Configured product',
+          termsVersion: 'product-v1',
           minimumPrincipalKes: 500,
           maximumPrincipalKes: 5000,
+          durationDays: 30,
+          interestRateBps: 1000,
+          flatFeeKes: 10,
         })) },
         loan: { findFirst: jest.fn(async () => null) },
         loanApplication: {
@@ -81,6 +85,7 @@ describe('LoanService approved terms snapshot', () => {
 
     const application = (overrides: Partial<CreateLoanApplicationDto> = {}) => ({
       productId: 'product-id',
+      termsAccepted: true,
       requestedPrincipalKes: 3000,
       guarantorOneName: '  First   Guarantor  ',
       guarantorOnePhone: '0712345678',
@@ -97,17 +102,33 @@ describe('LoanService approved terms snapshot', () => {
           userId: 'customer-id',
           status: 'DRAFT',
           requestedPrincipalKes: 3000,
-          applicationData: {
+          applicationData: expect.objectContaining({
+            termsAccepted: true,
+            termsAcceptedAt: expect.any(String),
             guarantorOneName: 'First Guarantor',
             guarantorOnePhone: '+254712345678',
             guarantorTwoName: 'Second Guarantor',
             guarantorTwoPhone: '+254723456789',
-          },
+            productTermsSnapshot: {
+              productId: 'product-id',
+              productName: 'Configured product',
+              termsVersion: 'product-v1',
+              minimumPrincipalKes: 500,
+              maximumPrincipalKes: 5000,
+              durationDays: 30,
+              interestRateBps: 1000,
+              flatFeeKes: 10,
+              requestedPrincipalKes: 3000,
+              estimatedInterestKes: 300,
+              estimatedTotalRepaymentKes: 3310,
+            },
+          }),
         }),
       }));
     });
 
     it.each([
+      ['unaccepted terms', { termsAccepted: false }, BadRequestException],
       ['first guarantor name', { guarantorOneName: ' ' }, UnprocessableEntityException],
       ['second guarantor name', { guarantorTwoName: ' ' }, UnprocessableEntityException],
       ['first guarantor phone', { guarantorOnePhone: '12345' }, BadRequestException],
@@ -169,6 +190,37 @@ describe('LoanService approved terms snapshot', () => {
       'application-id',
       { termsAccepted: true } as AcceptLoanOfferDto,
     )).rejects.toBeInstanceOf(ConflictException);
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('does not approve a legacy application against mutable current product terms', async () => {
+    const transaction = jest.fn();
+    const prisma = {
+      loanApplication: {
+        findUnique: jest.fn(async () => ({
+          id: 'application-id',
+          status: 'SUBMITTED',
+          requestedPrincipalKes: 3000,
+          applicationData: {},
+          product: {
+            name: 'Current product',
+            termsVersion: 'current-v2',
+            minimumPrincipalKes: 500,
+            maximumPrincipalKes: 5000,
+            durationDays: 90,
+            interestRateBps: 5000,
+            flatFeeKes: 100,
+          },
+        })),
+      },
+      $transaction: transaction,
+    } as unknown as PrismaService;
+    const service = new LoanService(prisma, {} as LedgerService);
+
+    await expect(service.reviewApplication('application-id', {
+      decision: 'APPROVE',
+      reason: 'Legacy application approval test.',
+    }, 'reviewer-id')).rejects.toThrow('no accepted product-terms snapshot');
     expect(transaction).not.toHaveBeenCalled();
   });
 

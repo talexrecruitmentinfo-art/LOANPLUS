@@ -1,2 +1,9 @@
 .customer-payment-attempts{margin-top:28px}.customer-payment-attempts h2{margin:0 0 12px;font-size:20px}.customer-payment-attempts>article{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:8px 16px;padding:14px 0;border-top:1px solid var(--line)}.customer-payment-attempts>article>div{display:grid;gap:3px;min-width:0}.customer-payment-attempts small{color:var(--muted);overflow-wrap:anywhere}.customer-payment-attempts>article>p{grid-column:1/-1;margin:0;color:var(--muted);font-size:13px}.customer-payment-attempts>article>strong{white-space:nowrap;font-size:14px}
+.transaction-details{margin-top:4px;font-size:11px}
+.transaction-details summary{width:max-content;min-height:32px;display:flex;align-items:center;color:var(--green);font-weight:700;cursor:pointer}
+.transaction-details dl{margin:8px 0 4px;padding:8px;border-radius:8px;background:#f5f8f4}
+.transaction-details dl>div{display:grid;grid-template-columns:minmax(80px,.6fr) minmax(0,1fr);gap:8px;padding:4px 0}
+.transaction-details dt{color:var(--muted)}
+.transaction-details dd{margin:0;overflow-wrap:anywhere}
+.customer-payment-attempts>.transaction-details{grid-column:1/-1}
 @media(max-width:560px){.customer-payment-attempts>article{grid-template-columns:minmax(0,1fr) auto}.customer-payment-attempts>article>.status-label{grid-column:1/-1;justify-self:start}}

@@ -23,6 +23,8 @@ interface ProcessingFeeQuote {
   refundPolicyStatus: string;
   refundPolicyVersion: string | null;
   refundPolicyDisclosure: string | null;
+  paymentAvailable: boolean;
+  unavailableReasons: string[];
 }
 
 interface LoanApplication {
@@ -133,14 +135,19 @@ function fieldError(name: string, value: string, product?: Product): string {
 export default function LoanProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [processingFeeQuote, setProcessingFeeQuote] = useState<ProcessingFeeQuote | null>(null);
+  const [processingFeeQuoteError, setProcessingFeeQuoteError] = useState('');
+  const [processingFeeQuoteLoading, setProcessingFeeQuoteLoading] = useState(true);
   const [applications, setApplications] = useState<LoanApplication[]>([]);
   const [form, setForm] = useState<ApplicationForm>(emptyForm);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [reviewing, setReviewing] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const [acceptedOffers, setAcceptedOffers] = useState<Record<string, boolean>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [productsLoading, setProductsLoading] = useState(true);
+  const [productsError, setProductsError] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const creationKey = useRef<string | null>(null);
@@ -148,21 +155,50 @@ export default function LoanProductsPage() {
 
   const product = products.find((item) => item.id === form.productId);
 
+  useEffect(() => {
+    if (product) document.getElementById('apply-heading')?.scrollIntoView({ block: 'start' });
+  }, [form.productId, product]);
+
   async function refreshApplications() {
     setApplications(await apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }));
   }
 
+  async function refreshProducts() {
+    setProductsLoading(true);
+    setProductsError('');
+    try {
+      const availableProducts = await apiRequest<Product[]>('/loans/products', { cache: 'no-store' });
+      setProducts(availableProducts);
+      const selectedProductId = new URLSearchParams(window.location.search).get('productId');
+      const selectedProduct = availableProducts.find((item) => item.id === selectedProductId);
+      if (selectedProduct) setForm((current) => ({ ...current, productId: selectedProduct.id }));
+    } catch (reason) {
+      setProductsError(reason instanceof Error ? reason.message : 'Loan products could not be loaded.');
+    } finally {
+      setProductsLoading(false);
+    }
+  }
+
+  async function refreshProcessingFeeQuote() {
+    setProcessingFeeQuoteLoading(true);
+    setProcessingFeeQuoteError('');
+    try {
+      setProcessingFeeQuote(await apiRequest<ProcessingFeeQuote>('/payments/loan-processing-fee-quote', { cache: 'no-store' }));
+    } catch (reason) {
+      setProcessingFeeQuoteError(reason instanceof Error ? reason.message : 'Processing-fee details could not be loaded.');
+    } finally {
+      setProcessingFeeQuoteLoading(false);
+    }
+  }
+
   useEffect(() => {
-    apiRequest<ProcessingFeeQuote>('/payments/loan-processing-fee-quote', { cache: 'no-store' })
-      .then(setProcessingFeeQuote)
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Processing-fee details could not be loaded.'));
+    void refreshProcessingFeeQuote();
+    void refreshProducts();
     Promise.all([
-      apiRequest<Product[]>('/loans/products').then(setProducts),
       apiRequest('/auth/me', { cache: 'no-store' }).then(() => setSignedIn(true)).catch(() => setSignedIn(false)),
       apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }).then(setApplications)
         .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Applications could not be loaded.')),
-    ]).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Loan products could not be loaded.'))
-      .finally(() => setLoading(false));
+    ]).finally(() => setLoading(false));
   }, []);
 
   function updateField(field: keyof ApplicationForm, value: string) {
@@ -183,11 +219,42 @@ export default function LoanProductsPage() {
     setFieldErrors(errors);
     if (Object.values(errors).some(Boolean)) return;
     setError('');
+    setTermsAccepted(false);
     setReviewing(true);
   }
 
+  function selectProduct(selectedProduct: Product) {
+    creationKey.current = null;
+    feeKey.current = null;
+    setForm({ ...emptyForm, productId: selectedProduct.id });
+    setFieldErrors({});
+    setTermsAccepted(false);
+    setReviewing(false);
+    setError('');
+  }
+
+  const feeUnavailableReason = processingFeeQuoteError ||
+    (!processingFeeQuote
+      ? processingFeeQuoteLoading ? 'Processing-fee details are still loading.' : 'Processing-fee details are unavailable.'
+      : processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes)
+        ? 'The processing-fee quote is invalid or unavailable. Contact support before continuing.'
+        : !processingFeeQuote.paymentAvailable
+          ? processingFeeQuote.unavailableReasons.join(' ') || 'Processing-fee payment is unavailable because a required policy, accounting, or M-Pesa prerequisite is incomplete.'
+          : processingFeeQuote.refundPolicyStatus !== 'CONFIGURED' || !processingFeeQuote.refundPolicyDisclosure
+            ? 'The approved processing-fee refund policy is not configured. An authorized operator must complete policy approval before payment is enabled.'
+          : '');
+  const feeQuoteAmount = processingFeeQuote?.currency === 'KES' &&
+    Number.isSafeInteger(processingFeeQuote.amountKes) && processingFeeQuote.amountKes >= 0
+    ? formatMoney(processingFeeQuote.amountKes)
+    : processingFeeQuoteError ? 'Unavailable' : 'Loading quote…';
+
   async function payProcessingFee() {
-    if (!product || !signedIn || !processingFeeQuote || processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes) || processingFeeQuote.refundPolicyStatus !== 'CONFIGURED' || !processingFeeQuote.refundPolicyDisclosure) return;
+    if (!product || !signedIn || !termsAccepted || feeUnavailableReason) {
+      setError(feeUnavailableReason || (!termsAccepted
+        ? 'Accept the reviewed product terms before continuing.'
+        : 'Sign in to continue with this application.'));
+      return;
+    }
     setBusyId('new-application');
     setError('');
     setNotice('');
@@ -199,6 +266,7 @@ export default function LoanProductsPage() {
         body: JSON.stringify({
           ...form,
           requestedPrincipalKes: Number(form.requestedPrincipalKes),
+          termsAccepted,
         }),
       });
       if (!feeKey.current) feeKey.current = crypto.randomUUID();
@@ -212,6 +280,7 @@ export default function LoanProductsPage() {
       feeKey.current = null;
       setReviewing(false);
       setForm(emptyForm);
+      setTermsAccepted(false);
       await refreshApplications();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The processing-fee request could not be completed.');
@@ -269,12 +338,15 @@ export default function LoanProductsPage() {
         <h1>Apply with clear terms.</h1>
         <p>Complete your application, review the details, then pay the configured loan processing fee. Payment does not guarantee approval or disbursement.</p>
       </section>
-      {notice && <p className="admin-inline-notice" role="status">Payment request status: pending verification. {notice}</p>}
+      {notice && <p className="admin-inline-notice" role="status">{notice}</p>}
       {error && <p className="admin-inline-error" role="alert">{error}</p>}
       {!signedIn && !loading && <p className="product-list"><Link className="button" href="/login">Sign in to apply</Link></p>}
-      {signedIn && products.length > 0 && (
+      {signedIn && product && (
         <section className="loan-application-panel" aria-labelledby="apply-heading">
-          <h2 id="apply-heading">{reviewing ? 'Review your application' : 'Your application'}</h2>
+          <div className="loan-application-title">
+            <div><p className="eyebrow">SELECTED LOAN PRODUCT</p><h2 id="apply-heading">{reviewing ? 'Review your application' : product.name}</h2></div>
+            <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => { creationKey.current = null; feeKey.current = null; setForm(emptyForm); setReviewing(false); setTermsAccepted(false); }}>Change product</button>
+          </div>
           <ol className="loan-step-indicator" aria-label={`Application step ${reviewing ? 2 : 1} of 4`}>
             <li aria-current={!reviewing ? 'step' : undefined}><span>1</span><b>Details</b></li>
             <li aria-current={reviewing ? 'step' : undefined}><span>2</span><b>Review</b></li>
@@ -283,13 +355,8 @@ export default function LoanProductsPage() {
           </ol>
           {!reviewing ? (
             <form className="loan-application-form loan-application-guided" onSubmit={reviewApplication} noValidate>
-              <label>Loan product
-                <select value={form.productId} onChange={(event) => updateField('productId', event.target.value)} aria-invalid={Boolean(fieldErrors.productId)} aria-describedby={fieldErrors.productId ? 'product-error' : undefined} required>
-                  <option value="">Choose an available product</option>
-                  {products.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.durationDays} days</option>)}
-                </select>
-                {fieldErrors.productId && <small id="product-error" role="alert">{fieldErrors.productId}</small>}
-              </label>
+              <input type="hidden" name="productId" value={product.id} />
+              <p className="selected-product-summary">{product.description} <span>Terms version {product.termsVersion} · {product.durationDays} days · {(product.interestRateBps / 100).toFixed(2)}% flat over the full term.</span></p>
               <label>Requested loan amount (KSh){product && <span className="loan-field-hint">{formatMoney(product.minimumPrincipalKes)} – {formatMoney(product.maximumPrincipalKes)}</span>}
                 <input type="number" inputMode="numeric" min={product?.minimumPrincipalKes ?? 1} max={product?.maximumPrincipalKes ?? 1_000_000_000} step="1" value={form.requestedPrincipalKes} onChange={(event) => updateField('requestedPrincipalKes', event.target.value)} aria-invalid={Boolean(fieldErrors.requestedPrincipalKes)} aria-describedby={fieldErrors.requestedPrincipalKes ? 'amount-error' : undefined} required />
                 {fieldErrors.requestedPrincipalKes && <small id="amount-error" role="alert">{fieldErrors.requestedPrincipalKes}</small>}
@@ -310,42 +377,53 @@ export default function LoanProductsPage() {
             <div className="loan-application-review">
               <dl>
                 <div><dt>Product</dt><dd>{product?.name}</dd></div>
+                <div><dt>Terms version</dt><dd>{product?.termsVersion}</dd></div>
                 <div><dt>Requested amount</dt><dd>{formatMoney(Number(form.requestedPrincipalKes))}</dd></div>
                 <div><dt>Guarantor 1</dt><dd>{form.guarantorOneName} · {form.guarantorOnePhone}</dd></div>
                 <div><dt>Guarantor 2</dt><dd>{form.guarantorTwoName} · {form.guarantorTwoPhone}</dd></div>
                 {product && Number.isSafeInteger(Number(form.requestedPrincipalKes)) && <>
-                  <div><dt>Configured interest rate</dt><dd>{(product.interestRateBps / 100).toFixed(2)}%</dd></div>
+                  <div><dt>Configured interest rate (flat, full term)</dt><dd>{(product.interestRateBps / 100).toFixed(2)}%</dd></div>
                   <div><dt>Repayment term</dt><dd>{product.durationDays} days</dd></div>
+                  <div><dt>Repayment schedule</dt><dd>One repayment at the end of the term</dd></div>
                   <div><dt>Configured product fee</dt><dd>{formatMoney(product.flatFeeKes)}</dd></div>
                   <div><dt>Estimated total repayment</dt><dd>{(() => {
                     const estimate = estimateTotalRepayment(product, Number(form.requestedPrincipalKes));
                     return estimate === null ? 'Unavailable' : formatMoney(estimate);
                   })()}</dd></div>
                 </>}
-                <div><dt>Loan Processing Fee</dt><dd>{processingFeeQuote ? formatMoney(processingFeeQuote.amountKes) : 'Unavailable'}</dd></div>
+                <div><dt>Loan Processing Fee</dt><dd>{feeQuoteAmount}</dd></div>
               </dl>
               <p>The processing fee is paid separately and is not included in the estimated repayment. Estimates use the current configured product terms; an authorized approved offer may differ and must be reviewed before acceptance. The fee is not wallet funding, loan approval, or a promise of disbursement. Your M-Pesa PIN is entered only in Safaricom’s prompt.</p>
               {processingFeeQuote?.refundPolicyStatus === 'CONFIGURED' && processingFeeQuote.refundPolicyDisclosure && <p>{processingFeeQuote.refundPolicyDisclosure} <small>Policy version {processingFeeQuote.refundPolicyVersion}.</small></p>}
-              {processingFeeQuote?.refundPolicyStatus !== 'CONFIGURED' && <p role="status">Approved refund conditions are not configured, so processing-fee payment is unavailable. Review the published terms or contact support.</p>}
-              {(!processingFeeQuote || processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes)) && <p role="alert">Processing-fee details are unavailable, so payment cannot be started. Refresh the page to try again.</p>}
+              {feeUnavailableReason && <div className="fee-unavailable-notice" role="status"><p>{feeUnavailableReason} Contact support if you need help; the fee will not be charged.</p>{processingFeeQuoteError && <button className="quiet-button" type="button" disabled={processingFeeQuoteLoading} onClick={() => void refreshProcessingFeeQuote()}>Retry fee quote</button>}</div>}
+              <label className="check-row loan-terms-acceptance">
+                <input type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} />
+                <span>I confirm my information is accurate and accept the displayed product terms, version {product.termsVersion}. I understand payment of a processing fee does not guarantee approval or disbursement.</span>
+              </label>
               <div className="loan-review-actions">
                 <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => setReviewing(false)}>Edit details</button>
-                <button className="button" type="button" disabled={busyId !== null || !processingFeeQuote || processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes) || processingFeeQuote.refundPolicyStatus !== 'CONFIGURED' || !processingFeeQuote.refundPolicyDisclosure} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : `Pay Loan Processing Fee — ${processingFeeQuote ? formatMoney(processingFeeQuote.amountKes) : 'unavailable'}`}</button>
+                <button className="button" type="button" disabled={busyId !== null || !termsAccepted || Boolean(feeUnavailableReason)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : `Pay Loan Processing Fee — ${feeQuoteAmount}`}</button>
               </div>
             </div>
           )}
         </section>
       )}
       <section className="product-list">
-        {loading ? <p>Loading configured loan products…</p> : products.length === 0 ? <div className="dashboard-empty"><p className="eyebrow">NO PRODUCTS AVAILABLE</p><h2>There are no active loan products.</h2><p>Configured borrowing options will appear here when available.</p></div> : products.map((item) => (
+        <div className="product-list-heading"><p className="eyebrow">BORROWING OPTIONS</p><h2>Choose a loan product.</h2><p>Compare current configured terms before you apply. Product names, limits and charges are managed by LoanPlus. Paying a processing fee never guarantees approval or disbursement.</p></div>
+        {productsLoading ? <p role="status">Loading configured loan products…</p> : productsError ? <div className="dashboard-empty" role="alert"><h2>Loan products could not be loaded.</h2><p>{productsError}</p><button className="quiet-button" type="button" onClick={() => void refreshProducts()}>Retry catalogue</button></div> : products.length === 0 ? <div className="dashboard-empty"><p className="eyebrow">NO PRODUCTS AVAILABLE</p><h2>There are no active loan products.</h2><p>Configured borrowing options will appear here when available.</p></div> : products.map((item) => (
           <article className="product-row" key={item.id}>
             <div><p className="eyebrow">{item.durationDays} DAY TERM</p><h2>{item.name}</h2><p>{item.description}</p></div>
             <dl>
               <div><dt>Principal range</dt><dd>{formatMoney(item.minimumPrincipalKes)} – {formatMoney(item.maximumPrincipalKes)}</dd></div>
-              <div><dt>Interest</dt><dd>{(item.interestRateBps / 100).toFixed(2)}%</dd></div>
-              <div><dt>Fixed charge</dt><dd>{formatMoney(item.flatFeeKes)}</dd></div>
+              <div><dt>Interest (flat, full term)</dt><dd>{(item.interestRateBps / 100).toFixed(2)}%</dd></div>
+              <div><dt>Duration</dt><dd>{item.durationDays} days</dd></div>
+              <div><dt>Other configured charges</dt><dd>{formatMoney(item.flatFeeKes)}</dd></div>
+              <div><dt>Loan processing fee</dt><dd>{feeQuoteAmount}</dd></div>
               <div><dt>Terms version</dt><dd>{item.termsVersion}</dd></div>
             </dl>
+            {signedIn
+              ? <button className="button button-small product-apply-button" type="button" onClick={() => selectProduct(item)}>Apply for {item.name}</button>
+              : <Link className="button button-small product-apply-button" href="/login">Sign in to apply</Link>}
           </article>
         ))}
       </section>
@@ -363,8 +441,10 @@ export default function LoanProductsPage() {
                 <p>Draft saved. Review the application details and continue to the processing-fee payment step.</p>
                 <small>Guarantor 1: {guarantor('guarantorOneName')} · {guarantor('guarantorOnePhone')}</small>
                 <small>Guarantor 2: {guarantor('guarantorTwoName')} · {guarantor('guarantorTwoPhone')}</small>
-                <p>Loan Processing Fee — {processingFeeQuote ? formatMoney(processingFeeQuote.amountKes) : 'details unavailable'}. Paying it does not guarantee approval or disbursement and does not add funds to your wallet.</p>
-                <button className="quiet-button" type="button" disabled={busyId !== null || !processingFeeQuote || processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes) || processingFeeQuote.refundPolicyStatus !== 'CONFIGURED' || !processingFeeQuote.refundPolicyDisclosure} onClick={() => void resumeProcessingFee(application.id)}>Review details and request fee payment</button>
+                <p>Loan Processing Fee — {feeQuoteAmount}. Paying it does not guarantee approval or disbursement and does not add funds to your wallet.</p>
+                {feeUnavailableReason && <p className="fee-unavailable-notice" role="status">{feeUnavailableReason}</p>}
+                {processingFeeQuoteError && <button className="quiet-button" type="button" disabled={processingFeeQuoteLoading} onClick={() => void refreshProcessingFeeQuote()}>Retry fee quote</button>}
+                <button className="quiet-button" type="button" disabled={busyId !== null || Boolean(feeUnavailableReason)} onClick={() => void resumeProcessingFee(application.id)}>Review details and request fee payment</button>
               </div>}
               {fee && <dl>
                 <div><dt>Loan Processing Fee — {formatMoney(fee.amountKes)}</dt><dd>{fee.status === 'CONFIRMED' ? 'Paid and verified' : fee.status === 'FAILED' ? 'Failed' : fee.failureCode ? 'Unresolved — do not pay again' : fee.status.replaceAll('_', ' ')}</dd></div>

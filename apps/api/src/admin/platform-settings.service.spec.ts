@@ -34,7 +34,10 @@ describe('PlatformSettingsService', () => {
   it('persists supported settings and audits the administrator and reason transactionally', async () => {
     const upsert = jest.fn(async () => ({}));
     const audit = jest.fn(async () => ({}));
-    const tx = { systemSetting: { upsert }, adminAuditLog: { create: audit } };
+    const tx = {
+      systemSetting: { upsert, findUnique: jest.fn(async () => null) },
+      adminAuditLog: { create: audit },
+    };
     const setting = {
       value: { enabled: false, code: 'KES' },
       updatedAt: new Date('2026-10-18T00:00:00Z'),

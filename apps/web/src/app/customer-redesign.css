@@ -54,8 +54,6 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
   max-width:960px;margin:12px auto;padding-inline:16px;border-radius:8px;
 }
 .dashboard-page>.admin-inline-error,.dashboard-page>.admin-inline-notice{margin-inline:auto}
-.dashboard-page>.dashboard-links{max-width:960px;margin:18px auto 0;padding:16px 24px;display:flex;flex-wrap:wrap;gap:10px}
-.dashboard-links a{min-height:42px;padding:10px 13px;border:1px solid var(--line);border-radius:10px;background:#fff}
 .application-list article{grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;padding-block:12px}
 .application-list article>div{min-width:0}
 .application-list article>span{justify-self:start}
@@ -74,6 +72,7 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .customer-filter-row{padding-top:16px!important}
 .customer-profile-details dl{grid-template-columns:repeat(2,minmax(0,1fr))}
 .customer-profile-links>a{min-height:58px;padding:13px 6px}
+.customer-profile-links .customer-install-help{position:static;display:grid;gap:8px;width:100%;padding:14px 6px;border-bottom:1px solid var(--line);border-radius:0;background:transparent;box-shadow:none}
 .customer-payment-attempts>article{grid-template-columns:minmax(0,1fr) auto;gap:8px 12px}
 .customer-payment-attempts>article>.status-label{grid-column:1/-1;justify-self:start}
 .customer-payment-attempts>article>p{font-size:12px}
@@ -81,27 +80,17 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
   min-height:68px;gap:0;padding:5px 5px calc(5px + env(safe-area-inset-bottom));
   background:rgba(255,255,255,.97);border-top-color:var(--line);box-shadow:0 -5px 20px rgba(24,55,36,.08);
 }
-.customer-app-nav>a,.customer-more-menu>summary{
+.customer-app-nav>a{
   position:relative;min-height:54px;flex:1;flex-direction:column;gap:2px;padding:4px 1px;
   color:#68756c;font-size:10px;font-weight:600;
 }
-.customer-app-nav>a svg,.customer-more-menu>summary svg{width:21px;height:21px}
+.customer-app-nav>a svg{width:21px;height:21px}
 .customer-app-nav>a[aria-current=page]{color:var(--green);font-weight:700}
 .customer-app-nav>a[aria-current=page]::before{top:0;width:26px;height:3px;background:var(--green)}
-.customer-more-menu{position:relative;display:flex;flex:1;min-width:0}
-.customer-more-menu>summary{display:flex;list-style:none;cursor:pointer}
-.customer-more-menu>summary::-webkit-details-marker{display:none}
-.customer-more-menu[open]>summary{color:var(--green)}
-.customer-more-panel{
-  position:absolute;right:5px;bottom:calc(100% + 10px);width:min(250px,calc(100vw - 24px));
-  padding:8px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;
-  box-shadow:0 12px 32px rgba(27,53,39,.17);
-}
-.customer-more-panel>a{min-height:46px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf1ed;font-size:13px;font-weight:600}
 .customer-install-help{padding:9px 0 4px;font-size:12px}
 .customer-install-help p{margin:0;color:var(--muted)}
 .customer-install-help button{width:100%;min-height:44px;border:0;border-radius:9px;background:var(--green);color:#fff;font-weight:700}
-.customer-app-nav a:hover,.customer-more-panel a:hover{color:var(--green)}
+.customer-app-nav a:hover{color:var(--green)}
 
 .auth-page{min-height:100svh;padding-block:env(safe-area-inset-top) env(safe-area-inset-bottom);background:var(--paper)}
 .auth-aside{background:#164a35}
@@ -133,8 +122,20 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .product-row .eyebrow{margin-bottom:7px;letter-spacing:.07em}
 .product-row dl>div{min-height:40px}
 .product-row dt,.product-row dd{font-size:12px}
+.product-apply-button{min-height:44px;margin-top:14px}
+.product-list-heading{margin:0 0 16px}
+.product-list-heading h2{margin:0 0 7px;font:600 22px Manrope,sans-serif}
+.product-list-heading>p:last-child{max-width:640px;color:var(--muted);font-size:13px;line-height:1.6}
 .loan-application-panel{margin-top:8px!important;border-radius:16px!important}
 .loan-application-panel>h2{font-size:20px}
+.loan-application-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
+.loan-application-title h2{margin:0;font:600 20px Manrope,sans-serif}
+.loan-application-title .eyebrow{margin:0 0 5px}
+.selected-product-summary{margin:0 0 8px;color:var(--muted);font-size:13px;line-height:1.55}
+.selected-product-summary span{display:block;margin-top:7px;color:var(--green);font-weight:600}
+.fee-unavailable-notice{padding:12px;border:1px solid #e8d6b6;border-radius:10px;background:#fff8e9;color:#6f5017;font-size:12px;line-height:1.6}
+.loan-terms-acceptance{align-items:flex-start;margin:14px 0}
+.loan-terms-acceptance input{flex:0 0 auto;margin-top:4px}
 .loan-step-indicator{
   margin:0 0 20px;padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));list-style:none;
 }
@@ -210,7 +211,7 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .dashboard-products-empty{margin:0;padding:18px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--muted);font-size:12px}
 .dashboard-shortcuts{max-width:912px;margin:16px auto;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .dashboard-shortcuts>a{min-height:46px;padding:10px 12px;display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--line);border-radius:9px;background:#fff;font-size:11px;font-weight:700}
-.dashboard-home>.dashboard-empty,.dashboard-home>.dashboard-links{margin-top:12px}
+.dashboard-home>.dashboard-empty{margin-top:12px}
 .wallet-actions{max-width:960px;margin:16px auto 0;padding:18px 20px;border:1px solid var(--line);border-radius:14px;background:#fff}
 .wallet-actions h2{margin:0 0 12px;font-size:17px}
 .wallet-actions>div{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
@@ -258,13 +259,11 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
     inset:0 0 auto;min-height:64px;justify-content:center;gap:8px;padding:6px 24px;
     border:0;border-bottom:1px solid var(--line);box-shadow:0 3px 16px rgba(27,53,39,.05);
   }
-  .customer-app-nav>a,.customer-more-menu>summary{
+  .customer-app-nav>a{
     min-width:100px;min-height:48px;flex:0 0 auto;flex-direction:row;gap:8px;padding:0 13px;font-size:13px;
   }
-  .customer-app-nav>a svg,.customer-more-menu>summary svg{width:18px;height:18px}
+  .customer-app-nav>a svg{width:18px;height:18px}
   .customer-app-nav>a[aria-current=page]::before{top:auto;bottom:-6px;width:34px}
-  .customer-more-menu{flex:0 0 auto}
-  .customer-more-panel{top:calc(100% + 8px);right:0;bottom:auto}
   .dashboard-page>.account-status,.dashboard-page>.dashboard-empty,.dashboard-page>.customer-balance-band,
   .dashboard-page>.customer-ledger-list,.dashboard-page>.customer-profile-details,.dashboard-page>.customer-filter-row,
   .dashboard-page>.customer-payment-attempts,.dashboard-page>.product-list,.dashboard-page>.loan-application-panel,
@@ -297,7 +296,6 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
   .dashboard-page>.loan-application-panel,.dashboard-page>.support-content{margin-top:12px;padding-block:18px}
   .dashboard-page>.account-status dl>div{grid-template-columns:112px minmax(0,1fr);gap:8px}
   .customer-profile-details dl{grid-template-columns:minmax(0,1fr)}
-  .dashboard-page>.dashboard-links{width:calc(100% - 28px);padding-inline:0}
   .customer-ledger-heading{align-items:flex-start}
   .customer-ledger-heading>div{align-items:flex-end;flex-direction:column}
   .customer-ledger-heading .quiet-button{padding-inline:9px;font-size:10px}
@@ -316,8 +314,8 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
   .ticket-heading{align-items:flex-start;flex-direction:column}
 }
 @media(max-width:380px){
-  .customer-app-nav>a,.customer-more-menu>summary{font-size:9px}
-  .customer-app-nav>a svg,.customer-more-menu>summary svg{width:19px;height:19px}
+  .customer-app-nav>a{font-size:9px}
+  .customer-app-nav>a svg{width:19px;height:19px}
   .dashboard-page>.account-status dl>div{grid-template-columns:94px minmax(0,1fr)}
   .customer-ledger-heading h2{font-size:17px}
   .application-list article>span:nth-child(2){font-size:11px}

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import {
   IdentityStatus,
   LoanApplicationStatus,
@@ -11,6 +11,11 @@ import {
   WithdrawalStatus,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+
+function maskPhoneNumber(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  return digits.length > 3 ? `***${digits.slice(-3)}` : '***';
+}
 
 @Injectable()
 export class AdminService {
@@ -109,45 +114,99 @@ export class AdminService {
     };
   }
 
-  async listCustomers(search?: string) {
-    const query = search?.trim().slice(0, 100);
-    const where: Prisma.UserWhereInput = query
-      ? {
-          OR: [
-            { fullName: { contains: query, mode: 'insensitive' } },
-            { email: { contains: query, mode: 'insensitive' } },
-          ],
-        }
-      : {};
-    return this.prisma.user.findMany({
-      where,
-      select: {
-        id: true,
-        fullName: true,
-        email: true,
-        role: true,
-        identityStatus: true,
-        isActive: true,
-        createdAt: true,
-        _count: { select: { paymentTransactions: true, loans: true, loanApplications: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-    });
+  async listCustomers(options: {
+    search?: string;
+    page: number;
+    pageSize: number;
+    accountStatus?: 'ACTIVE' | 'DISABLED';
+    identityStatus?: IdentityStatus;
+    registeredFrom?: Date;
+    registeredTo?: Date;
+  }) {
+    const query = options.search?.trim().slice(0, 100);
+    const filters: Prisma.UserWhereInput[] = [];
+    if (query) {
+      filters.push({
+        OR: [
+          { id: { contains: query, mode: 'insensitive' } },
+          { fullName: { contains: query, mode: 'insensitive' } },
+          { email: { contains: query, mode: 'insensitive' } },
+        ],
+      });
+    }
+    if (options.accountStatus) filters.push({ isActive: options.accountStatus === 'ACTIVE' });
+    if (options.identityStatus) filters.push({ identityStatus: options.identityStatus });
+    if (options.registeredFrom || options.registeredTo) {
+      filters.push({
+        createdAt: {
+          ...(options.registeredFrom ? { gte: options.registeredFrom } : {}),
+          ...(options.registeredTo ? { lte: options.registeredTo } : {}),
+        },
+      });
+    }
+    const where: Prisma.UserWhereInput = filters.length ? { AND: filters } : {};
+    const [total, rows] = await Promise.all([
+      this.prisma.user.count({ where }),
+      this.prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          role: true,
+          identityStatus: true,
+          isActive: true,
+          createdAt: true,
+          _count: { select: { paymentTransactions: true, loans: true, loanApplications: true } },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (options.page - 1) * options.pageSize,
+        take: options.pageSize,
+      }),
+    ]);
+    const items = rows.map(({ phone, ...customer }) => ({
+      ...customer,
+      phoneMasked: maskPhoneNumber(phone),
+    }));
+    return {
+      items,
+      total,
+      page: options.page,
+      pageSize: options.pageSize,
+      pageCount: Math.ceil(total / options.pageSize),
+    };
   }
 
-  async listPayments(search?: string, status?: PaymentStatus) {
-    const query = search?.trim().slice(0, 100);
+  async listPayments(options: {
+    search?: string;
+    status?: PaymentStatus;
+    type?: PaymentType;
+    page: number;
+    pageSize: number;
+    from?: Date;
+    to?: Date;
+  }) {
+    const query = options.search?.trim().slice(0, 100);
     const filters: Prisma.PaymentTransactionWhereInput[] = [];
-    if (status === PaymentStatus.PENDING) {
+    if (options.status === PaymentStatus.PENDING) {
       filters.push({
-          OR: [
-            { status: PaymentStatus.PENDING },
-            { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
-          ],
+        OR: [
+          { status: PaymentStatus.PENDING },
+          { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
+        ],
       });
-    } else if (status) {
-      filters.push({ status });
+    } else if (options.status) {
+      filters.push({ status: options.status });
+    }
+    if (options.type) filters.push({ type: options.type });
+    if (options.from || options.to) {
+      filters.push({
+        createdAt: {
+          ...(options.from ? { gte: options.from } : {}),
+          ...(options.to ? { lte: options.to } : {}),
+        },
+      });
     }
     if (query) {
       filters.push({
@@ -158,54 +217,313 @@ export class AdminService {
           { failureCode: { contains: query, mode: 'insensitive' } },
           { activationRequest: { is: { checkoutRequestId: { contains: query, mode: 'insensitive' } } } },
           { activationRequest: { is: { merchantRequestId: { contains: query, mode: 'insensitive' } } } },
+          { user: { is: { id: { contains: query, mode: 'insensitive' } } } },
           { user: { is: { fullName: { contains: query, mode: 'insensitive' } } } },
           { user: { is: { email: { contains: query, mode: 'insensitive' } } } },
         ],
       });
     }
     const where: Prisma.PaymentTransactionWhereInput = filters.length ? { AND: filters } : {};
-    return this.prisma.paymentTransaction.findMany({
-      where,
-      select: {
-        internalReference: true,
-        type: true,
-        amountKes: true,
-        currency: true,
-        status: true,
-        providerReference: true,
-        receiptReference: true,
-        failureCode: true,
-        confirmedAt: true,
-        createdAt: true,
-        user: { select: { fullName: true, email: true } },
-        activationRequest: {
-          select: {
-            checkoutRequestId: true,
-            merchantRequestId: true,
-            callbackEvents: { select: { providerResultCode: true, providerReceiptReference: true, receivedAt: true }, orderBy: { receivedAt: 'desc' }, take: 5 },
+    const [total, items] = await Promise.all([
+      this.prisma.paymentTransaction.count({ where }),
+      this.prisma.paymentTransaction.findMany({
+        where,
+        select: {
+          internalReference: true,
+          type: true,
+          amountKes: true,
+          currency: true,
+          status: true,
+          providerReference: true,
+          receiptReference: true,
+          failureCode: true,
+          confirmedAt: true,
+          createdAt: true,
+          user: { select: { fullName: true, email: true } },
+          activationRequest: {
+            select: {
+              checkoutRequestId: true,
+              merchantRequestId: true,
+              callbackEvents: { select: { providerResultCode: true, providerReceiptReference: true, receivedAt: true }, orderBy: { receivedAt: 'desc' }, take: 5 },
+            },
           },
         },
+        orderBy: [{ createdAt: 'desc' }, { internalReference: 'desc' }],
+        skip: (options.page - 1) * options.pageSize,
+        take: options.pageSize,
+      }),
+    ]);
+    return {
+      items,
+      total,
+      page: options.page,
+      pageSize: options.pageSize,
+      pageCount: Math.ceil(total / options.pageSize),
+    };
+  }
+
+  async getCustomerDetails(id: string) {
+    const customer = await this.prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        role: true,
+        identityStatus: true,
+        activationStatus: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: {
+          select: {
+            loanApplications: true,
+            loans: true,
+            paymentTransactions: true,
+            referralsSent: true,
+            supportTickets: true,
+            withdrawalRequests: true,
+          },
+        },
+        loanApplications: {
+          select: {
+            id: true,
+            status: true,
+            requestedPrincipalKes: true,
+            approvedPrincipalKes: true,
+            decisionReason: true,
+            submittedAt: true,
+            createdAt: true,
+            product: { select: { name: true } },
+            processingFeePayment: {
+              select: { internalReference: true, status: true, amountKes: true, receiptReference: true, confirmedAt: true },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        },
+        loans: {
+          select: {
+            id: true,
+            status: true,
+            principalKes: true,
+            outstandingKes: true,
+            totalRepayableKes: true,
+            disbursedAt: true,
+            repaidAt: true,
+            createdAt: true,
+            repayments: {
+              select: {
+                amountKes: true,
+                createdAt: true,
+                paymentTransaction: { select: { internalReference: true } },
+              },
+              orderBy: { createdAt: 'desc' },
+              take: 10,
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        },
+        paymentTransactions: {
+          select: {
+            internalReference: true,
+            type: true,
+            amountKes: true,
+            currency: true,
+            status: true,
+            providerReference: true,
+            receiptReference: true,
+            failureCode: true,
+            createdAt: true,
+            confirmedAt: true,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        },
+        referralsSent: {
+          select: {
+            id: true,
+            status: true,
+            createdAt: true,
+            qualifiedAt: true,
+            reward: { select: { amountKes: true, status: true, createdAt: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        },
+        supportTickets: {
+          select: { reference: true, subject: true, status: true, createdAt: true },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        },
       },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+    });
+    if (!customer) throw new NotFoundException('Customer account was not found.');
+    return customer;
+  }
+
+  async updateCustomerStatus(id: string, isActive: boolean, reason: string, adminId: string, ip?: string) {
+    const normalizedReason = reason.trim();
+    if (normalizedReason.length < 10 || normalizedReason.length > 500) {
+      throw new BadRequestException('A customer account status change reason is required.');
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const customer = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, role: true, isActive: true },
+      });
+      if (!customer || customer.role !== 'NORMAL_USER') {
+        throw new NotFoundException('Customer account was not found.');
+      }
+      if (customer.isActive === isActive) return { id, isActive, changed: false };
+
+      const updated = await tx.user.update({ where: { id }, data: { isActive }, select: { id: true, isActive: true } });
+      await tx.customerSession.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId: adminId,
+          action: isActive ? 'CUSTOMER_REACTIVATED' : 'CUSTOMER_SUSPENDED',
+          subjectType: 'CUSTOMER',
+          subjectId: id,
+          outcome: 'SUCCESS',
+          reason: normalizedReason,
+          details: { before: { isActive: customer.isActive }, after: { isActive } },
+          ipAddress: ip,
+        },
+      });
+      return { ...updated, changed: true };
     });
   }
 
-  async getAuditEvents(limit: number) {
-    const safeLimit = Math.min(Math.max(Math.floor(limit || 50), 1), 200);
-    return this.prisma.adminAuditLog.findMany({
-      select: {
-        id: true,
-        action: true,
-        subjectType: true,
-        subjectId: true,
-        outcome: true,
-        reason: true,
-        createdAt: true,
-        superadmin: { select: { email: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: safeLimit,
+  async updateCustomerProfile(
+    id: string,
+    fullName: string,
+    expectedUpdatedAt: string,
+    reason: string,
+    adminId: string,
+    ip?: string,
+  ) {
+    const normalizedName = fullName.trim().replace(/\s+/g, ' ');
+    const normalizedReason = reason.trim();
+    const expectedDate = new Date(expectedUpdatedAt);
+    if (normalizedName.length < 2 || normalizedName.length > 160) {
+      throw new BadRequestException('Customer name must be between 2 and 160 characters.');
+    }
+    if (normalizedReason.length < 10 || normalizedReason.length > 500) {
+      throw new BadRequestException('A reason between 10 and 500 characters is required.');
+    }
+    if (Number.isNaN(expectedDate.getTime())) {
+      throw new BadRequestException('The customer record version is invalid. Reload and try again.');
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const customer = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, role: true, fullName: true, updatedAt: true },
+      });
+      if (!customer || customer.role !== 'NORMAL_USER') {
+        throw new NotFoundException('Customer account was not found.');
+      }
+      if (customer.updatedAt.getTime() !== expectedDate.getTime()) {
+        throw new ConflictException('Customer details changed. Reload the record before editing.');
+      }
+      if (customer.fullName === normalizedName) {
+        return { id, fullName: normalizedName, updatedAt: customer.updatedAt.toISOString(), changed: false };
+      }
+      const updated = await tx.user.updateMany({
+        where: { id, role: 'NORMAL_USER', updatedAt: expectedDate },
+        data: { fullName: normalizedName },
+      });
+      if (updated.count !== 1) {
+        throw new ConflictException('Customer details changed. Reload the record before editing.');
+      }
+      const saved = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, fullName: true, updatedAt: true },
+      });
+      if (!saved) throw new NotFoundException('Customer account was not found.');
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId: adminId,
+          action: 'CUSTOMER_PROFILE_UPDATED',
+          subjectType: 'CUSTOMER',
+          subjectId: id,
+          outcome: 'SUCCESS',
+          reason: normalizedReason,
+          details: { before: { fullName: customer.fullName }, after: { fullName: saved.fullName } },
+          ipAddress: ip,
+        },
+      });
+      return { ...saved, updatedAt: saved.updatedAt.toISOString(), changed: true };
     });
+  }
+
+  async getAuditEvents(options: {
+    search?: string;
+    actorId?: string;
+    action?: string;
+    resourceType?: string;
+    outcome?: string;
+    from?: Date;
+    to?: Date;
+    page: number;
+    pageSize: number;
+  }) {
+    const filters: Prisma.AdminAuditLogWhereInput[] = [];
+    const query = options.search?.trim().slice(0, 100);
+    if (query) {
+      filters.push({
+        OR: [
+          { action: { contains: query, mode: 'insensitive' } },
+          { subjectType: { contains: query, mode: 'insensitive' } },
+          { subjectId: { contains: query, mode: 'insensitive' } },
+          { reason: { contains: query, mode: 'insensitive' } },
+          { superadmin: { is: { email: { contains: query, mode: 'insensitive' } } } },
+        ],
+      });
+    }
+    if (options.actorId?.trim()) filters.push({ superadminId: options.actorId.trim().slice(0, 80) });
+    if (options.action?.trim()) filters.push({ action: { contains: options.action.trim().slice(0, 80), mode: 'insensitive' } });
+    if (options.resourceType?.trim()) filters.push({ subjectType: options.resourceType.trim().slice(0, 80) });
+    if (options.outcome?.trim()) filters.push({ outcome: options.outcome.trim().slice(0, 40) });
+    if (options.from || options.to) {
+      filters.push({
+        createdAt: {
+          ...(options.from ? { gte: options.from } : {}),
+          ...(options.to ? { lte: options.to } : {}),
+        },
+      });
+    }
+    const where: Prisma.AdminAuditLogWhereInput = filters.length ? { AND: filters } : {};
+    const [total, items] = await Promise.all([
+      this.prisma.adminAuditLog.count({ where }),
+      this.prisma.adminAuditLog.findMany({
+        where,
+        select: {
+          id: true,
+          action: true,
+          subjectType: true,
+          subjectId: true,
+          outcome: true,
+          reason: true,
+          details: true,
+          createdAt: true,
+          superadmin: { select: { id: true, email: true } },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (options.page - 1) * options.pageSize,
+        take: options.pageSize,
+      }),
+    ]);
+    return {
+      items,
+      total,
+      page: options.page,
+      pageSize: options.pageSize,
+      pageCount: Math.ceil(total / options.pageSize),
+    };
   }
 }

@@ -17,6 +17,7 @@ const login = await readFile(new URL('../src/app/login/page.tsx', import.meta.ur
 const register = await readFile(new URL('../src/app/register/page.tsx', import.meta.url), 'utf8');
 const publicHomepage = await readFile(new URL('../src/components/public-homepage.tsx', import.meta.url), 'utf8');
 const paymentController = await readFile(new URL('../../api/src/payments/payment.controller.ts', import.meta.url), 'utf8');
+const paymentService = await readFile(new URL('../../api/src/payments/payment.service.ts', import.meta.url), 'utf8');
 
 test('wallet and transactions are loaded from authenticated ledger endpoints without cached reads', () => {
   assert.match(wallet, /apiRequest<Wallet>\('\/wallet', \{ cache: 'no-store' \}\)/);
@@ -50,6 +51,7 @@ test('home shows authenticated recent activity and keeps the overview available 
   assert.match(dashboard, /No available loan products/);
   assert.match(dashboard, /Loan products could not be loaded/);
   assert.match(dashboard, /Retry/);
+  assert.match(dashboard, /\/loans\?productId=\$\{encodeURIComponent\(item\.id\)\}/);
   assert.match(dashboard, /wallet \? formatKes\(wallet\.balanceKes\) : 'Unavailable'/);
   assert.match(dashboard, /Deposit unavailable: wallet deposits are not enabled/);
   assert.match(dashboard, /Send Money unavailable: internal transfers are not enabled/);
@@ -100,8 +102,11 @@ test('loan application collects guarantors, reviews details, and uses the proces
 });
 
 test('processing-fee quote comes from the backend constant and discloses unconfigured refund policy', () => {
-  assert.match(paymentController, /LOAN_PROCESSING_FEE_KES/);
-  assert.match(paymentController, /refundPolicyStatus: policy\.status/);
+  assert.match(paymentController, /getLoanProcessingFeeQuote/);
+  assert.match(paymentService, /paymentAvailable: unavailableReasons\.length === 0/);
+  assert.match(paymentService, /MPESA_CLEARING/);
+  assert.match(paymentService, /Approved processing-fee policy approval/);
+  assert.match(paymentService, /buildMpesaCallbackUrl/);
 });
 
 test('public homepage never substitutes a hardcoded fee when its backend request fails', () => {
@@ -117,13 +122,17 @@ test('platform currency controls reject unsupported currencies and render KES se
   assert.match(money, /Number\.isSafeInteger/);
 });
 
-test('customer navigation has five primary destinations and accessible secondary links', () => {
+test('customer navigation has five primary destinations with secondary links moved into Profile', () => {
   for (const label of ['Home', 'Loans', 'Wallet', 'Payments', 'Profile']) {
     assert.match(customerShell, new RegExp(`label: '${label}'`));
   }
-  assert.match(customerShell, /customer-more-menu/);
-  assert.match(customerShell, /href="\/support"/);
-  assert.match(customerShell, /href="\/settings\/security"/);
+  assert.doesNotMatch(customerShell, /customer-more-menu|More customer options/);
+  assert.match(profile, /href="\/support"/);
+  assert.match(profile, /href="\/settings\/security"/);
+  assert.match(profile, /href="\/terms"/);
+  assert.match(profile, /href="\/privacy"/);
+  assert.match(profile, /\/platform\/pwa\/eligibility/);
+  assert.doesNotMatch(dashboard, /className="dashboard-links"/);
   assert.match(customerShell, /aria-current=\{active \? 'page' : undefined\}/);
 });
 

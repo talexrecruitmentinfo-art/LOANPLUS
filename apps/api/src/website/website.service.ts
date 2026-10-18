@@ -73,7 +73,15 @@ export class WebsiteService {
           });
         }
         await tx.adminAuditLog.create({
-          data: { superadminId: adminId, action: 'WEBSITE_DRAFT_SAVE', subjectType: 'WEBSITE_CONTENT', subjectId: revision.id, outcome: 'SUCCESS', ipAddress: ipAddress?.slice(0, 64) },
+          data: {
+            superadminId: adminId,
+            action: 'WEBSITE_DRAFT_SAVE',
+            subjectType: 'WEBSITE_CONTENT',
+            subjectId: revision.id,
+            outcome: 'SUCCESS',
+            details: { version: revision.version, status: 'DRAFT' },
+            ipAddress: ipAddress?.slice(0, 64),
+          },
         });
         return this.presentRevision(revision);
       });
@@ -101,7 +109,15 @@ export class WebsiteService {
       });
       if (changed.count !== 1) throw new ConflictException('The draft changed while publishing. Refresh and try again.');
       await tx.adminAuditLog.create({
-        data: { superadminId: adminId, action: 'WEBSITE_CONTENT_PUBLISH', subjectType: 'WEBSITE_CONTENT', subjectId: draft.id, outcome: 'SUCCESS', ipAddress: ipAddress?.slice(0, 64) },
+        data: {
+          superadminId: adminId,
+          action: 'WEBSITE_CONTENT_PUBLISH',
+          subjectType: 'WEBSITE_CONTENT',
+          subjectId: draft.id,
+          outcome: 'SUCCESS',
+          details: { version: draft.version, status: 'PUBLISHED' },
+          ipAddress: ipAddress?.slice(0, 64),
+        },
       });
       return { version: draft.version, publishedAt: new Date(), content };
     });
@@ -113,7 +129,15 @@ export class WebsiteService {
       if (!draft) return { discarded: false };
       await tx.websiteContentRevision.delete({ where: { id: draft.id } });
       await tx.adminAuditLog.create({
-        data: { superadminId: adminId, action: 'WEBSITE_DRAFT_DISCARD', subjectType: 'WEBSITE_CONTENT', subjectId: draft.id, outcome: 'SUCCESS', ipAddress: ipAddress?.slice(0, 64) },
+        data: {
+          superadminId: adminId,
+          action: 'WEBSITE_DRAFT_DISCARD',
+          subjectType: 'WEBSITE_CONTENT',
+          subjectId: draft.id,
+          outcome: 'SUCCESS',
+          details: { version: draft.version, status: 'DISCARDED' },
+          ipAddress: ipAddress?.slice(0, 64),
+        },
       });
       return { discarded: true };
     });

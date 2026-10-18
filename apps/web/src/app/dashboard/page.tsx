@@ -144,7 +144,7 @@ export default function DashboardPage() {
       <section className="dashboard-products" aria-labelledby="dashboard-products-title">
         <div className="dashboard-section-heading"><h2 id="dashboard-products-title">Loan products</h2><Link href="/loans">View all <span aria-hidden="true">›</span></Link></div>
         {productsLoading ? <p className="dashboard-products-empty" role="status">Loading configured loan products…</p> : products === null ? <p className="dashboard-products-empty" role="alert">Loan products could not be loaded. <button className="quiet-button" type="button" onClick={() => void refreshProducts()}>Retry</button></p> : products.length === 0 ? <p className="dashboard-products-empty">No available loan products.</p> : products.map((item) => (
-          <Link className="dashboard-product-row" href="/loans" key={item.id}>
+          <Link className="dashboard-product-row" href={`/loans?productId=${encodeURIComponent(item.id)}`} key={item.id}>
             <span className="dashboard-product-icon" aria-hidden="true">L+</span>
             <span className="dashboard-product-copy"><b>{item.name}</b><small>{item.description}</small><small>From {formatKes(item.minimumPrincipalKes)} to {formatKes(item.maximumPrincipalKes)} · {item.durationDays} days</small></span>
             <span className="dashboard-product-arrow" aria-hidden="true">›</span>
@@ -200,14 +200,6 @@ export default function DashboardPage() {
         ))}</div>
         <Link className="legal-home" href="/transactions">View payment history ↗</Link>
       </section>}
-      <div className="dashboard-links">
-        <Link href="/wallet">Wallet <span aria-hidden="true">↗</span></Link>
-        <Link href="/loans">Loan products <span aria-hidden="true">↗</span></Link>
-        <Link href="/transactions">Transactions <span aria-hidden="true">↗</span></Link>
-        <Link href="/referrals">Referral programme <span aria-hidden="true">↗</span></Link>
-        <Link href="/support">Customer support <span aria-hidden="true">↗</span></Link>
-        <Link href="/settings/security">Security settings <span aria-hidden="true">↗</span></Link>
-      </div>
     </main>
   );
 }

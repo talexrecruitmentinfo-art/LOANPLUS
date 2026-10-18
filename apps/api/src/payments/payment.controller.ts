@@ -4,7 +4,6 @@ import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard } from '../auth/session.guard';
 import { InitiateLoanProcessingFeeDto } from './payment.dto';
 import { PaymentService } from './payment.service';
-import { getLoanProcessingFeePolicy, LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
 
 function assertSameOrigin(request: AuthenticatedRequest): void {
   const expected = new URL(process.env.WEB_ORIGIN ?? 'http://localhost:3000').origin;
@@ -26,16 +25,7 @@ export class PaymentController {
 
   @Get('loan-processing-fee-quote')
   async getLoanProcessingFeeQuote() {
-    const policy = getLoanProcessingFeePolicy();
-    return {
-      data: {
-        amountKes: LOAN_PROCESSING_FEE_KES,
-        currency: 'KES',
-        refundPolicyStatus: policy.status,
-        refundPolicyVersion: policy.version,
-        refundPolicyDisclosure: policy.disclosure,
-      },
-    };
+    return { data: await this.payments.getLoanProcessingFeeQuote() };
   }
 
   @Post('loan-processing-fee')

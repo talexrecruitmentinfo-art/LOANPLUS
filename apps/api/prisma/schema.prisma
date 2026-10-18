@@ -247,6 +247,7 @@ model AdminAuditLog {
   subjectId    String?         @db.VarChar(80)
   outcome      String          @db.VarChar(40)
   reason       String?         @db.VarChar(500)
+  details      Json?
   ipAddress    String?         @db.VarChar(64)
   createdAt    DateTime        @default(now())
   superadmin   SuperadminUser? @relation(fields: [superadminId], references: [id], onDelete: Restrict)
@@ -291,30 +292,30 @@ model LoanProduct {
 }
 
 model LoanApplication {
-  id                    String                @id @default(cuid())
-  creationIdempotencyKey String?              @unique @db.VarChar(128)
-  creationRequestHash   String?                @db.VarChar(64)
-  userId                String
-  productId             String
-  reviewerId            String?
-  requestedPrincipalKes Int
-  approvedPrincipalKes  Int?
-  approvedChargesKes    Int?
-  approvedTermsSnapshot Json?
-  status                LoanApplicationStatus @default(SUBMITTED)
-  applicationData       Json                  @default("{}")
-  decisionReason        String?               @db.VarChar(1000)
-  requestedInformation  String?               @db.VarChar(1000)
-  submittedAt           DateTime?
-  createdAt             DateTime              @default(now())
-  reviewedAt            DateTime?
-  offerExpiresAt        DateTime?
-  acceptedAt            DateTime?
-  user                  User                  @relation(fields: [userId], references: [id], onDelete: Restrict)
-  product               LoanProduct           @relation(fields: [productId], references: [id], onDelete: Restrict)
-  reviewer              SuperadminUser?       @relation(fields: [reviewerId], references: [id], onDelete: Restrict)
-  loan                  Loan?
-  processingFeePayment  PaymentTransaction?
+  id                     String                @id @default(cuid())
+  creationIdempotencyKey String?               @unique @db.VarChar(128)
+  creationRequestHash    String?               @db.VarChar(64)
+  userId                 String
+  productId              String
+  reviewerId             String?
+  requestedPrincipalKes  Int
+  approvedPrincipalKes   Int?
+  approvedChargesKes     Int?
+  approvedTermsSnapshot  Json?
+  status                 LoanApplicationStatus @default(SUBMITTED)
+  applicationData        Json                  @default("{}")
+  decisionReason         String?               @db.VarChar(1000)
+  requestedInformation   String?               @db.VarChar(1000)
+  submittedAt            DateTime?
+  createdAt              DateTime              @default(now())
+  reviewedAt             DateTime?
+  offerExpiresAt         DateTime?
+  acceptedAt             DateTime?
+  user                   User                  @relation(fields: [userId], references: [id], onDelete: Restrict)
+  product                LoanProduct           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  reviewer               SuperadminUser?       @relation(fields: [reviewerId], references: [id], onDelete: Restrict)
+  loan                   Loan?
+  processingFeePayment   PaymentTransaction?
 
   @@index([userId, submittedAt])
   @@index([status, submittedAt])
@@ -530,18 +531,86 @@ model SystemSetting {
   @@map("system_settings")
 }
 
+model SystemHealthComponent {
+  component         String    @id @db.VarChar(80)
+  status            String    @db.VarChar(16)
+  explanation       String    @db.VarChar(500)
+  checkedAt         DateTime
+  durationMs        Int?
+  lastSuccessAt     DateTime?
+  affectedModules   Json      @default("[]")
+  recommendedAction String    @db.VarChar(300)
+
+  @@map("system_health_components")
+}
+
+model SystemIncident {
+  id                 String               @id @default(cuid())
+  fingerprint        String               @unique @db.VarChar(160)
+  title              String               @db.VarChar(160)
+  component          String               @db.VarChar(80)
+  category           String               @db.VarChar(80)
+  severity           String               @db.VarChar(16)
+  status             String               @default("OPEN") @db.VarChar(20)
+  description        String               @db.VarChar(500)
+  affectedModules    Json                 @default("[]")
+  diagnosticEvidence Json                 @default("{}")
+  firstSeenAt        DateTime             @default(now())
+  lastSeenAt         DateTime             @default(now())
+  recoveredAt        DateTime?
+  recoveryEvidence   String?              @db.VarChar(300)
+  occurrenceCount    Int                  @default(1)
+  acknowledgedAt     DateTime?
+  acknowledgedById   String?              @db.VarChar(80)
+  notes              SystemIncidentNote[]
+  alert              SystemIncidentAlert?
+
+  @@index([status, severity, lastSeenAt])
+  @@index([component, firstSeenAt])
+  @@map("system_incidents")
+}
+
+model SystemIncidentNote {
+  id         String         @id @default(cuid())
+  incidentId String
+  actorId    String         @db.VarChar(80)
+  note       String         @db.VarChar(1000)
+  createdAt  DateTime       @default(now())
+  incident   SystemIncident @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+
+  @@index([incidentId, createdAt])
+  @@map("system_incident_notes")
+}
+
+model SystemIncidentAlert {
+  id              String         @id @default(cuid())
+  incidentId      String         @unique
+  channel         String         @db.VarChar(20)
+  status          String         @db.VarChar(20)
+  attemptCount    Int            @default(0)
+  failureCategory String?        @db.VarChar(80)
+  recipientCount  Int            @default(0)
+  deliveredCount  Int            @default(0)
+  attemptedAt     DateTime       @default(now())
+  completedAt     DateTime?
+  incident        SystemIncident @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+
+  @@index([status, attemptedAt])
+  @@map("system_incident_alerts")
+}
+
 model WebsiteContentRevision {
-  id             String         @id @default(cuid())
-  version        Int
-  status         String         @db.VarChar(16)
-  content        Json
-  createdById    String
-  publishedById  String?
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
-  publishedAt    DateTime?
-  createdBy      SuperadminUser @relation("WebsiteRevisionCreator", fields: [createdById], references: [id], onDelete: Restrict)
-  publishedBy    SuperadminUser? @relation("WebsiteRevisionPublisher", fields: [publishedById], references: [id], onDelete: Restrict)
+  id            String          @id @default(cuid())
+  version       Int
+  status        String          @db.VarChar(16)
+  content       Json
+  createdById   String
+  publishedById String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  publishedAt   DateTime?
+  createdBy     SuperadminUser  @relation("WebsiteRevisionCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  publishedBy   SuperadminUser? @relation("WebsiteRevisionPublisher", fields: [publishedById], references: [id], onDelete: Restrict)
 
   @@unique([version])
   @@index([status, updatedAt])

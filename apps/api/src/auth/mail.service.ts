@@ -23,6 +23,24 @@ export class MailService {
     );
   }
 
+  async sendSystemIncidentAlert(
+    recipient: string,
+    incident: { id: string; title: string; severity: string; component: string; description: string },
+  ): Promise<void> {
+    await this.sendEmail(
+      recipient,
+      `LoanPlus ${incident.severity.toLowerCase()} system incident`,
+      [
+        `Incident: ${incident.id}`,
+        `Component: ${incident.component}`,
+        `Severity: ${incident.severity}`,
+        `Summary: ${incident.title}`,
+        incident.description,
+        'Sign in to the LoanPlus Admin Portal to review current evidence and investigation notes.',
+      ].join('\n'),
+    );
+  }
+
   private async sendEmail(to: string, subject: string, text: string): Promise<void> {
     const apiKey = this.requiredSetting('RESEND_API_KEY');
     const from = this.requiredSetting('RESEND_FROM');

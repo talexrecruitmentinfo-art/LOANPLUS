@@ -1,6 +1,8 @@
 import { Controller, Get, Header, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from './prisma/prisma.service';
 
+const READINESS_PROBE_TIMEOUT_MS = 3_000;
+
 @Controller('health')
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}
@@ -25,11 +27,25 @@ export class HealthController {
 
   @Get('ready')
   async getReadiness(): Promise<{ status: string }> {
+    let timeout: NodeJS.Timeout | undefined;
     try {
-      await this.prisma.$queryRaw`SELECT 1`;
+      const timedOut = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('READINESS_PROBE_TIMEOUT')), READINESS_PROBE_TIMEOUT_MS);
+      });
+      await Promise.race([
+        this.prisma.$transaction(
+          async (tx) => {
+            await tx.$queryRaw`SELECT 1`;
+          },
+          { maxWait: READINESS_PROBE_TIMEOUT_MS, timeout: READINESS_PROBE_TIMEOUT_MS },
+        ),
+        timedOut,
+      ]);
       return { status: 'ok' };
     } catch {
       throw new ServiceUnavailableException({ status: 'unavailable' });
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 

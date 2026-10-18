@@ -5,6 +5,7 @@ import test from 'node:test';
 const manifest = await readFile(new URL('../src/app/manifest.ts', import.meta.url), 'utf8');
 const worker = await readFile(new URL('../public/sw.js', import.meta.url), 'utf8');
 const shell = await readFile(new URL('../src/components/customer-app-shell.tsx', import.meta.url), 'utf8');
+const profile = await readFile(new URL('../src/app/profile/page.tsx', import.meta.url), 'utf8');
 const releaseRoute = await readFile(new URL('../src/app/api/release/route.ts', import.meta.url), 'utf8');
 
 test('PWA manifest declares LoanPlus standalone scope and application icons', () => {
@@ -27,12 +28,12 @@ test('service worker caches only same-origin public static assets', () => {
   assert.doesNotMatch(worker, /\/wallet|\/payments|\/auth|\/loans\/applications/);
 });
 
-test('install UI checks backend eligibility and includes browser-specific guidance', () => {
-  assert.match(shell, /\/platform\/pwa\/eligibility/);
-  assert.match(shell, /beforeinstallprompt/);
-  assert.match(shell, /appinstalled/);
-  assert.match(shell, /display-mode: standalone/);
-  assert.match(shell, /Add to Home Screen/);
+test('profile installation entry checks backend eligibility and includes browser-specific guidance', () => {
+  assert.match(profile, /\/platform\/pwa\/eligibility/);
+  assert.match(profile, /beforeinstallprompt/);
+  assert.match(profile, /appinstalled/);
+  assert.match(profile, /display-mode: standalone/);
+  assert.match(profile, /Add to Home Screen/);
 });
 
 test('frontend release endpoint has a safe explicit unknown fallback', () => {
