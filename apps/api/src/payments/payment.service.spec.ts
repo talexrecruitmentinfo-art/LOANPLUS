@@ -1,8 +1,6 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
-  InternalServerErrorException,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -13,6 +11,7 @@ import { encryptSensitiveValue, hashToken } from '../auth/security.util';
 import { LedgerService } from '../ledger/ledger.service';
 import { MpesaService } from './mpesa.service';
 import { PaymentService } from './payment.service';
+import { InitiateLoanProcessingFeeDto } from './payment.dto';
 
 describe('M-Pesa payment callback reconciliation', () => {
   const originalEncryptionKey = process.env.ID_ENCRYPTION_KEY_BASE64;
@@ -103,6 +102,7 @@ describe('M-Pesa payment callback reconciliation', () => {
         id: 'payment-id',
         userId: 'user-id',
         type: PaymentType.ACTIVATION,
+        loanApplicationId: null,
         amountKes: 50,
         currency: 'KES',
         status: paymentStatus,
@@ -121,7 +121,15 @@ describe('M-Pesa payment callback reconciliation', () => {
         }),
       },
       paymentTransaction: {
-        updateMany: jest.fn(async ({ data }: { data: Record<string, unknown> & { status: 'CONFIRMED' | 'FAILED' | 'CANCELLED' | 'EXPIRED' } }) => {
+        updateMany: jest.fn(async ({ data }: {
+          data: Record<string, unknown> & { status?: 'CONFIRMED' | 'FAILED' | 'CANCELLED' | 'EXPIRED' };
+        }) => {
+          if (typeof data.status !== 'string') {
+            if (paymentStatus !== 'PENDING') return { count: 0 };
+            paymentUpdateData = data;
+            paymentFailureCode = typeof data.failureCode === 'string' ? data.failureCode : null;
+            return { count: 1 };
+          }
           const canRecoverLegacyProcessing =
             paymentStatus === 'FAILED' &&
             paymentFailureCode === 'MPESA_RESULT_4999' &&
@@ -187,157 +195,6 @@ describe('M-Pesa payment callback reconciliation', () => {
     );
   });
 
-  describe('activation payment disclosure availability', () => {
-    const originalCallbackUrl = process.env.MPESA_CALLBACK_URL;
-    const policy = {
-      approved: true,
-      purpose: 'Account activation only',
-      refundability: 'CONDITIONAL_REFUND',
-      creditedToWallet: true,
-      accountingTreatment: 'Customer wallet liability',
-      customerDisclosure: 'Payment activates the account only.',
-      termsVersion: 'activation-v1',
-      creditAccountCode: null,
-    };
-
-    function createService(
-      amount: number | null,
-      configuredPolicy: typeof policy | null,
-      destination: {
-        businessShortCode: string;
-        tillNumber: string | null;
-        transactionType: 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
-      } | null,
-    ) {
-      const prisma = {
-        systemSetting: {
-          findUnique: jest.fn(async ({ where }: { where: { key: string } }) =>
-            where.key === 'activation.amount_kes'
-              ? amount === null ? null : { value: amount }
-              : configuredPolicy === null ? null : { value: configuredPolicy }),
-        },
-      } as unknown as PrismaService;
-      const service = new PaymentService(
-        prisma,
-        { getCustomerPaymentDestination: jest.fn(() => destination) } as unknown as MpesaService,
-        {} as LedgerService,
-      );
-      return service;
-    }
-
-    afterEach(() => {
-      if (originalCallbackUrl === undefined) delete process.env.MPESA_CALLBACK_URL;
-      else process.env.MPESA_CALLBACK_URL = originalCallbackUrl;
-    });
-
-    it.each([
-      ['missing policy', 50, null],
-      ['unapproved policy', 50, { ...policy, approved: false }],
-      ['draft policy', 50, { ...policy, termsVersion: 'draft-v1' }],
-      ['wrong amount', 49, policy],
-    ] as const)('keeps payment unavailable for %s', async (_name, amount, configuredPolicy) => {
-      const service = createService(amount, configuredPolicy, null);
-      await expect(service.getActivationTerms()).resolves.toMatchObject({
-        available: false,
-        amountKes: 50,
-        currency: 'KES',
-        terms: null,
-      });
-    });
-
-    it('shows approved terms but keeps payment unavailable without an M-Pesa destination', async () => {
-      const service = createService(50, policy, null);
-      await expect(service.getActivationTerms()).resolves.toMatchObject({
-        available: false,
-        availabilityReason: null,
-        terms: { termsVersion: 'activation-v1', customerDisclosure: policy.customerDisclosure },
-      });
-    });
-
-    it('surfaces a safe, actionable provider configuration reason to the activation page', async () => {
-      const prisma = {
-        systemSetting: {
-          findUnique: jest.fn(async ({ where }: { where: { key: string } }) =>
-            where.key === 'activation.amount_kes' ? { value: 50 } : { value: policy }),
-        },
-      } as unknown as PrismaService;
-      const service = new PaymentService(
-        prisma,
-        {
-          getCustomerPaymentDestination: jest.fn(() => {
-            throw new InternalServerErrorException('MPESA_CONSUMER_KEY must be configured in the API environment.');
-          }),
-        } as unknown as MpesaService,
-        {} as LedgerService,
-      );
-
-      await expect(service.getActivationTerms()).resolves.toMatchObject({
-        available: false,
-        availabilityReason: 'MPESA_CONSUMER_KEY must be configured in the API environment.',
-        terms: { termsVersion: 'activation-v1' },
-      });
-    });
-
-    it('reports the live-payment gate after validating the production destination settings', async () => {
-      const prisma = {
-        systemSetting: {
-          findUnique: jest.fn(async ({ where }: { where: { key: string } }) =>
-            where.key === 'activation.amount_kes' ? { value: 50 } : { value: policy }),
-        },
-      } as unknown as PrismaService;
-      const service = new PaymentService(
-        prisma,
-        {
-          getCustomerPaymentDestination: jest.fn(() => {
-            throw new ServiceUnavailableException(
-              'Production M-Pesa payments are disabled. Set MPESA_LIVE_ENABLED=true only after production configuration and deployment verification.',
-            );
-          }),
-        } as unknown as MpesaService,
-        {} as LedgerService,
-      );
-
-      await expect(service.getActivationTerms()).resolves.toMatchObject({
-        available: false,
-        availabilityReason: expect.stringContaining('MPESA_LIVE_ENABLED=true'),
-        amountKes: 50,
-        currency: 'KES',
-        terms: { termsVersion: 'activation-v1' },
-      });
-    });
-
-    it('does not expose configured destination details when approved terms are available', async () => {
-      process.env.MPESA_CALLBACK_URL = 'https://api.example.com/api/v1/payments/mpesa/callback';
-      const service = createService(50, policy, {
-        businessShortCode: '174379',
-        tillNumber: null,
-        transactionType: 'CustomerPayBillOnline',
-      });
-      const response = await service.getActivationTerms();
-      expect(response).toMatchObject({
-        available: true,
-        amountKes: 50,
-        currency: 'KES',
-        terms: { termsVersion: 'activation-v1' },
-      });
-      expect(response).not.toHaveProperty('destination');
-      expect(JSON.stringify(response)).not.toMatch(/174379|Till|Paybill/i);
-    });
-
-    it('keeps the confirmed Buy Goods shortcode and Till internal', async () => {
-      process.env.MPESA_CALLBACK_URL = 'https://loanplus-api.onrender.com/api/v1/payments/mpesa/callback';
-      const service = createService(50, policy, {
-        businessShortCode: '5526990',
-        tillNumber: '3400188',
-        transactionType: 'CustomerBuyGoodsOnline',
-      });
-      const response = await service.getActivationTerms();
-      expect(response.available).toBe(true);
-      expect(response).not.toHaveProperty('destination');
-      expect(JSON.stringify(response)).not.toMatch(/5526990|3400188|Till/i);
-    });
-  });
-
   it('keeps an unverified nonzero callback unresolved and allows later verified success', async () => {
     providerResultCode = 1032;
     await paymentService.handleMpesaCallback(callbackToken, {
@@ -351,10 +208,12 @@ describe('M-Pesa payment callback reconciliation', () => {
       },
     });
     expect(paymentStatus).toBe('PENDING');
+    expect(paymentFailureCode).toBe('MPESA_RESULT_1032');
 
     providerResultCode = 0;
     await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
     expect(paymentStatus).toBe('CONFIRMED');
+    expect(paymentFailureCode).toBeNull();
     expect(postLedger).toHaveBeenCalledTimes(1);
     expect(userUpdate).toHaveBeenCalledTimes(1);
   });
@@ -409,7 +268,7 @@ describe('M-Pesa payment callback reconciliation', () => {
     else process.env.ID_ENCRYPTION_KEY_BASE64 = originalEncryptionKey;
   });
 
-  describe('activation payment initiation', () => {
+  describe('loan processing-fee initiation', () => {
     const originalEnvironment = {
       nodeEnv: process.env.NODE_ENV,
       encryptionKey: process.env.ID_ENCRYPTION_KEY_BASE64,
@@ -427,46 +286,34 @@ describe('M-Pesa payment callback reconciliation', () => {
       }
     });
 
-    it('keeps the payment pending after Safaricom accepts the STK request', async () => {
+    it('creates one KSh 50 application-linked payment without activating or crediting the wallet', async () => {
       process.env.NODE_ENV = 'test';
       process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
       process.env.MPESA_CALLBACK_URL = 'https://api.example.com/api/v1/payments/mpesa/callback';
-
       const create = jest.fn(async () => ({
         id: 'payment-id',
-        internalReference: `LPA${'A'.repeat(32)}`,
+        internalReference: `LPP${'A'.repeat(32)}`,
       }));
       const updateRequest = jest.fn(async () => ({}));
       const prisma = {
         paymentTransaction: {
           findUnique: jest.fn(async () => null),
-          findFirst: jest.fn(async () => null),
           create,
         },
-        user: {
-          findUnique: jest.fn(async () => ({
-            phone: '+254712345678',
-            isActive: true,
-            activationStatus: 'PENDING',
-          })),
+        user: { findUnique: jest.fn(async () => ({ phone: '+254712345678', isActive: true })) },
+        loanApplication: {
+          findFirst: jest.fn(async () => ({ id: 'application-id', status: 'DRAFT', processingFeePayment: null })),
         },
-        systemSetting: {
-          findUnique: jest.fn(async ({ where }: { where: { key: string } }) =>
-            where.key === 'activation.amount_kes'
-              ? { value: 50 }
-              : { value: {
-                  approved: true,
-                  purpose: 'Activation',
-                  refundability: 'CONDITIONAL_REFUND',
-                  creditedToWallet: true,
-                  accountingTreatment: 'Wallet liability',
-                  customerDisclosure: 'Test activation disclosure.',
-                  termsVersion: 'test-v1',
-                  creditAccountCode: null,
-                } }),
-        },
+        systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
+        ledgerAccount: { findUnique: jest.fn(async ({ where }: { where: { code: string } }) => ({
+          id: where.code,
+          isActive: true,
+          currency: 'KES',
+          accountType: where.code === 'MPESA_CLEARING' ? 'ASSET' : 'REVENUE',
+        })) },
         $transaction: jest.fn(async (callback: (tx: never) => Promise<unknown>) => callback({
-          paymentTransaction: { findFirst: jest.fn(async () => null), create },
+          loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
+          paymentTransaction: { create },
           idempotencyRecord: { create: jest.fn(async () => ({})) },
         } as never)),
         activationPaymentRequest: { update: updateRequest },
@@ -491,34 +338,25 @@ describe('M-Pesa payment callback reconciliation', () => {
         { postWithinTransaction } as unknown as LedgerService,
       );
 
-      await expect(paymentService.initiateActivationPayment(
+      const response = await paymentService.initiateLoanProcessingFee(
         'user-id',
-        { phoneNumber: '0712345678', termsAccepted: true, termsVersion: 'stale-v0' },
-        'activation-stale-policy-001',
-      )).rejects.toBeInstanceOf(ConflictException);
-      expect(create).not.toHaveBeenCalled();
-
-      const response = await paymentService.initiateActivationPayment(
-        'user-id',
-        { phoneNumber: '0712345678', termsAccepted: true, termsVersion: 'test-v1' },
-        'activation-test-idempotency-001',
+        Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId: 'application-id', reviewConfirmed: true }),
+        'loan-fee-idempotency-0001',
       );
 
       expect(response).toMatchObject({ status: 'PENDING', amountKes: 50, currency: 'KES' });
       expect(create).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({
           amountKes: 50,
-          activationRequest: { create: expect.objectContaining({
-            termsAcceptedVersion: 'test-v1',
-            termsAcceptedAt: expect.any(Date),
-          }) },
+          type: PaymentType.LOAN_PROCESSING_FEE,
+          loanApplicationId: 'application-id',
+          activationRequest: { create: expect.objectContaining({ phoneNumberCiphertext: expect.any(String) }) },
         }),
-        include: { activationRequest: true },
       }));
       expect(initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
         amountKes: 50,
         phoneNumber: '254712345678',
-        description: 'Activation',
+        description: 'Loan processing fee',
       }));
       const stkInput = initiateStkPush.mock.calls[0][0] as {
         accountReference: string;
@@ -542,23 +380,25 @@ describe('M-Pesa payment callback reconciliation', () => {
         data: { checkoutRequestId: 'ws_CO_test', merchantRequestId: 'mr_test' },
       }));
       expect(postWithinTransaction).not.toHaveBeenCalled();
+    });
 
-      updateRequest.mockRejectedValueOnce(new Error('Provider request identifiers could not be persisted.'));
-      await expect(paymentService.initiateActivationPayment(
+    it('does not begin fee payment without an explicit reviewed-application confirmation', async () => {
+      const paymentService = new PaymentService(
+        {} as PrismaService,
+        {} as MpesaService,
+        {} as LedgerService,
+      );
+      await expect(paymentService.initiateLoanProcessingFee(
         'user-id',
-        { phoneNumber: '0712345678', termsAccepted: true, termsVersion: 'test-v1' },
-        'activation-test-idempotency-002',
-      )).rejects.toThrow('Provider request identifiers could not be persisted.');
-      expect(create).toHaveBeenCalledTimes(2);
-      expect(initiateStkPush).toHaveBeenCalledTimes(2);
-      expect(create.mock.invocationCallOrder[1]).toBeLessThan(initiateStkPush.mock.invocationCallOrder[1]);
-      expect(postWithinTransaction).not.toHaveBeenCalled();
+        Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId: 'application-id', reviewConfirmed: false }),
+        'loan-fee-idempotency-0001',
+      )).rejects.toBeInstanceOf(BadRequestException);
     });
   });
 
   it.each([
-    [0, 'Safaricom has not yet sent the payment confirmation. The payment remains pending.'],
-    [4999, 'Safaricom reports that the payment request is still processing. Do not submit another payment.'],
+    [0, 'The payment outcome is still being verified with Safaricom. Do not submit another payment while this request remains unresolved.'],
+    [4999, 'The payment outcome is still being verified with Safaricom. Do not submit another payment while this request remains unresolved.'],
     [999999, 'Safaricom returned a result that does not conclusively resolve this payment. It remains pending; do not submit another payment.'],
   ] as const)('keeps STK Query result %s pending until a verified callback is received', async (resultCode, statusCheckMessage) => {
     const request = {
@@ -678,7 +518,7 @@ describe('M-Pesa payment callback reconciliation', () => {
       status: 'PENDING',
       providerResult: {
         code: 4999,
-        message: 'Safaricom reports that the payment request is still processing. Do not submit another payment.',
+        message: 'The payment outcome is still being verified with Safaricom. Do not submit another payment while this request remains unresolved.',
       },
     }]);
   });
@@ -773,9 +613,9 @@ describe('M-Pesa payment callback reconciliation', () => {
       status: 'PENDING',
       providerResult: {
         code: 4999,
-        message: 'Safaricom reports that the payment request is still processing. Do not submit another payment.',
+        message: 'The payment outcome is still being verified with Safaricom. Do not submit another payment while this request remains unresolved.',
       },
-      statusCheckMessage: 'Safaricom reports that the payment request is still processing. Do not submit another payment.',
+      statusCheckMessage: 'The payment outcome is still being verified with Safaricom. Do not submit another payment while this request remains unresolved.',
       accountActivated: false,
     });
     expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledTimes(2);

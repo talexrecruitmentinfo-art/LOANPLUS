@@ -16,7 +16,7 @@ export class CustomerSessionGuard implements CanActivate {
     const sessionHash = hashToken(token);
     const session = await this.prisma.customerSession.findFirst({
       where: { tokenHash: sessionHash, revokedAt: null, expiresAt: { gt: new Date() }, user: { isActive: true } },
-      include: { user: { select: { id: true, role: true, email: true, phone: true, fullName: true, identityStatus: true, activationStatus: true, referralCode: true } } },
+      include: { user: { select: { id: true, role: true, email: true, phone: true, fullName: true, identityStatus: true, referralCode: true } } },
     });
     if (!session || session.user.role !== 'NORMAL_USER') {
       throw new UnauthorizedException('Authentication required.');

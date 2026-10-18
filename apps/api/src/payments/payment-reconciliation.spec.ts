@@ -11,6 +11,7 @@ describe('PaymentService provider reconciliation', () => {
     id: 'activation-request-id',
     paymentTransactionId: paymentId,
     userId: 'customer-id',
+    loanApplicationId: null,
     checkoutRequestId: 'checkout-id',
     merchantRequestId: 'merchant-id',
     callbackTokenHash: 'hashed-callback-token',
@@ -22,6 +23,7 @@ describe('PaymentService provider reconciliation', () => {
     id: paymentId,
     userId: 'customer-id',
     type: PaymentType.ACTIVATION,
+    loanApplicationId: null,
     amountKes: 50,
     currency: 'KES',
     status: 'PENDING' as PaymentStatus,
@@ -38,7 +40,13 @@ describe('PaymentService provider reconciliation', () => {
   };
 
   function createService(resultCode = 4999) {
-    const createAttempt = jest.fn(async () => startedAttempt);
+    const createAttempt = jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+      ...startedAttempt,
+      ...data,
+      id: 'attempt-id',
+      requestedAt: new Date(),
+      completedAt: data.completedAt ?? null,
+    }));
     const updateAttempt = jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
       ...startedAttempt,
       ...data,
@@ -111,7 +119,7 @@ describe('PaymentService provider reconciliation', () => {
       '127.0.0.1',
     );
 
-    expect(result).toMatchObject({ outcome: 'UNRESOLVED_PROCESSING', providerResultCode: '4999', reasonCode: 'PROVIDER_STILL_PROCESSING' });
+    expect(result).toMatchObject({ outcome: 'UNRESOLVED_4999', providerResultCode: '4999', reasonCode: 'RESULT_4999_REMAINS_UNRESOLVED' });
     expect(fixture.createAttempt).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ operatorNote: 'Investigating delayed activation callback' }),
     }));
@@ -127,7 +135,6 @@ describe('PaymentService provider reconciliation', () => {
       providerReference: request.checkoutRequestId,
       createdAt: new Date(Date.now() - 10 * 60_000),
       updatedAt: new Date(),
-      user: { fullName: 'Test Customer', email: 'customer@example.invalid' },
       activationRequest: {
         ...request,
         callbackEvents: [],
@@ -152,6 +159,130 @@ describe('PaymentService provider reconciliation', () => {
     });
     expect(result.items[0]).not.toHaveProperty('failureCode');
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 26, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }));
+  });
+
+  it('surfaces a recorded escalation in the queue status', async () => {
+    const findMany = jest.fn(async () => [{
+      ...payment,
+      createdAt: new Date(Date.now() - 10 * 60_000),
+      updatedAt: new Date(),
+      activationRequest: { ...request, callbackEvents: [] },
+      reconciliationAttempts: [{
+        id: 'escalation-id',
+        outcome: 'ESCALATED',
+        providerResultCode: null,
+        reasonCode: 'PROVIDER_INVESTIGATION_REQUIRED',
+        operatorNote: 'Provider investigation requested',
+        requestedAt: new Date(),
+        completedAt: new Date(),
+        superadmin: { email: 'admin@example.invalid' },
+      }],
+      _count: { reconciliationAttempts: 1 },
+    }]);
+    const service = new PaymentService({
+      systemSetting: { findUnique: jest.fn(async () => null) },
+      paymentTransaction: { findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    const result = await service.listReconciliationQueue(undefined, 25);
+
+    expect(result.items[0].reconciliationStatus).toBe('ESCALATED');
+    expect(result.items[0].reasonForInclusion).toBe('ESCALATED');
+  });
+
+  it('renders historical 4999 attempt labels without asserting provider semantics', async () => {
+    const findMany = jest.fn(async () => [{
+      ...payment,
+      createdAt: new Date(Date.now() - 10 * 60_000),
+      updatedAt: new Date(),
+      activationRequest: { ...request, callbackEvents: [] },
+      reconciliationAttempts: [{
+        id: 'legacy-attempt-id',
+        outcome: 'UNRESOLVED_PROCESSING',
+        providerResultCode: '4999',
+        reasonCode: 'PROVIDER_STILL_PROCESSING',
+        operatorNote: 'Legacy investigation note',
+        requestedAt: new Date(),
+        completedAt: new Date(),
+        superadmin: { email: 'admin@example.invalid' },
+      }],
+      _count: { reconciliationAttempts: 1 },
+    }]);
+    const service = new PaymentService({
+      systemSetting: { findUnique: jest.fn(async () => null) },
+      paymentTransaction: { findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    const result = await service.listReconciliationQueue(undefined, 25);
+
+    expect(result.items[0]).toMatchObject({
+      reconciliationStatus: 'UNRESOLVED_4999',
+      reconciliationAttempts: [{
+        outcome: 'UNRESOLVED_4999',
+        reasonCode: 'RESULT_4999_REMAINS_UNRESOLVED',
+      }],
+    });
+  });
+
+  it('includes fresh unresolved provider exceptions independently of the age threshold', async () => {
+    const findMany = jest.fn(async () => []);
+    const service = new PaymentService({
+      systemSetting: { findUnique: jest.fn(async () => ({ value: 1440 })) },
+      paymentTransaction: { findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    await service.listReconciliationQueue(undefined, 25, undefined, 'PROVIDER_REVIEW');
+
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        type: { in: [PaymentType.ACTIVATION, PaymentType.LOAN_PROCESSING_FEE] },
+        status: 'PENDING',
+        reconciliationAttempts: {
+          some: {
+            outcome: {
+              in: expect.arrayContaining(['UNRESOLVED_UNKNOWN_RESULT', 'UNRESOLVED_IDENTIFIER_MISMATCH', 'ESCALATED']),
+            },
+          },
+        },
+      }),
+    }));
+  });
+
+  it('filters by exact internal, provider, or receipt reference without selecting customer identity', async () => {
+    const findMany = jest.fn(async (_query: { select?: Record<string, unknown> }) => []);
+    const service = new PaymentService({
+      systemSetting: { findUnique: jest.fn(async () => null) },
+      paymentTransaction: { findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    await service.listReconciliationQueue(undefined, 25, 'LPA123', 'LEGACY_4999');
+
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        type: PaymentType.ACTIVATION,
+        status: 'FAILED',
+        failureCode: 'MPESA_RESULT_4999',
+        OR: [
+          { internalReference: 'LPA123' },
+          { providerReference: 'LPA123' },
+          { receiptReference: 'LPA123' },
+        ],
+      }),
+      take: 26,
+    }));
+    expect(findMany.mock.calls[0]?.[0].select).not.toHaveProperty('user');
+  });
+
+  it('rejects an overlong payment-reference search before querying records', async () => {
+    const findMany = jest.fn();
+    const service = new PaymentService({
+      systemSetting: { findUnique: jest.fn() },
+      paymentTransaction: { findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    await expect(service.listReconciliationQueue(undefined, 25, 'x'.repeat(41)))
+      .rejects.toThrow('40 characters or fewer');
+    expect(findMany).not.toHaveBeenCalled();
   });
 
   it('records query success as awaiting a validated callback instead of settling from the query', async () => {
@@ -238,6 +369,46 @@ describe('PaymentService provider reconciliation', () => {
       'short',
       '127.0.0.1',
     )).rejects.toThrow('investigation note');
+    expect(fixture.createAttempt).not.toHaveBeenCalled();
+  });
+
+  it('records an idempotent escalation without querying the provider or changing payment state', async () => {
+    const fixture = createService();
+
+    const result = await fixture.service.escalateActivationPayment(
+      paymentId,
+      'reconciliation-escalation-0001',
+      'superadmin-id',
+      'Escalate unresolved payment for provider investigation',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({ outcome: 'ESCALATED', reasonCode: 'PROVIDER_INVESTIGATION_REQUIRED' });
+    expect(fixture.createAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ outcome: 'ESCALATED', operatorNote: 'Escalate unresolved payment for provider investigation' }),
+    }));
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+  });
+
+  it('rejects an escalation replay key already used for a provider refresh', async () => {
+    const fixture = createService();
+    fixture.findPriorAttempt.mockResolvedValueOnce({
+      id: 'existing-attempt',
+      outcome: 'UNRESOLVED_PROCESSING',
+      providerResultCode: '4999',
+      reasonCode: 'PROVIDER_STILL_PROCESSING',
+      operatorNote: 'Previously refreshed provider status',
+      superadminId: 'superadmin-id',
+    });
+
+    await expect(fixture.service.escalateActivationPayment(
+      paymentId,
+      'reconciliation-refresh-replay-0001',
+      'superadmin-id',
+      'Escalate unresolved payment for provider investigation',
+      '127.0.0.1',
+    )).rejects.toBeInstanceOf(ConflictException);
     expect(fixture.createAttempt).not.toHaveBeenCalled();
   });
 });

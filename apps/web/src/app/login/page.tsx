@@ -9,6 +9,7 @@ export default function LoginPage() {
   const router = useRouter();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -28,7 +29,7 @@ export default function LoginPage() {
   return <AuthShell eyebrow="CUSTOMER SIGN IN" title="Welcome back." description="Sign in with the email address and password you used to register.">
     <form className="auth-form" onSubmit={submit}>
       <label>Email address<input name="email" type="email" autoComplete="email" maxLength={254} required /></label>
-      <label>Password<input name="password" type="password" autoComplete="current-password" maxLength={72} required /></label>
+      <label>Password<div className="password-input-wrap"><input name="password" type={showPassword ? 'text' : 'password'} autoComplete="current-password" maxLength={72} required /><button type="button" aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword((shown) => !shown)}>{showPassword ? 'Hide' : 'Show'}</button></div></label>
       <div className="form-inline"><span>Protected customer sign-in</span><a href="/forgot-password">Forgot password?</a></div>
       {error && <p className="form-error" role="alert">{error}</p>}
       <button className="button auth-submit" disabled={busy}>{busy ? 'Signing in…' : 'Log in'} <span aria-hidden="true">↗</span></button>

@@ -79,6 +79,35 @@ export class CreateLoanApplicationDto {
   @Min(1)
   @Max(1_000_000_000)
   requestedPrincipalKes!: number;
+
+  @IsString()
+  @Length(2, 160)
+  guarantorOneName!: string;
+
+  @IsString()
+  @Length(9, 16)
+  @Matches(/^\+?[\d ()-]{9,16}$/)
+  guarantorOnePhone!: string;
+
+  @IsString()
+  @Length(2, 160)
+  guarantorTwoName!: string;
+
+  @IsString()
+  @Length(9, 16)
+  @Matches(/^\+?[\d ()-]{9,16}$/)
+  guarantorTwoPhone!: string;
+}
+
+export class ConfigureLoanProcessingFeeDto {
+  @IsString()
+  @Length(3, 40)
+  @Matches(/^[A-Z][A-Z0-9_]{2,39}$/)
+  revenueAccountCode!: string;
+
+  @IsString()
+  @Length(10, 500)
+  reason!: string;
 }
 
 export class ConfirmManualDisbursementDto {

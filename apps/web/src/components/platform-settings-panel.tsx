@@ -160,7 +160,7 @@ export default function PlatformSettingsPanel() {
           <form className="product-config-form" onSubmit={(event) => void saveReconciliationThreshold(event)}>
             <h3>Unresolved-payment queue</h3>
             <label>Pending age threshold (minutes)<input type="number" min="1" max="1440" step="1" value={reconciliation.pendingThresholdMinutes} onChange={(event) => setReconciliation({ ...reconciliation, pendingThresholdMinutes: Number(event.target.value) })} required /></label>
-            <p className="settings-copy">Pending activation payments older than this threshold appear in the Superadmin reconciliation queue. Legacy 4999 records remain visible regardless of age.</p>
+            <p className="settings-copy">Pending loan processing-fee and historical activation payments older than this threshold appear in the Superadmin reconciliation queue. Legacy 4999 records remain visible regardless of age.</p>
             <label>Reason for change<textarea value={reconciliationReason} onChange={(event) => setReconciliationReason(event.target.value)} minLength={10} maxLength={500} required /></label>
             <button className="button" disabled={busy}>Save queue threshold</button>
             {reconciliation.updatedAt && <small>Last changed {new Date(reconciliation.updatedAt).toLocaleString('en-KE')} · administrator {reconciliation.updatedByEmail ?? reconciliation.updatedById}</small>}

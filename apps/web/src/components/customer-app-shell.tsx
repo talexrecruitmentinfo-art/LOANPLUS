@@ -11,16 +11,16 @@ type BeforeInstallPrompt = Event & {
 };
 
 const customerRoutes = [
-  '/dashboard', '/activation', '/loans', '/wallet', '/transactions', '/profile',
+  '/dashboard', '/loans', '/wallet', '/transactions', '/profile',
   '/referrals', '/support', '/settings/security',
 ];
 
 const navigationItems = [
-  { href: '/dashboard', label: 'Home' },
-  { href: '/wallet', label: 'Wallet' },
-  { href: '/loans', label: 'Loans' },
-  { href: '/transactions', label: 'Activity' },
-  { href: '/profile', label: 'Profile' },
+  { href: '/dashboard', label: 'Home', icon: 'home' },
+  { href: '/loans', label: 'Loans', icon: 'loans' },
+  { href: '/wallet', label: 'Wallet', icon: 'wallet' },
+  { href: '/transactions', label: 'Payments', icon: 'payments' },
+  { href: '/profile', label: 'Profile', icon: 'profile' },
 ];
 
 const adminNavigationItems = [
@@ -32,6 +32,18 @@ const adminNavigationItems = [
   { href: '/admin/audit', label: 'Audit' },
   { href: '/admin/settings', label: 'Settings' },
 ];
+
+function NavigationIcon({ name }: { name: string }) {
+  const paths: Record<string, ReactNode> = {
+    home: <><path d="m3 10 9-7 9 7" /><path d="M5 9v11h14V9M9 20v-6h6v6" /></>,
+    loans: <><path d="M4 5.5 12 2l8 3.5v5c0 5-3.4 8.2-8 11-4.6-2.8-8-6-8-11z" /><path d="M8 11h8M8 15h5" /></>,
+    wallet: <><rect x="3" y="5" width="18" height="15" rx="2" /><path d="M3 9h18M16 14h2" /><path d="M6 5V3h12v2" /></>,
+    payments: <><path d="M4 4h16v16H4z" /><path d="M8 8h8M8 12h8M8 16h4" /></>,
+    profile: <><circle cx="12" cy="8" r="3.5" /><path d="M5 20c.5-3.4 3-5.5 7-5.5s6.5 2.1 7 5.5" /></>,
+    more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
+  };
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
 
 function CustomerNavigation({ pathname }: { pathname: string }) {
   const [installEligible, setInstallEligible] = useState(false);
@@ -82,24 +94,30 @@ function CustomerNavigation({ pathname }: { pathname: string }) {
           const active = pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(`${item.href}/`));
           return (
             <Link key={item.href} href={item.href} aria-current={active ? 'page' : undefined}>
-              {item.label}
+              <NavigationIcon name={item.icon} />
+              <span>{item.label}</span>
             </Link>
           );
         })}
-        {installEligible && !installed && (
-          <details className="customer-install-menu">
-            <summary>Install app</summary>
-            <div className="customer-install-help">
-              {installPrompt ? (
-                <button type="button" onClick={() => void installApp()}>Install LoanPlus</button>
-              ) : isIos ? (
-                <p>In Safari, tap Share, then Add to Home Screen.</p>
-              ) : (
-                <p>Use your browser menu and choose Install app or Add to Home screen.</p>
-              )}
-            </div>
-          </details>
-        )}
+        <details className="customer-more-menu">
+          <summary aria-label="More customer options"><NavigationIcon name="more" /><span>More</span></summary>
+          <div className="customer-more-panel">
+            <Link href="/support">Support <span aria-hidden="true">↗</span></Link>
+            <Link href="/settings/security">Security <span aria-hidden="true">↗</span></Link>
+            <Link href="/referrals">Referrals <span aria-hidden="true">↗</span></Link>
+            {installEligible && !installed && (
+              <div className="customer-install-help">
+                {installPrompt ? (
+                  <button type="button" onClick={() => void installApp()}>Install LoanPlus</button>
+                ) : isIos ? (
+                  <p>In Safari, tap Share, then Add to Home Screen.</p>
+                ) : (
+                  <p>Use your browser menu and choose Install app or Add to Home screen.</p>
+                )}
+              </div>
+            )}
+          </div>
+        </details>
       </nav>
     </>
   );

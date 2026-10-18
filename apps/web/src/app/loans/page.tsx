@@ -1,9 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiRequest } from '@/lib/api';
-import { formatMoney as formatKes } from '@/lib/currency';
+import { formatMoney } from '@/lib/currency';
 
 interface Product {
   id: string;
@@ -22,85 +22,216 @@ interface LoanApplication {
   requestedPrincipalKes: number;
   approvedPrincipalKes: number | null;
   approvedChargesKes: number | null;
+  approvedTermsSnapshot: null | {
+    productName: string;
+    termsVersion: string;
+    durationDays: number;
+    interestRateBps: number;
+    flatFeeKes: number;
+    approvedPrincipalKes: number;
+    approvedChargesKes: number;
+    totalRepayableKes: number;
+  };
   status: string;
   decisionReason: string | null;
   requestedInformation: string | null;
-  submittedAt: string;
+  submittedAt: string | null;
+  createdAt: string;
   reviewedAt: string | null;
   offerExpiresAt: string | null;
-  product: { name: string; durationDays: number; termsVersion: string };
+  applicationData: Record<string, unknown>;
+  processingFeePayment: null | {
+    id: string;
+    internalReference: string;
+    status: string;
+    amountKes: number;
+    currency: string;
+    failureCode: string | null;
+    createdAt: string;
+    confirmedAt: string | null;
+    receiptReference: string | null;
+  };
+  loan: null | {
+    status: string;
+    disbursedAt: string | null;
+    disbursement: null | { amountKes: number; status: string; paymentReference: string; confirmedAt: string | null };
+  };
+  product: { name: string };
+}
+
+interface ApplicationForm {
+  productId: string;
+  requestedPrincipalKes: string;
+  guarantorOneName: string;
+  guarantorOnePhone: string;
+  guarantorTwoName: string;
+  guarantorTwoPhone: string;
+}
+
+const emptyForm: ApplicationForm = {
+  productId: '',
+  requestedPrincipalKes: '',
+  guarantorOneName: '',
+  guarantorOnePhone: '',
+  guarantorTwoName: '',
+  guarantorTwoPhone: '',
+};
+
+function statusLabel(application: LoanApplication): string {
+  if (application.status === 'DRAFT' || application.status === 'PROCESSING_PAYMENT_PENDING') {
+    if (application.processingFeePayment?.failureCode) return 'Processing Payment Unresolved';
+    if (application.processingFeePayment?.status === 'FAILED') return 'Processing Payment Failed';
+    if (application.processingFeePayment?.status === 'PENDING') return 'Processing Payment Pending';
+    return application.status === 'DRAFT' ? 'Draft' : 'Processing Payment Unresolved';
+  }
+  if (application.status === 'SUBMITTED') return 'Submitted — Awaiting Admin Review';
+  if (application.status === 'UNDER_REVIEW') return 'Under Review';
+  if (application.status === 'APPROVED') return 'Approved — Awaiting Offer Acceptance';
+  if (application.status === 'ACCEPTED') {
+    if (application.loan?.status === 'DISBURSED' || application.loan?.disbursement?.status === 'CONFIRMED') return 'Disbursed';
+    return 'Approved — Awaiting Disbursement';
+  }
+  if (application.status === 'REJECTED') return 'Rejected';
+  return application.status.replaceAll('_', ' ');
+}
+
+function fieldError(name: string, value: string, product?: Product): string {
+  if (!value.trim()) return 'This field is required.';
+  if (name.endsWith('Name') && value.trim().replace(/\s+/g, ' ').length < 2) return 'Enter the full name.';
+  if (name.endsWith('Phone') && !/^(?:\+?254|0)?[17]\d{8}$/.test(value.replace(/[\s()-]/g, ''))) {
+    return 'Enter a valid Kenyan mobile number.';
+  }
+  if (name === 'requestedPrincipalKes') {
+    const amount = Number(value);
+    if (!Number.isSafeInteger(amount) || amount < 1) return 'Enter a valid positive amount in whole KSh.';
+    if (product && (amount < product.minimumPrincipalKes || amount > product.maximumPrincipalKes)) {
+      return `Choose an amount from ${formatMoney(product.minimumPrincipalKes)} to ${formatMoney(product.maximumPrincipalKes)}.`;
+    }
+  }
+  return '';
 }
 
 export default function LoanProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
-  const [customer, setCustomer] = useState<{ activationStatus: string } | null>(null);
   const [applications, setApplications] = useState<LoanApplication[]>([]);
-  const [applicationAmounts, setApplicationAmounts] = useState<Record<string, string>>({});
+  const [form, setForm] = useState<ApplicationForm>(emptyForm);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [reviewing, setReviewing] = useState(false);
+  const [signedIn, setSignedIn] = useState(false);
   const [acceptedOffers, setAcceptedOffers] = useState<Record<string, boolean>>({});
-  const [applyingProduct, setApplyingProduct] = useState<string | null>(null);
-  const [applicationMessage, setApplicationMessage] = useState('');
-  const [applicationError, setApplicationError] = useState('');
-  const [applicationListError, setApplicationListError] = useState('');
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const creationKey = useRef<string | null>(null);
+  const feeKey = useRef<string | null>(null);
+
+  const product = products.find((item) => item.id === form.productId);
+
+  async function refreshApplications() {
+    setApplications(await apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }));
+  }
 
   useEffect(() => {
-    apiRequest<Product[]>('/loans/products').then(setProducts).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : 'Products could not be loaded.');
-    }).finally(() => setLoading(false));
-    apiRequest<{ activationStatus: string }>('/auth/me', { cache: 'no-store' })
-      .then(setCustomer)
-      .catch(() => setCustomer(null));
-    apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' })
-      .then(setApplications)
-      .catch((reason: unknown) => setApplicationListError(reason instanceof Error ? reason.message : 'Applications could not be loaded.'));
+    Promise.all([
+      apiRequest<Product[]>('/loans/products').then(setProducts),
+      apiRequest('/auth/me', { cache: 'no-store' }).then(() => setSignedIn(true)).catch(() => setSignedIn(false)),
+      apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }).then(setApplications)
+        .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Applications could not be loaded.')),
+    ]).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Loan products could not be loaded.'))
+      .finally(() => setLoading(false));
   }, []);
 
-  async function submitApplication(event: FormEvent<HTMLFormElement>, product: Product) {
+  function updateField(field: keyof ApplicationForm, value: string) {
+    setForm((current) => ({ ...current, [field]: value }));
+    setFieldErrors((current) => ({ ...current, [field]: '' }));
+  }
+
+  function reviewApplication(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setApplicationError('');
-    setApplicationMessage('');
-    setApplyingProduct(product.id);
+    const fields: Array<keyof ApplicationForm> = [
+      'productId', 'requestedPrincipalKes', 'guarantorOneName', 'guarantorOnePhone',
+      'guarantorTwoName', 'guarantorTwoPhone',
+    ];
+    const errors = Object.fromEntries(fields.map((name) => [name, fieldError(name, form[name], product)]));
+    if (form.guarantorOnePhone.replace(/\D/g, '').slice(-9) === form.guarantorTwoPhone.replace(/\D/g, '').slice(-9)) {
+      errors.guarantorTwoPhone = 'Guarantors must have different phone numbers.';
+    }
+    setFieldErrors(errors);
+    if (Object.values(errors).some(Boolean)) return;
+    setError('');
+    setReviewing(true);
+  }
+
+  async function payProcessingFee() {
+    if (!product || !signedIn) return;
+    setBusyId('new-application');
+    setError('');
+    setNotice('');
     try {
-      const result = await apiRequest<{ status: string; id: string }>('/loans/applications', {
+      if (!creationKey.current) creationKey.current = crypto.randomUUID();
+      const application = await apiRequest<{ id: string }>('/loans/applications', {
         method: 'POST',
+        headers: { 'Idempotency-Key': creationKey.current },
         body: JSON.stringify({
-          productId: product.id,
-          requestedPrincipalKes: Number(applicationAmounts[product.id]),
+          ...form,
+          requestedPrincipalKes: Number(form.requestedPrincipalKes),
         }),
       });
-      setApplicationMessage(`Application recorded with status ${result.status.replaceAll('_', ' ')}.`);
-      setApplicationAmounts((current) => ({ ...current, [product.id]: '' }));
-      setApplicationListError('');
-      try {
-        const latestApplications = await apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' });
-        setApplications(latestApplications);
-      } catch {
-        setApplicationListError('Application was recorded, but its current status could not be refreshed.');
-      }
+      if (!feeKey.current) feeKey.current = crypto.randomUUID();
+      const payment = await apiRequest<{ reference: string; status: string; message: string }>('/payments/loan-processing-fee', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': feeKey.current },
+        body: JSON.stringify({ applicationId: application.id, reviewConfirmed: true }),
+      });
+      setNotice(payment.message);
+      creationKey.current = null;
+      feeKey.current = null;
+      setReviewing(false);
+      setForm(emptyForm);
+      await refreshApplications();
     } catch (reason) {
-      setApplicationError(reason instanceof Error ? reason.message : 'The application could not be submitted.');
+      setError(reason instanceof Error ? reason.message : 'The processing-fee request could not be completed.');
+      await refreshApplications().catch(() => undefined);
     } finally {
-      setApplyingProduct(null);
+      setBusyId(null);
+    }
+  }
+
+  async function resumeProcessingFee(applicationId: string) {
+    setBusyId(applicationId);
+    setError('');
+    setNotice('');
+    try {
+      const payment = await apiRequest<{ status: string; message: string }>('/payments/loan-processing-fee', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify({ applicationId, reviewConfirmed: true }),
+      });
+      setNotice(payment.message);
+      await refreshApplications();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The payment status could not be refreshed.');
+    } finally {
+      setBusyId(null);
     }
   }
 
   async function acceptOffer(application: LoanApplication) {
-    setApplicationError('');
-    setApplicationMessage('');
-    setApplyingProduct(application.id);
+    setBusyId(application.id);
+    setError('');
+    setNotice('');
     try {
       await apiRequest(`/loans/applications/${application.id}/accept`, {
         method: 'POST',
         body: JSON.stringify({ termsAccepted: true }),
       });
-      setApplicationMessage('Loan offer accepted. Disbursement status will update after authorized review.');
-      setApplications(await apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }));
-      setApplicationListError('');
+      setNotice('Loan offer accepted. Disbursement remains a separate authorized step.');
+      await refreshApplications();
     } catch (reason) {
-      setApplicationError(reason instanceof Error ? reason.message : 'This offer could not be accepted.');
+      setError(reason instanceof Error ? reason.message : 'This offer could not be accepted.');
     } finally {
-      setApplyingProduct(null);
+      setBusyId(null);
     }
   }
 
@@ -111,51 +242,122 @@ export default function LoanProductsPage() {
         <Link className="quiet-button" href="/dashboard">My account</Link>
       </header>
       <section className="dashboard-welcome">
-        <p className="eyebrow">LOAN PRODUCTS</p>
-        <h1>Clear terms first.</h1>
-        <p>Products are shown only when configured by LoanPlus. Review charges and repayment dates before accepting any offer. Approval is not guaranteed.</p>
+        <p className="eyebrow">LOAN APPLICATION</p>
+        <h1>Apply with clear terms.</h1>
+        <p>Complete your application, review the details, then pay the KSh 50 processing fee. Payment does not guarantee approval or disbursement.</p>
       </section>
-      {applicationMessage && <p className="admin-inline-notice" role="status">{applicationMessage}</p>}
-      {applicationError && <p className="form-error" role="alert">{applicationError}</p>}
-      {customer && <section className="customer-ledger-list"><div className="customer-ledger-heading"><h2>Your loan applications</h2><span>{applications.length}</span></div>{applicationListError ? <p className="form-error" role="alert">{applicationListError}</p> : applications.length === 0 ? <p>No loan applications recorded.</p> : applications.map((application) => <article className="customer-loan-application" key={application.id}><div><b>{application.product.name}</b><small>Requested {formatKes(application.requestedPrincipalKes)} · {new Date(application.submittedAt).toLocaleDateString('en-KE')}</small></div><span className="status-label">{application.status.replaceAll('_', ' ')}</span>{application.decisionReason && <p>{application.decisionReason}</p>}{application.requestedInformation && <p>Information requested: {application.requestedInformation}</p>}{application.approvedPrincipalKes !== null && application.approvedChargesKes !== null && <dl><div><dt>Approved principal</dt><dd>{formatKes(application.approvedPrincipalKes)}</dd></div><div><dt>Charges</dt><dd>{formatKes(application.approvedChargesKes)}</dd></div><div><dt>Total repayable</dt><dd>{formatKes(application.approvedPrincipalKes + application.approvedChargesKes)}</dd></div><div><dt>Terms version</dt><dd>{application.product.termsVersion} · {application.product.durationDays} days</dd></div></dl>}{application.offerExpiresAt && <small>Offer expires {new Date(application.offerExpiresAt).toLocaleString('en-KE')}</small>}{application.status === 'APPROVED' && <><label className="check-row"><input type="checkbox" checked={acceptedOffers[application.id] === true} onChange={(event) => setAcceptedOffers((current) => ({ ...current, [application.id]: event.target.checked }))} /><span>I accept the approved offer and displayed terms version {application.product.termsVersion}.</span></label><button className="button" type="button" disabled={applyingProduct !== null || acceptedOffers[application.id] !== true} onClick={() => void acceptOffer(application)}>{applyingProduct === application.id ? 'Accepting…' : 'Accept approved offer'}</button></>}</article>)}</section>}
+      {notice && <p className="admin-inline-notice" role="status">Payment request status: pending verification. {notice}</p>}
+      {error && <p className="admin-inline-error" role="alert">{error}</p>}
+      {!signedIn && !loading && <p className="product-list"><Link className="button" href="/login">Sign in to apply</Link></p>}
+      {signedIn && products.length > 0 && (
+        <section className="loan-application-panel" aria-labelledby="apply-heading">
+          <h2 id="apply-heading">{reviewing ? 'Review your application' : 'Your application'}</h2>
+          <ol className="loan-step-indicator" aria-label={`Application step ${reviewing ? 2 : 1} of 4`}>
+            <li aria-current={!reviewing ? 'step' : undefined}><span>1</span><b>Details</b></li>
+            <li aria-current={reviewing ? 'step' : undefined}><span>2</span><b>Review</b></li>
+            <li><span>3</span><b>Payment</b></li>
+            <li><span>4</span><b>Decision</b></li>
+          </ol>
+          {!reviewing ? (
+            <form className="loan-application-form loan-application-guided" onSubmit={reviewApplication} noValidate>
+              <label>Loan product
+                <select value={form.productId} onChange={(event) => updateField('productId', event.target.value)} aria-invalid={Boolean(fieldErrors.productId)} aria-describedby={fieldErrors.productId ? 'product-error' : undefined} required>
+                  <option value="">Choose an available product</option>
+                  {products.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.durationDays} days</option>)}
+                </select>
+                {fieldErrors.productId && <small id="product-error" role="alert">{fieldErrors.productId}</small>}
+              </label>
+              <label>Requested loan amount (KSh){product && <span className="loan-field-hint">{formatMoney(product.minimumPrincipalKes)} – {formatMoney(product.maximumPrincipalKes)}</span>}
+                <input type="number" inputMode="numeric" min={product?.minimumPrincipalKes ?? 1} max={product?.maximumPrincipalKes ?? 1_000_000_000} step="1" value={form.requestedPrincipalKes} onChange={(event) => updateField('requestedPrincipalKes', event.target.value)} aria-invalid={Boolean(fieldErrors.requestedPrincipalKes)} aria-describedby={fieldErrors.requestedPrincipalKes ? 'amount-error' : undefined} required />
+                {fieldErrors.requestedPrincipalKes && <small id="amount-error" role="alert">{fieldErrors.requestedPrincipalKes}</small>}
+              </label>
+              <fieldset>
+                <legend>Guarantor 1</legend>
+                <label>Full name<input autoComplete="name" value={form.guarantorOneName} onChange={(event) => updateField('guarantorOneName', event.target.value)} aria-invalid={Boolean(fieldErrors.guarantorOneName)} required />{fieldErrors.guarantorOneName && <small role="alert">{fieldErrors.guarantorOneName}</small>}</label>
+                <label>Phone number<input type="tel" inputMode="tel" autoComplete="tel" placeholder="07XX XXX XXX" value={form.guarantorOnePhone} onChange={(event) => updateField('guarantorOnePhone', event.target.value)} aria-invalid={Boolean(fieldErrors.guarantorOnePhone)} required />{fieldErrors.guarantorOnePhone && <small role="alert">{fieldErrors.guarantorOnePhone}</small>}</label>
+              </fieldset>
+              <fieldset>
+                <legend>Guarantor 2</legend>
+                <label>Full name<input autoComplete="name" value={form.guarantorTwoName} onChange={(event) => updateField('guarantorTwoName', event.target.value)} aria-invalid={Boolean(fieldErrors.guarantorTwoName)} required />{fieldErrors.guarantorTwoName && <small role="alert">{fieldErrors.guarantorTwoName}</small>}</label>
+                <label>Phone number<input type="tel" inputMode="tel" autoComplete="tel" placeholder="07XX XXX XXX" value={form.guarantorTwoPhone} onChange={(event) => updateField('guarantorTwoPhone', event.target.value)} aria-invalid={Boolean(fieldErrors.guarantorTwoPhone)} required />{fieldErrors.guarantorTwoPhone && <small role="alert">{fieldErrors.guarantorTwoPhone}</small>}</label>
+              </fieldset>
+              <button className="button" type="submit">Review details <span aria-hidden="true">→</span></button>
+            </form>
+          ) : (
+            <div className="loan-application-review">
+              <dl>
+                <div><dt>Product</dt><dd>{product?.name}</dd></div>
+                <div><dt>Requested amount</dt><dd>{formatMoney(Number(form.requestedPrincipalKes))}</dd></div>
+                <div><dt>Guarantor 1</dt><dd>{form.guarantorOneName} · {form.guarantorOnePhone}</dd></div>
+                <div><dt>Guarantor 2</dt><dd>{form.guarantorTwoName} · {form.guarantorTwoPhone}</dd></div>
+                <div><dt>Loan Processing Fee</dt><dd>{formatMoney(50)}</dd></div>
+              </dl>
+              <p>The fee is for processing your application. It is not wallet funding, loan approval, or a promise of loan disbursement. The application will only be submitted after verified M-Pesa payment.</p>
+              <div className="loan-review-actions">
+                <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => setReviewing(false)}>Edit details</button>
+                <button className="button" type="button" disabled={busyId !== null} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : 'Pay Loan Processing Fee — KSh 50'}</button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
       <section className="product-list">
-        {loading ? <p>Loading configured products…</p> : error ? <p className="form-error" role="alert">{error}</p> : products.length === 0 ? (
-          <div className="dashboard-empty"><p className="eyebrow">NO PRODUCTS AVAILABLE</p><h2>There are no active loan products.</h2><p>Loan terms will appear here when they have been configured and approved.</p></div>
-        ) : products.map((product) => (
-          <article className="product-row" key={product.id}>
-            <div><p className="eyebrow">{product.durationDays} DAY TERM</p><h2>{product.name}</h2><p>{product.description}</p></div>
+        {loading ? <p>Loading configured loan products…</p> : products.length === 0 ? <div className="dashboard-empty"><p className="eyebrow">NO PRODUCTS AVAILABLE</p><h2>There are no active loan products.</h2><p>Configured borrowing options will appear here when available.</p></div> : products.map((item) => (
+          <article className="product-row" key={item.id}>
+            <div><p className="eyebrow">{item.durationDays} DAY TERM</p><h2>{item.name}</h2><p>{item.description}</p></div>
             <dl>
-              <div><dt>Principal range</dt><dd>{formatKes(product.minimumPrincipalKes)} – {formatKes(product.maximumPrincipalKes)}</dd></div>
-              <div><dt>Interest</dt><dd>{(product.interestRateBps / 100).toFixed(2)}%</dd></div>
-              <div><dt>Fixed charge</dt><dd>{formatKes(product.flatFeeKes)}</dd></div>
-              <div><dt>Terms version</dt><dd>{product.termsVersion}</dd></div>
+              <div><dt>Principal range</dt><dd>{formatMoney(item.minimumPrincipalKes)} – {formatMoney(item.maximumPrincipalKes)}</dd></div>
+              <div><dt>Interest</dt><dd>{(item.interestRateBps / 100).toFixed(2)}%</dd></div>
+              <div><dt>Fixed charge</dt><dd>{formatMoney(item.flatFeeKes)}</dd></div>
+              <div><dt>Terms version</dt><dd>{item.termsVersion}</dd></div>
             </dl>
-            <p className="product-disclosure">Final total repayment and dates depend on the approved offer. You must review the full terms before accepting.</p>
-            {!customer ? (
-              <Link className="button" href="/login">Sign in to apply <span aria-hidden="true">↗</span></Link>
-            ) : customer.activationStatus !== 'ACTIVE' ? (
-              <Link className="button" href="/activation">Complete account activation <span aria-hidden="true">↗</span></Link>
-            ) : (
-              <form className="loan-application-form" onSubmit={(event) => void submitApplication(event, product)}>
-                <label>Requested principal ({formatKes(product.minimumPrincipalKes)} to {formatKes(product.maximumPrincipalKes)})
-                  <input
-                    type="number"
-                    min={product.minimumPrincipalKes}
-                    max={product.maximumPrincipalKes}
-                    step="1"
-                    value={applicationAmounts[product.id] ?? ''}
-                    onChange={(event) => setApplicationAmounts((current) => ({ ...current, [product.id]: event.target.value }))}
-                    required
-                  />
-                </label>
-                <button className="button" disabled={applyingProduct !== null}>
-                  {applyingProduct === product.id ? 'Submitting…' : 'Submit application'}
-                </button>
-              </form>
-            )}
           </article>
         ))}
       </section>
+      {signedIn && <section className="customer-ledger-list">
+        <div className="customer-ledger-heading"><h2>My loan applications</h2><div><span>{applications.length}</span><button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => void refreshApplications().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Application status could not be refreshed.'))}>Refresh status</button></div></div>
+        {applications.length === 0 ? <p>No applications yet. Select a loan product and complete the application above.</p> : applications.map((application) => {
+          const terms = application.approvedTermsSnapshot;
+          const guarantor = (key: string) => typeof application.applicationData[key] === 'string' ? application.applicationData[key] as string : '—';
+          const fee = application.processingFeePayment;
+          return (
+            <article className="customer-loan-application" key={application.id}>
+              <div><b>{terms?.productName ?? application.product.name}</b><small>Reference {application.id} · Requested {formatMoney(application.requestedPrincipalKes)}</small></div>
+              <span className="status-label">{statusLabel(application)}</span>
+              {application.status === 'DRAFT' && !fee && <div className="draft-application-details">
+                <p>Draft saved. Review the application details and continue to the processing-fee payment step.</p>
+                <small>Guarantor 1: {guarantor('guarantorOneName')} · {guarantor('guarantorOnePhone')}</small>
+                <small>Guarantor 2: {guarantor('guarantorTwoName')} · {guarantor('guarantorTwoPhone')}</small>
+                <p>Loan Processing Fee — KSh 50. Paying it does not guarantee approval or disbursement and does not add funds to your wallet.</p>
+                <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => void resumeProcessingFee(application.id)}>Review details and request fee payment</button>
+              </div>}
+              {fee && <dl>
+                <div><dt>Loan Processing Fee — KSh 50</dt><dd>{fee.status === 'CONFIRMED' ? 'Paid and verified' : fee.status === 'FAILED' ? 'Failed' : fee.failureCode ? 'Unresolved — do not pay again' : fee.status.replaceAll('_', ' ')}</dd></div>
+                <div><dt>Payment reference</dt><dd>{fee.internalReference}</dd></div>
+                {fee.confirmedAt && <div><dt>Confirmed</dt><dd>{new Date(fee.confirmedAt).toLocaleString('en-KE')}</dd></div>}
+                {fee.status === 'PENDING' && <div><dt>Payment outcome</dt><dd>Refresh this page to see the latest verified status. Do not make another payment while this request is pending or unresolved.</dd></div>}
+              </dl>}
+              {application.submittedAt && <small>Submitted {new Date(application.submittedAt).toLocaleString('en-KE')}</small>}
+              {application.reviewedAt && <small>Decision recorded {new Date(application.reviewedAt).toLocaleString('en-KE')}</small>}
+              {application.decisionReason && <p>{application.decisionReason}</p>}
+              {application.requestedInformation && <p>Information requested: {application.requestedInformation}</p>}
+              {application.approvedPrincipalKes !== null && application.approvedChargesKes !== null && <dl>
+                <div><dt>Approved principal</dt><dd>{formatMoney(application.approvedPrincipalKes)}</dd></div>
+                <div><dt>Charges</dt><dd>{formatMoney(application.approvedChargesKes)}</dd></div>
+                <div><dt>Total repayable</dt><dd>{formatMoney(application.approvedPrincipalKes + application.approvedChargesKes)}</dd></div>
+                <div><dt>Approved terms</dt><dd>{terms ? `${terms.termsVersion} · ${terms.durationDays} days` : 'Needs staff review'}</dd></div>
+              </dl>}
+              {application.loan?.disbursement?.status === 'CONFIRMED' && <p>Disbursed amount: {formatMoney(application.loan.disbursement.amountKes)} · {application.loan.disbursement.paymentReference}</p>}
+              {application.offerExpiresAt && <small>Offer expires {new Date(application.offerExpiresAt).toLocaleString('en-KE')}</small>}
+              {application.status === 'APPROVED' && terms && <>
+                <label className="check-row"><input type="checkbox" checked={acceptedOffers[application.id] === true} onChange={(event) => setAcceptedOffers((current) => ({ ...current, [application.id]: event.target.checked }))} /><span>I accept the approved offer and displayed terms version {terms.termsVersion}.</span></label>
+                <button className="button" type="button" disabled={busyId !== null || acceptedOffers[application.id] !== true} onClick={() => void acceptOffer(application)}>{busyId === application.id ? 'Accepting…' : 'Accept approved offer'}</button>
+              </>}
+              {application.status === 'APPROVED' && !terms && <p role="status">This offer needs staff review before it can be accepted safely. Contact support for assistance.</p>}
+            </article>
+          );
+        })}
+      </section>}
     </main>
   );
 }

@@ -23,9 +23,17 @@ interface Application {
   id: string;
   status: string;
   requestedPrincipalKes: number;
-  submittedAt: string;
+  submittedAt: string | null;
+  applicationData: Record<string, unknown>;
   product: { name: string };
-  user: { fullName: string; email: string; activationStatus: string; identityStatus: string };
+  processingFeePayment: null | {
+    internalReference: string;
+    status: string;
+    amountKes: number;
+    receiptReference: string | null;
+    confirmedAt: string | null;
+  };
+  user: { fullName: string; email: string; identityStatus: string };
 }
 
 export default function AdminLoansPage() {
@@ -117,5 +125,46 @@ export default function AdminLoansPage() {
     await saveDecision(event.currentTarget, application, 'APPROVE');
   }
 
-  return <main className="dashboard-page"><header className="dashboard-top"><Link className="wordmark" href="/admin"><span className="brand-mark">L+</span> loanplus <span className="admin-tag">ADMIN</span></Link><Link className="quiet-button" href="/admin">Administration</Link></header><section className="dashboard-welcome"><p className="eyebrow">LENDING OPERATIONS</p><h1>Products &amp; review.</h1><p>Only approved, configured terms are available to customers. Decisions and product changes are recorded in the administrative audit trail.</p></section>{error && <p className="admin-inline-error" role="alert">{error}</p>}<section className="admin-workspace"><div className="admin-workspace-heading"><div><p className="eyebrow">CONFIGURATION</p><h2>Loan products</h2></div><span>{products.length} configured</span></div><form className="product-config-form" onSubmit={createProduct}><label>Product name<input name="name" minLength={2} maxLength={100} required /></label><label>Description<textarea name="description" minLength={10} maxLength={1000} rows={2} required /></label><div className="form-row"><label>Minimum principal (KSh)<input name="minimumPrincipalKes" type="number" min="1" step="1" required /></label><label>Maximum principal (KSh)<input name="maximumPrincipalKes" type="number" min="1" step="1" required /></label></div><div className="form-row"><label>Duration (days)<input name="durationDays" type="number" min="1" max="3650" required /></label><label>Interest rate (basis points)<input name="interestRateBps" type="number" min="0" max="1000000" required /></label></div><div className="form-row"><label>Fixed fee (KSh)<input name="flatFeeKes" type="number" min="0" step="1" required /></label><label>Terms version<input name="termsVersion" minLength={1} maxLength={40} required /></label></div><label className="check-row"><input name="isAvailable" type="checkbox" /><span>Make product available to customers</span></label><button className="button" disabled={busy}>Save product <span aria-hidden="true">↗</span></button></form><div className="admin-product-list">{products.map((product) => <article key={product.id}><div><b>{product.name}</b><small>{formatKes(product.minimumPrincipalKes)}–{formatKes(product.maximumPrincipalKes)} · {product.durationDays} days · {(product.interestRateBps / 100).toFixed(2)}% · fee {formatKes(product.flatFeeKes)}</small></div><button className="quiet-button" disabled={busy} onClick={() => toggleProduct(product)}>{product.isAvailable ? 'Pause product' : 'Enable product'}</button></article>)}{products.length === 0 && <p className="empty-copy">No loan products are configured.</p>}</div></section><section className="admin-workspace"><div className="admin-workspace-heading"><div><p className="eyebrow">MANUAL REVIEW</p><h2>Loan applications</h2></div><span>{applications.filter((application) => ['SUBMITTED', 'UNDER_REVIEW'].includes(application.status)).length} awaiting review</span></div><div className="admin-application-list">{applications.map((application) => <article className="review-application" key={application.id}><div className="review-summary"><div><h3>{application.user.fullName}</h3><p>{application.user.email} · {application.product.name}</p></div><span className="status-label">{application.status.replaceAll('_', ' ')}</span></div><dl><div><dt>Requested</dt><dd>{formatKes(application.requestedPrincipalKes)}</dd></div><div><dt>Activation</dt><dd>{application.user.activationStatus.replaceAll('_', ' ')}</dd></div><div><dt>Identity status</dt><dd>{application.user.identityStatus.replaceAll('_', ' ')}</dd></div><div><dt>Submitted</dt><dd>{new Date(application.submittedAt).toLocaleDateString('en-KE')}</dd></div></dl>{['SUBMITTED', 'UNDER_REVIEW'].includes(application.status) && <form className="review-form" onSubmit={(event) => reviewApplication(event, application)}><label>Decision reason<textarea name="reason" minLength={10} maxLength={1000} rows={2} required /></label><label>Approved principal (KSh)<input name="approvedPrincipalKes" type="number" min="1" max={application.requestedPrincipalKes} defaultValue={application.requestedPrincipalKes} required /></label><div><button className="button" disabled={busy}>Approve offer</button><button className="quiet-button" type="button" disabled={busy} onClick={(event) => { const form = event.currentTarget.form; if (form?.reportValidity()) void saveDecision(form, application, 'REJECT'); }}>Reject</button></div></form>}</article>)}{applications.length === 0 && <p className="empty-copy">No loan applications have been submitted.</p>}</div></section></main>;
+  return (
+    <main className="dashboard-page">
+      <header className="dashboard-top"><Link className="wordmark" href="/admin"><span className="brand-mark">L+</span> loanplus <span className="admin-tag">ADMIN</span></Link><Link className="quiet-button" href="/admin">Administration</Link></header>
+      <section className="dashboard-welcome"><p className="eyebrow">LENDING OPERATIONS</p><h1>Products &amp; review.</h1><p>Only configured products are available. Application payment, review, approval, and disbursement remain distinct and audited.</p></section>
+      {error && <p className="admin-inline-error" role="alert">{error}</p>}
+      <section className="admin-workspace">
+        <div className="admin-workspace-heading"><div><p className="eyebrow">CONFIGURATION</p><h2>Loan products</h2></div><span>{products.length} configured</span></div>
+        <form className="product-config-form" onSubmit={createProduct}>
+          <label>Product name<input name="name" minLength={2} maxLength={100} required /></label>
+          <label>Description<textarea name="description" minLength={10} maxLength={1000} rows={2} required /></label>
+          <div className="form-row"><label>Minimum principal (KSh)<input name="minimumPrincipalKes" type="number" min="1" step="1" required /></label><label>Maximum principal (KSh)<input name="maximumPrincipalKes" type="number" min="1" step="1" required /></label></div>
+          <div className="form-row"><label>Duration (days)<input name="durationDays" type="number" min="1" max="3650" required /></label><label>Interest rate (basis points)<input name="interestRateBps" type="number" min="0" max="1000000" required /></label></div>
+          <div className="form-row"><label>Fixed fee (KSh)<input name="flatFeeKes" type="number" min="0" step="1" required /></label><label>Terms version<input name="termsVersion" minLength={1} maxLength={40} required /></label></div>
+          <label className="check-row"><input name="isAvailable" type="checkbox" /><span>Make product available to customers</span></label>
+          <button className="button" disabled={busy}>Save product <span aria-hidden="true">↗</span></button>
+        </form>
+        <div className="admin-product-list">{products.map((item) => <article key={item.id}><div><b>{item.name}</b><small>{formatKes(item.minimumPrincipalKes)}–{formatKes(item.maximumPrincipalKes)} · {item.durationDays} days · {(item.interestRateBps / 100).toFixed(2)}% · fee {formatKes(item.flatFeeKes)}</small></div><button className="quiet-button" disabled={busy} onClick={() => toggleProduct(item)}>{item.isAvailable ? 'Pause product' : 'Enable product'}</button></article>)}{products.length === 0 && <p className="empty-copy">No loan products are configured.</p>}</div>
+      </section>
+      <section className="admin-workspace">
+        <div className="admin-workspace-heading"><div><p className="eyebrow">MANUAL REVIEW</p><h2>Loan applications</h2></div><span>{applications.filter((item) => ['SUBMITTED', 'UNDER_REVIEW'].includes(item.status)).length} awaiting review</span></div>
+        <div className="admin-application-list">{applications.map((application) => {
+          const detail = (key: string) => typeof application.applicationData[key] === 'string' ? application.applicationData[key] as string : 'Not provided';
+          return <article className="review-application" key={application.id}>
+            <div className="review-summary"><div><h3>{application.user.fullName}</h3><p>{application.user.email} · {application.product.name} · Ref {application.id}</p></div><span className="status-label">{application.status.replaceAll('_', ' ')}</span></div>
+            <dl>
+              <div><dt>Requested amount</dt><dd>{formatKes(application.requestedPrincipalKes)}</dd></div>
+              <div><dt>Processing fee</dt><dd>{application.processingFeePayment?.status === 'CONFIRMED' ? 'Paid and confirmed' : application.processingFeePayment?.status ?? 'Not paid'}</dd></div>
+              <div><dt>Fee reference</dt><dd>{application.processingFeePayment?.internalReference ?? '—'}</dd></div>
+              <div><dt>Identity status</dt><dd>{application.user.identityStatus.replaceAll('_', ' ')}</dd></div>
+              <div><dt>Submitted</dt><dd>{application.submittedAt ? new Date(application.submittedAt).toLocaleString('en-KE') : 'Not recorded'}</dd></div>
+            </dl>
+            <div className="review-guarantors"><b>Guarantors</b><p>1. {detail('guarantorOneName')} · {detail('guarantorOnePhone')}</p><p>2. {detail('guarantorTwoName')} · {detail('guarantorTwoPhone')}</p></div>
+            {['SUBMITTED', 'UNDER_REVIEW'].includes(application.status) && <form className="review-form" onSubmit={(event) => reviewApplication(event, application)}>
+              <label>Decision reason or material amount change note<textarea name="reason" minLength={10} maxLength={1000} rows={2} required /></label>
+              <label>Approved principal (KSh)<input name="approvedPrincipalKes" type="number" min="1" max={application.requestedPrincipalKes} defaultValue={application.requestedPrincipalKes} required /></label>
+              <div><button className="button" disabled={busy}>Approve offer</button><button className="quiet-button" type="button" disabled={busy} onClick={(event) => { const form = event.currentTarget.form; if (form?.reportValidity()) void saveDecision(form, application, 'REJECT'); }}>Reject</button></div>
+            </form>}
+          </article>;
+        })}{applications.length === 0 && <p className="empty-copy">No paid applications have been submitted for review.</p>}</div>
+      </section>
+    </main>
+  );
 }

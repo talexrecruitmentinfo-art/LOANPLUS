@@ -1,7 +1,7 @@
-import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard, SuperadminSessionGuard } from '../auth/session.guard';
-import { AcceptLoanOfferDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
+import { AcceptLoanOfferDto, ConfigureLoanProcessingFeeDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
 import { LoanService } from './loan.service';
 
 @Controller('loans')
@@ -15,8 +15,12 @@ export class CustomerLoanController {
 
   @Post('applications')
   @UseGuards(CustomerSessionGuard)
-  async submitApplication(@Body() dto: CreateLoanApplicationDto, @Req() request: AuthenticatedRequest) {
-    return { data: await this.loans.createApplication(request.principal!.id, dto) };
+  async submitApplication(
+    @Body() dto: CreateLoanApplicationDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return { data: await this.loans.createApplication(request.principal!.id, dto, idempotencyKey) };
   }
 
   @Get('applications')
@@ -44,6 +48,26 @@ export class AdminLoanController {
   @Get('products')
   async listProducts() {
     return { data: await this.loans.listProductsForAdmin() };
+  }
+
+  @Get('processing-fee-settings')
+  async getProcessingFeeSettings() {
+    return { data: await this.loans.getProcessingFeeSettings() };
+  }
+
+  @Patch('processing-fee-settings')
+  async configureProcessingFeeSettings(
+    @Body() dto: ConfigureLoanProcessingFeeDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return {
+      data: await this.loans.configureProcessingFeeRevenueAccount(
+        dto.revenueAccountCode,
+        dto.reason,
+        request.principal!.id,
+        request.ip,
+      ),
+    };
   }
 
   @Post('products')

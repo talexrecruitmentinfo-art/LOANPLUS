@@ -2,33 +2,22 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-const page = await readFile(new URL('../src/app/activation/page.tsx', import.meta.url), 'utf8');
+const activationPage = await readFile(new URL('../src/app/activation/page.tsx', import.meta.url), 'utf8');
+const loanPage = await readFile(new URL('../src/app/loans/page.tsx', import.meta.url), 'utf8');
 
-test('activation page does not render internal M-Pesa destination details', () => {
-  assert.doesNotMatch(page, /M-Pesa business destination|\bTill\b|Paybill|businessShortCode|tillNumber/i);
-  assert.doesNotMatch(page, /terms\.destination/);
+test('obsolete account activation route redirects to the loan application journey', () => {
+  assert.match(activationPage, /redirect\('\/loans'\)/);
+  assert.doesNotMatch(activationPage, /activation\/status|payments\/activation|activation fee/i);
 });
 
-test('activation payment display is loaded from the authenticated status endpoint', () => {
-  assert.match(page, /apiRequest<ActivationStatus>\('\/payments\/activation\/status', \{ cache: 'no-store' \}\)/);
-  assert.match(page, /activation\?\.payment/);
-  assert.doesNotMatch(page, /createdAt:\s*new Date\(\)\.toISOString\(\)/);
-});
-
-test('pending requests cannot be replaced by another payment attempt', () => {
-  assert.match(page, /paymentPending/);
-  assert.match(page, /paymentAttemptUnresolved && !activation\?\.payment/);
-  assert.match(page, /!statusLoaded/);
-  assert.match(page, /Boolean\(statusError\)/);
-  assert.match(page, /Refresh payment status/);
-});
-
-test('payment and wallet refreshes keep the latest authoritative response', () => {
-  assert.match(page, /const statusRequestId = useRef\(0\)/);
-  assert.match(page, /if \(requestId !== statusRequestId\.current\) return result/);
-  assert.match(page, /if \(requestId === statusRequestId\.current\) setWallet\(latestWallet\)/);
-  assert.match(page, /apiRequest<ActivationStatus>\('\/payments\/activation\/status', \{ cache: 'no-store' \}\)/);
-  assert.match(page, /apiRequest<Wallet>\('\/wallet', \{ cache: 'no-store' \}\)/);
-  assert.match(page, /activation\.payment\.status\.toLowerCase\(\)/);
-  assert.match(page, /activation\.payment\.providerResult\.message/);
+test('loan application requires the five fields and review before the processing-fee request', () => {
+  for (const field of ['guarantorOneName', 'guarantorOnePhone', 'guarantorTwoName', 'guarantorTwoPhone', 'requestedPrincipalKes']) {
+    assert.match(loanPage, new RegExp(field));
+  }
+  assert.match(loanPage, /Review your application/);
+  assert.match(loanPage, /Pay Loan Processing Fee — KSh 50/);
+  assert.match(loanPage, /\/payments\/loan-processing-fee/);
+  assert.match(loanPage, /reviewConfirmed: true/);
+  assert.match(loanPage, /Refresh status/);
+  assert.doesNotMatch(loanPage, /activationStatus/);
 });

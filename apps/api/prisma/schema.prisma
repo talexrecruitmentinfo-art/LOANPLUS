@@ -28,6 +28,8 @@ enum ActivationStatus {
 }
 
 enum LoanApplicationStatus {
+  DRAFT
+  PROCESSING_PAYMENT_PENDING
   SUBMITTED
   UNDER_REVIEW
   ADDITIONAL_INFORMATION_REQUIRED
@@ -64,6 +66,7 @@ enum PaymentStatus {
 
 enum PaymentType {
   ACTIVATION
+  LOAN_PROCESSING_FEE
   REPAYMENT
   DISBURSEMENT
   WITHDRAWAL
@@ -287,17 +290,21 @@ model LoanProduct {
 
 model LoanApplication {
   id                    String                @id @default(cuid())
+  creationIdempotencyKey String?              @unique @db.VarChar(128)
+  creationRequestHash   String?                @db.VarChar(64)
   userId                String
   productId             String
   reviewerId            String?
   requestedPrincipalKes Int
   approvedPrincipalKes  Int?
   approvedChargesKes    Int?
+  approvedTermsSnapshot Json?
   status                LoanApplicationStatus @default(SUBMITTED)
   applicationData       Json                  @default("{}")
   decisionReason        String?               @db.VarChar(1000)
   requestedInformation  String?               @db.VarChar(1000)
-  submittedAt           DateTime              @default(now())
+  submittedAt           DateTime?
+  createdAt             DateTime              @default(now())
   reviewedAt            DateTime?
   offerExpiresAt        DateTime?
   acceptedAt            DateTime?
@@ -305,6 +312,7 @@ model LoanApplication {
   product               LoanProduct           @relation(fields: [productId], references: [id], onDelete: Restrict)
   reviewer              SuperadminUser?       @relation(fields: [reviewerId], references: [id], onDelete: Restrict)
   loan                  Loan?
+  processingFeePayment  PaymentTransaction?
 
   @@index([userId, submittedAt])
   @@index([status, submittedAt])
@@ -359,6 +367,7 @@ model PaymentTransaction {
   requestHash            String?                        @db.VarChar(64)
   userId                 String
   type                   PaymentType
+  loanApplicationId      String?                        @unique
   amountKes              Int
   currency               String                         @default("KES") @db.Char(3)
   status                 PaymentStatus                  @default(PENDING)
@@ -370,6 +379,7 @@ model PaymentTransaction {
   createdAt              DateTime                       @default(now())
   updatedAt              DateTime                       @updatedAt
   user                   User                           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  loanApplication        LoanApplication?               @relation(fields: [loanApplicationId], references: [id], onDelete: Restrict)
   activationRequest      ActivationPaymentRequest?
   callbackEvents         PaymentCallbackEvent[]
   reconciliationAttempts PaymentReconciliationAttempt[]

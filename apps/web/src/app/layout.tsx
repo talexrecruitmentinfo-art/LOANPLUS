@@ -8,6 +8,7 @@ import './admin-review.css';
 import './customer-ledger.css';
 import './customer-app.css';
 import './navigation-overrides.css';
+import './customer-redesign.css';
 import CustomerAppShell from '@/components/customer-app-shell';
 
 export const metadata: Metadata = {

@@ -1,0 +1,253 @@
+:root{
+  --green:#18543b;
+  --ink:#1d2b23;
+  --muted:#65736a;
+  --paper:#f5f7f3;
+  --line:#dce5dd;
+  --lime:#d9ec9b;
+  --surface:#fff;
+  --focus:#4d8064;
+}
+
+body{background:var(--paper);color:var(--ink)}
+button,a,input,select,textarea{font:inherit}
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{
+  outline:3px solid #a3c76b;
+  outline-offset:3px;
+}
+.customer-app-shell{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
+.dashboard-page{min-height:100svh;padding-bottom:calc(24px + env(safe-area-inset-bottom));background:var(--paper)}
+.dashboard-top{height:calc(64px + env(safe-area-inset-top));padding:env(safe-area-inset-top) max(5%,calc((100% - 1120px)/2)) 0;background:rgba(255,255,255,.94);border-bottom-color:var(--line)}
+.dashboard-top .wordmark{font-size:17px}
+.dashboard-top .brand-mark{width:32px;height:32px;border-radius:10px}
+.status-label{padding:5px 9px;border-radius:999px;background:#edf3e9;color:#345b3f;font-size:10px;font-weight:700}
+.status-pending{background:#fff3d9;color:#7b5814}
+.status-failed,.status-cancelled{background:#f8e9e4;color:#873e2e}
+.status-confirmed,.status-posted{background:#e4f1e3;color:#2f613b}
+.dashboard-welcome{padding:36px max(6%,calc((100% - 960px)/2)) 30px;background:transparent}
+.dashboard-welcome .eyebrow{margin-bottom:10px;font-size:10px;letter-spacing:.08em}
+.dashboard-welcome h1{font-size:clamp(30px,5vw,43px);letter-spacing:-.035em}
+.dashboard-welcome>p:last-child{max-width:660px;margin:12px 0 0;font-size:14px;line-height:1.65}
+.dashboard-page>.account-status,.dashboard-page>.dashboard-empty,.dashboard-page>.customer-balance-band,
+.dashboard-page>.customer-ledger-list,.dashboard-page>.customer-profile-details,.dashboard-page>.customer-filter-row,
+.dashboard-page>.customer-payment-attempts,.dashboard-page>.product-list,.dashboard-page>.loan-application-panel,
+.dashboard-page>.support-content{
+  max-width:960px;margin-inline:auto;padding-inline:24px;
+}
+.dashboard-page>.account-status,.dashboard-page>.dashboard-empty,.dashboard-page>.customer-ledger-list,
+.dashboard-page>.customer-profile-details,.dashboard-page>.customer-payment-attempts,
+.dashboard-page>.loan-application-panel,.dashboard-page>.support-content{
+  margin-top:16px;padding-block:22px;border:1px solid var(--line);border-radius:16px;background:var(--surface);
+  box-shadow:0 4px 18px rgba(30,64,43,.035);
+}
+.dashboard-page>.account-status,.dashboard-page>.dashboard-empty{padding-inline:24px}
+.dashboard-page>.account-status h2,.dashboard-page>.dashboard-empty h2{margin-bottom:15px;font-size:19px}
+.account-status dl{max-width:none}
+.account-status dl>div{grid-template-columns:minmax(115px,180px) minmax(0,1fr);min-height:48px}
+.account-status dt,.customer-profile-details dt{font-size:12px}
+.account-status dd,.customer-profile-details dd{font-size:13px}
+.dashboard-page>.customer-balance-band{margin-top:0;padding:22px 24px;border-radius:16px}
+.customer-balance-band span,.customer-balance-band small{font-size:12px}
+.customer-balance-band strong{font-size:clamp(29px,8vw,39px);overflow-wrap:anywhere}
+.dashboard-activate{width:100%;min-height:48px;margin-top:18px;border-radius:10px}
+.dashboard-page>.form-error,.dashboard-page>.admin-inline-error,.dashboard-page>.admin-inline-notice{
+  max-width:960px;margin:12px auto;padding-inline:16px;border-radius:8px;
+}
+.dashboard-page>.admin-inline-error,.dashboard-page>.admin-inline-notice{margin-inline:auto}
+.dashboard-page>.dashboard-links{max-width:960px;margin:18px auto 0;padding:16px 24px;display:flex;flex-wrap:wrap;gap:10px}
+.dashboard-links a{min-height:42px;padding:10px 13px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.application-list article{grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;padding-block:12px}
+.application-list article>div{min-width:0}
+.application-list article>span{justify-self:start}
+.application-list article>span:nth-child(2){font-size:12px;font-weight:600}
+.application-list small{font-size:11px;overflow-wrap:anywhere}
+.customer-loan-application{margin-top:12px;padding:16px;border:1px solid var(--line);border-radius:12px;background:#fff}
+.customer-loan-application>div:first-child{display:grid;gap:5px}
+.customer-loan-application .status-label{justify-self:start;margin-top:10px;border-radius:999px;font-size:11px}
+.customer-ledger-heading h2,.customer-profile-details h2,.customer-payment-attempts h2{font-size:19px}
+.customer-ledger-heading>div{display:flex;align-items:center;gap:10px}
+.customer-ledger-heading .quiet-button{min-height:42px}
+.customer-ledger-row{grid-template-columns:minmax(0,1fr) auto;gap:8px 12px}
+.customer-ledger-row>.status-label{grid-column:1/-1;justify-self:start}
+.customer-ledger-row>strong{font-size:14px}
+.customer-ledger-primary b{font-size:13px}
+.customer-filter-row{padding-top:16px!important}
+.customer-profile-details dl{grid-template-columns:repeat(2,minmax(0,1fr))}
+.customer-profile-links>a{min-height:58px;padding:13px 6px}
+.customer-payment-attempts>article{grid-template-columns:minmax(0,1fr) auto;gap:8px 12px}
+.customer-payment-attempts>article>.status-label{grid-column:1/-1;justify-self:start}
+.customer-payment-attempts>article>p{font-size:12px}
+.customer-app-nav{
+  min-height:68px;gap:0;padding:5px 5px calc(5px + env(safe-area-inset-bottom));
+  background:rgba(255,255,255,.97);border-top-color:var(--line);box-shadow:0 -5px 20px rgba(24,55,36,.08);
+}
+.customer-app-nav>a,.customer-more-menu>summary{
+  position:relative;min-height:54px;flex:1;flex-direction:column;gap:2px;padding:4px 1px;
+  color:#68756c;font-size:10px;font-weight:600;
+}
+.customer-app-nav>a svg,.customer-more-menu>summary svg{width:21px;height:21px}
+.customer-app-nav>a[aria-current=page]{color:var(--green);font-weight:700}
+.customer-app-nav>a[aria-current=page]::before{top:0;width:26px;height:3px;background:var(--green)}
+.customer-more-menu{position:relative;display:flex;flex:1;min-width:0}
+.customer-more-menu>summary{display:flex;list-style:none;cursor:pointer}
+.customer-more-menu>summary::-webkit-details-marker{display:none}
+.customer-more-menu[open]>summary{color:var(--green)}
+.customer-more-panel{
+  position:absolute;right:5px;bottom:calc(100% + 10px);width:min(250px,calc(100vw - 24px));
+  padding:8px 14px;border:1px solid var(--line);border-radius:14px;background:#fff;
+  box-shadow:0 12px 32px rgba(27,53,39,.17);
+}
+.customer-more-panel>a{min-height:46px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf1ed;font-size:13px;font-weight:600}
+.customer-install-help{padding:9px 0 4px;font-size:12px}
+.customer-install-help p{margin:0;color:var(--muted)}
+.customer-install-help button{width:100%;min-height:44px;border:0;border-radius:9px;background:var(--green);color:#fff;font-weight:700}
+.customer-app-nav a:hover,.customer-more-panel a:hover{color:var(--green)}
+
+.auth-page{min-height:100svh;padding-block:env(safe-area-inset-top) env(safe-area-inset-bottom);background:var(--paper)}
+.auth-aside{background:#164a35}
+.auth-main{padding-inline:clamp(20px,7vw,90px)}
+.auth-form-wrap{width:min(100%,480px);margin:36px auto}
+.auth-form-wrap h2{font-size:clamp(28px,5vw,36px);letter-spacing:-.03em}
+.auth-description{margin-bottom:23px;font-size:14px}
+.auth-form{gap:16px}
+.auth-form>label,.form-row>label{gap:8px;font-size:12px}
+.auth-form input:not([type=checkbox]){
+  height:48px;padding-inline:14px;border-color:#cbd7ce;border-radius:9px;background:#fff;font-size:16px;
+}
+.auth-form input:focus{outline:3px solid #c7dda9;outline-offset:1px}
+.auth-form input[aria-invalid=true]{border-color:#a33d2b}
+.auth-submit{min-height:50px;border-radius:10px;font-size:14px}
+.auth-topline{min-height:28px}
+.auth-topline a{min-height:40px;display:flex;align-items:center}
+.form-error,.form-success{border-radius:8px}
+.check-row{min-height:32px}
+.password-input-wrap{position:relative;display:flex;align-items:center}
+.password-input-wrap input{padding-right:66px!important}
+.password-input-wrap button{position:absolute;right:8px;min-width:48px;min-height:38px;border:0;border-radius:7px;background:#edf3ec;color:var(--green);font-size:12px;font-weight:700;cursor:pointer}
+.auth-legal{margin-top:18px}
+
+.product-list{max-width:960px;margin-inline:auto}
+.product-row{padding:21px 18px;border:1px solid var(--line);border-radius:14px;background:#fff}
+.product-row+.product-row{margin-top:12px}
+.product-row h2{font-size:19px}
+.product-row .eyebrow{margin-bottom:7px;letter-spacing:.07em}
+.product-row dl>div{min-height:40px}
+.product-row dt,.product-row dd{font-size:12px}
+.loan-application-panel{margin-top:8px!important;border-radius:16px!important}
+.loan-application-panel>h2{font-size:20px}
+.loan-step-indicator{
+  margin:0 0 20px;padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));list-style:none;
+}
+.loan-step-indicator li{
+  position:relative;display:grid;justify-items:center;gap:6px;padding:0 2px;color:#77847a;text-align:center;
+}
+.loan-step-indicator li:not(:last-child)::after{
+  position:absolute;z-index:0;top:14px;left:calc(50% + 17px);width:calc(100% - 34px);height:1px;
+  background:var(--line);content:"";
+}
+.loan-step-indicator li[aria-current=step]{color:var(--green)}
+.loan-step-indicator li>span{
+  z-index:1;width:29px;height:29px;display:grid;place-items:center;border:1px solid #cbd7ce;
+  border-radius:50%;background:#fff;font-size:12px;font-weight:700;
+}
+.loan-step-indicator li[aria-current=step]>span{border-color:var(--green);background:var(--green);color:#fff}
+.loan-step-indicator li>b{font-size:10px;font-weight:600}
+.loan-application-form label{font-size:12px}
+.loan-application-form input,.loan-application-form select{
+  min-height:48px;border-radius:9px;font-size:16px;
+}
+.loan-application-guided fieldset{padding:16px;border:1px solid var(--line);border-radius:12px;background:#f9fbf8}
+.loan-application-guided legend{padding-inline:5px;font-size:12px;font-weight:700;color:var(--green)}
+.loan-application-guided fieldset label{margin-top:10px}
+.loan-application-guided>.button,.loan-review-actions .button{min-height:50px;border-radius:10px}
+.loan-application-review{padding:15px;border:1px solid var(--line);border-radius:12px;background:#f9fbf8}
+.loan-application-review dl>div{padding:11px 0;border-bottom:1px solid var(--line)}
+.loan-application-review dd{overflow-wrap:anywhere}
+.loan-review-actions{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);margin-top:18px}
+.loan-review-actions button{width:100%;min-height:48px;border-radius:9px}
+.loan-application-panel .customer-loan-application{overflow-wrap:anywhere}
+.support-content{max-width:960px;padding-top:20px}
+.support-form{padding:18px;border:1px solid var(--line);border-radius:14px;background:#fff}
+.support-form label{font-size:12px}
+.support-form input,.support-form textarea{min-height:48px;border-radius:9px;font-size:16px}
+.support-form .button{min-height:48px;border-radius:9px}
+.ticket-list>article{border:1px solid var(--line);border-radius:12px;background:#fff}
+.support-load-error{margin-top:12px;padding:14px;border:1px solid #ead4cb;border-radius:10px;background:#fff8f5}
+.support-load-error p{margin:0 0 8px;color:#713225;font-size:12px;line-height:1.6}
+.support-load-error .legal-home{display:inline-flex;min-height:44px;align-items:center}
+.customer-ledger-page>.dashboard-welcome{padding-bottom:22px}
+.customer-ledger-page>.customer-balance-band{margin-top:0}
+
+@media(min-width:760px){
+  .customer-app-shell{padding-top:66px;padding-bottom:0}
+  .customer-app-nav{
+    inset:0 0 auto;min-height:64px;justify-content:center;gap:8px;padding:6px 24px;
+    border:0;border-bottom:1px solid var(--line);box-shadow:0 3px 16px rgba(27,53,39,.05);
+  }
+  .customer-app-nav>a,.customer-more-menu>summary{
+    min-width:100px;min-height:48px;flex:0 0 auto;flex-direction:row;gap:8px;padding:0 13px;font-size:13px;
+  }
+  .customer-app-nav>a svg,.customer-more-menu>summary svg{width:18px;height:18px}
+  .customer-app-nav>a[aria-current=page]::before{top:auto;bottom:-6px;width:34px}
+  .customer-more-menu{flex:0 0 auto}
+  .customer-more-panel{top:calc(100% + 8px);right:0;bottom:auto}
+  .dashboard-page>.account-status,.dashboard-page>.dashboard-empty,.dashboard-page>.customer-balance-band,
+  .dashboard-page>.customer-ledger-list,.dashboard-page>.customer-profile-details,.dashboard-page>.customer-filter-row,
+  .dashboard-page>.customer-payment-attempts,.dashboard-page>.product-list,.dashboard-page>.loan-application-panel,
+  .dashboard-page>.support-content{padding-inline:28px}
+  .dashboard-page>.account-status,.dashboard-page>.dashboard-empty,.dashboard-page>.customer-ledger-list,
+  .dashboard-page>.customer-profile-details,.dashboard-page>.customer-payment-attempts,
+  .dashboard-page>.loan-application-panel,.dashboard-page>.support-content{margin-top:20px}
+  .customer-ledger-row{grid-template-columns:minmax(0,1fr) auto auto}
+  .customer-ledger-row>.status-label{grid-column:auto;justify-self:auto}
+  .customer-payment-attempts>article{grid-template-columns:minmax(0,1fr) auto auto}
+  .customer-payment-attempts>article>.status-label{grid-column:auto;justify-self:auto}
+}
+@media(max-width:650px){
+  .auth-aside{min-height:174px;padding:18px 6%}
+  .auth-aside-copy{margin:20px 0 0}
+  .auth-aside-copy h1{font-size:27px}
+  .auth-main{min-height:calc(100svh - 174px);padding:16px 6% 26px}
+  .auth-form-wrap{margin:24px auto}
+  .auth-form-wrap h2{font-size:29px}
+  .auth-legal{margin-top:16px}
+  .dashboard-welcome{padding:28px 6% 22px}
+  .dashboard-welcome h1{font-size:31px}
+  .dashboard-welcome>p:last-child{font-size:13px}
+  .dashboard-page>.account-status,.dashboard-page>.dashboard-empty,.dashboard-page>.customer-balance-band,
+  .dashboard-page>.customer-ledger-list,.dashboard-page>.customer-profile-details,.dashboard-page>.customer-filter-row,
+  .dashboard-page>.customer-payment-attempts,.dashboard-page>.product-list,.dashboard-page>.loan-application-panel,
+  .dashboard-page>.support-content{width:calc(100% - 28px);padding-inline:16px}
+  .dashboard-page>.account-status,.dashboard-page>.dashboard-empty,.dashboard-page>.customer-ledger-list,
+  .dashboard-page>.customer-profile-details,.dashboard-page>.customer-payment-attempts,
+  .dashboard-page>.loan-application-panel,.dashboard-page>.support-content{margin-top:12px;padding-block:18px}
+  .dashboard-page>.account-status dl>div{grid-template-columns:112px minmax(0,1fr);gap:8px}
+  .customer-profile-details dl{grid-template-columns:minmax(0,1fr)}
+  .dashboard-page>.dashboard-links{width:calc(100% - 28px);padding-inline:0}
+  .customer-ledger-heading{align-items:flex-start}
+  .customer-ledger-heading>div{align-items:flex-end;flex-direction:column}
+  .customer-ledger-heading .quiet-button{padding-inline:9px;font-size:10px}
+  .customer-ledger-page>.dashboard-welcome{padding-bottom:18px}
+  .product-list{padding-block:16px}
+  .product-row{padding:16px}
+  .loan-application-panel{padding:18px 14px!important}
+  .loan-step-indicator{margin-bottom:16px}
+  .loan-step-indicator li>b{font-size:9px}
+  .loan-step-indicator li:not(:last-child)::after{left:calc(50% + 15px);width:calc(100% - 30px)}
+  .loan-application-guided fieldset{padding:12px}
+  .loan-review-actions{grid-template-columns:1fr}
+  .customer-filter-row{flex-direction:column;align-items:stretch}
+  .support-content{padding-top:10px}
+  .support-form{padding:14px}
+  .ticket-heading{align-items:flex-start;flex-direction:column}
+}
+@media(max-width:380px){
+  .customer-app-nav>a,.customer-more-menu>summary{font-size:9px}
+  .customer-app-nav>a svg,.customer-more-menu>summary svg{width:19px;height:19px}
+  .dashboard-page>.account-status dl>div{grid-template-columns:94px minmax(0,1fr)}
+  .customer-ledger-heading h2{font-size:17px}
+  .application-list article>span:nth-child(2){font-size:11px}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}

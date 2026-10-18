@@ -93,7 +93,6 @@ export class AuthController {
         phone: principal.phone,
         fullName: principal.fullName,
         identityStatus: principal.identityStatus,
-        activationStatus: principal.activationStatus,
         referralCode: principal.referralCode,
       },
     };

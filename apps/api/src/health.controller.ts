@@ -13,14 +13,14 @@ export class HealthController {
   getVersion(): { releaseId: string; source: 'configured' | 'render' | 'unknown' } {
     const configuredRelease = process.env.APP_RELEASE_SHA;
     const renderRelease = process.env.RENDER_GIT_COMMIT;
-    const candidate = configuredRelease ?? renderRelease;
-    if (!candidate || !/^[a-f0-9]{7,40}$/i.test(candidate)) {
+    const candidate = [
+      { releaseId: configuredRelease, source: 'configured' as const },
+      { releaseId: renderRelease, source: 'render' as const },
+    ].find((release) => release.releaseId && /^[a-f0-9]{7,40}$/i.test(release.releaseId));
+    if (!candidate) {
       return { releaseId: 'unknown', source: 'unknown' };
     }
-    return {
-      releaseId: candidate,
-      source: configuredRelease ? 'configured' : 'render',
-    };
+    return { releaseId: candidate.releaseId!, source: candidate.source };
   }
 
   @Get('ready')

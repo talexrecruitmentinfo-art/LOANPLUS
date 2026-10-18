@@ -52,15 +52,14 @@ export default function PrivacyPage() {
         </li>
         <li>
           <strong>Consent and lending records:</strong> accepted Terms and Privacy Policy version identifiers
-          and timestamps; loan product, requested and approved amounts, decision and review details, accepted
-          product terms-version string, disbursement reference, and scheduled or recorded repayment information
-          where created. The current web application does not provide the customer-facing loan application,
-          offer-acceptance, or disbursement-history screens.
+          and timestamps; loan product, requested and approved amounts, guarantor names and phone numbers,
+          application fee and decision details, accepted product terms-version string, disbursement reference,
+          and scheduled or recorded repayment information where created.
         </li>
         <li>
           <strong>Payments:</strong> transaction amount, currency, status, internal and provider references,
-          timestamps, callback result codes and a hash of each callback payload, and the phone number supplied
-          for an activation payment. The activation phone number is encrypted in storage. A Safaricom receipt
+          timestamps, callback result codes and a hash of each callback payload, and the registered phone
+          number used for a loan processing-fee request. That payment phone number is encrypted in storage. A Safaricom receipt
           number is checked during successful callback processing but is not stored in the payment or callback
           record. M-Pesa PINs are not requested by this Service.
         </li>
@@ -84,7 +83,7 @@ export default function PrivacyPage() {
         <li>create and secure accounts, authenticate users, process password resets, and prevent duplicate or abusive registrations;</li>
         <li>record consent to the applicable terms and privacy notice;</li>
         <li>record and review loan applications, decisions and offers, accepted offer details, and disbursement records where those features are used;</li>
-        <li>initiate and reconcile an activation payment when the feature and its approved terms are enabled;</li>
+        <li>initiate and reconcile the KSh 50 loan processing fee required before an application is submitted;</li>
         <li>operate referral tracking and respond to support requests;</li>
         <li>maintain audit, accounting, security, and dispute records; and</li>
         <li>comply with legal obligations, respond to lawful requests, and establish or defend legal claims.</li>
@@ -128,7 +127,7 @@ export default function PrivacyPage() {
         bureau checks or disclosures. Do not represent those checks or disclosures as occurring unless the
         owner implements them, verifies the legal basis and required notice, and updates this policy first.
         Repository deployment instructions refer to Supabase for PostgreSQL, Render for the API, Vercel for
-        the website, Resend for email, and Safaricom Daraja for activation payments; these references do not
+        the website, Resend for email, and Safaricom Daraja for loan processing-fee payments; these references do not
         establish which services are actually used in production, their contractual roles, subprocessors, or
         the data each receives. <strong>[OWNER: verify and list actual providers, their roles, data shared,
         contract safeguards, and any other recipients before approval.]</strong>

@@ -3,7 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import { IsString, Length } from 'class-validator';
 import type { AuthenticatedRequest } from '../auth/request.types';
 import { SuperadminSessionGuard } from '../auth/session.guard';
-import { PaymentService } from './payment.service';
+import { PaymentService, type ReconciliationQueueCategory } from './payment.service';
 
 class ReconcilePaymentDto {
   @IsString()
@@ -22,6 +22,12 @@ function assertSameOrigin(request: AuthenticatedRequest): void {
   }
 }
 
+function parseQueueCategory(value?: string): ReconciliationQueueCategory {
+  if (!value || value === 'ALL') return 'ALL';
+  if (value === 'AGED_PENDING' || value === 'LEGACY_4999' || value === 'PROVIDER_REVIEW') return value;
+  throw new BadRequestException('Reconciliation category is invalid.');
+}
+
 @Controller('admin/payment-reconciliation')
 @UseGuards(SuperadminSessionGuard)
 export class PaymentReconciliationController {
@@ -31,6 +37,8 @@ export class PaymentReconciliationController {
   async list(
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,
+    @Query('search') search?: string,
+    @Query('category') category?: string,
   ) {
     const parsedLimit = limit === undefined ? 50 : Number(limit);
     if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
@@ -39,7 +47,14 @@ export class PaymentReconciliationController {
     if (cursor !== undefined && (cursor.length < 1 || cursor.length > 40)) {
       throw new BadRequestException('Reconciliation cursor is invalid.');
     }
-    return { data: await this.payments.listReconciliationQueue(cursor, parsedLimit) };
+    return {
+      data: await this.payments.listReconciliationQueue(
+        cursor,
+        parsedLimit,
+        search,
+        parseQueueCategory(category),
+      ),
+    };
   }
 
   @Post(':paymentId/refresh')
@@ -53,6 +68,26 @@ export class PaymentReconciliationController {
     assertSameOrigin(request);
     return {
       data: await this.payments.reconcileActivationPayment(
+        paymentId,
+        idempotencyKey,
+        request.principal!.id,
+        dto.note,
+        request.ip,
+      ),
+    };
+  }
+
+  @Post(':paymentId/escalate')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async escalate(
+    @Param('paymentId') paymentId: string,
+    @Body() dto: ReconcilePaymentDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    assertSameOrigin(request);
+    return {
+      data: await this.payments.escalateActivationPayment(
         paymentId,
         idempotencyKey,
         request.principal!.id,

@@ -6,3 +6,31 @@
 .admin-inline-notice{margin:20px 10%;padding:10px 12px;border-left:3px solid #477951;background:#e8f0e3;color:#2c5635;font-size:12px}.settings-copy{max-width:750px;color:#68746a;font-size:11px;line-height:1.7}.settings-copy code{color:#344b38;font-size:10px}.product-config-form select{height:40px;padding:0 10px;border:1px solid #cfd7cc;border-radius:3px;background:#fffefa;color:#202b25;font:400 13px 'DM Sans',sans-serif}
 .referral-content{max-width:900px;margin:0 auto;padding:34px 30px 80px}.referral-link-panel{padding:20px;border:1px solid #dce1d8;background:#fbfbf6}.referral-link-panel>label{display:block;margin-bottom:8px;font-size:11px;font-weight:700}.referral-link-panel>div{display:flex;gap:9px}.referral-link-panel input{min-width:0;flex:1;height:42px;padding:0 10px;border:1px solid #cfd7cc;border-radius:3px;background:#fffefa;color:#354238;font:12px 'DM Sans',sans-serif}.referral-link-panel .button{min-height:42px;cursor:pointer}.referral-link-panel small{display:block;margin-top:8px;color:#758178;font-size:10px}.referral-counts{margin:22px 0;display:grid;grid-template-columns:1fr 1fr;border-top:1px solid #dce1d8;border-bottom:1px solid #dce1d8}.referral-counts>div{padding:17px 0;display:grid;gap:4px}.referral-counts>div+div{padding-left:22px;border-left:1px solid #dce1d8}.referral-counts span{color:#718075;font-size:10px}.referral-counts b{font:600 23px Manrope,sans-serif}.referral-notice{padding:12px 15px;border-left:3px solid #d18452;background:#f1ece1;color:#5a5040;font-size:11px;line-height:1.7}.referral-content h2{margin:25px 0 12px;font:600 18px Manrope,sans-serif}.referral-table article{min-height:54px;display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:16px;border-top:1px solid #dce1d8}.referral-table article>div{display:grid;gap:4px}.referral-table b{font-size:11px}.referral-table small,.referral-table article>span:last-child{color:#728075;font-size:10px}
 @media(max-width:650px){.product-list{padding:20px 7%}.product-row{grid-template-columns:1fr;gap:12px}.product-disclosure{grid-column:auto}.product-row>.button{margin-top:4px}.admin-shortcuts{padding:0 7%;grid-template-columns:1fr}.application-list article{grid-template-columns:1fr auto;gap:8px}.application-list article>.status-label{grid-column:1/-1;justify-self:start;margin-bottom:8px}.admin-inline-error,.admin-inline-notice{margin:16px 7%}.admin-workspace{margin:0 7%;padding:26px 0}.admin-workspace-heading{align-items:flex-start;flex-direction:column;gap:4px}.review-application{padding:14px}.review-summary{flex-direction:column}.review-application dl{grid-template-columns:1fr 1fr}.admin-product-list article{align-items:flex-start;padding:13px 0;flex-direction:column}.product-config-form .form-row{grid-template-columns:1fr}.referral-content,.support-content{padding:23px 7% 55px}.referral-link-panel{padding:15px}.referral-link-panel>div{flex-direction:column}.referral-link-panel input{width:100%}.referral-table article{grid-template-columns:1fr auto;gap:8px;padding:9px 0}.referral-table article>span:last-child{grid-column:1/-1}.support-form{padding:16px}.ticket-list>article{padding:13px}.ticket-heading{flex-direction:column}}
+@media (min-width: 651px){.loan-application-panel{margin-left:10%;margin-right:10%}}
+.loan-application-panel{max-width:900px;margin-top:8px;padding:24px 30px;border:1px solid #dce1d8;background:#fbfbf6}
+.loan-application-panel>h2{margin:0 0 18px;font:600 20px Manrope,sans-serif}
+.loan-application-guided{max-width:100%;display:grid;grid-template-columns:1fr 1fr;gap:15px}
+.loan-application-guided>label,.loan-application-guided fieldset>label{display:grid;align-content:start;gap:7px;color:#354238;font-size:12px;font-weight:600}
+.loan-application-guided input,.loan-application-guided select{width:100%;min-height:46px;padding:10px;border:1px solid #cfd7cc;border-radius:6px;background:#fff;color:#202b25;font:400 14px 'DM Sans',sans-serif}
+.loan-application-guided input[aria-invalid=true],.loan-application-guided select[aria-invalid=true]{border-color:#b54e39}
+.loan-application-guided small[role=alert]{color:#9a3927;font-size:11px;font-weight:500}
+.loan-application-guided fieldset{min-width:0;padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:12px;border:1px solid #dce1d8;border-radius:6px}
+.loan-application-guided legend{padding:0 5px;color:#2d6143;font:600 13px Manrope,sans-serif}
+.loan-field-hint{color:#758178;font-size:10px;font-weight:500}
+.loan-application-guided>.button{min-height:48px;grid-column:1/-1;justify-self:start}
+.loan-application-review{display:grid;gap:16px}
+.loan-application-review dl{margin:0;display:grid;grid-template-columns:1fr 1fr;gap:0 20px}
+.loan-application-review dl>div{padding:12px 0;border-bottom:1px solid #e1e5dd}
+.loan-application-review dt{color:#718075;font-size:11px}
+.loan-application-review dd{margin:5px 0 0;color:#26352b;font-size:14px;overflow-wrap:anywhere}
+.loan-application-review>p{margin:0;color:#59665c;font-size:12px;line-height:1.7}
+.loan-review-actions{display:flex;flex-wrap:wrap;gap:10px}
+.loan-review-actions button{min-height:46px}
+.customer-loan-application .draft-application-details{display:grid;gap:7px}
+.draft-application-details>p{margin:0 0 4px;color:#59665c;font-size:12px;line-height:1.6}
+.draft-application-details>small{color:#536157;font-size:11px;overflow-wrap:anywhere}
+.draft-application-details>.quiet-button{justify-self:start;min-height:44px;margin-top:5px}
+.review-guarantors{padding:12px;background:#f2f5ef;border-radius:5px}
+.review-guarantors>b{font-size:11px}
+.review-guarantors>p{margin:7px 0 0;color:#4f5d52;font-size:11px;overflow-wrap:anywhere}
+@media(max-width:650px){.loan-application-panel{margin:8px 7% 0;padding:18px 14px}.loan-application-guided{grid-template-columns:1fr;gap:13px}.loan-application-guided fieldset{grid-template-columns:1fr}.loan-application-guided>.button{width:100%;grid-column:auto}.loan-application-review dl{grid-template-columns:1fr}.loan-review-actions{display:grid;grid-template-columns:1fr}.loan-review-actions button{width:100%}}

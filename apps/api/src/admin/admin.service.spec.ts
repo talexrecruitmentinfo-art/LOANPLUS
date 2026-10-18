@@ -17,13 +17,14 @@ describe('AdminService financial and account views', () => {
       select: expect.objectContaining({
         fullName: true,
         email: true,
-        activationStatus: true,
+        identityStatus: true,
         _count: { select: { paymentTransactions: true, loans: true, loanApplications: true } },
       }),
       take: 100,
     }));
     const query = findMany.mock.calls[0][0] as { select: Record<string, unknown> };
     expect(query.select).not.toHaveProperty('phone');
+    expect(query.select).not.toHaveProperty('activationStatus');
     expect(query.select).not.toHaveProperty('nationalIdCiphertext');
     expect(query.select).not.toHaveProperty('passwordHash');
   });

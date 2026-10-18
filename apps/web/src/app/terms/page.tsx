@@ -104,36 +104,24 @@ export default function TermsPage() {
         overdue handling, and legally compliant collections before offering loans.]</strong>
       </p>
 
-      <h2>6. Activation and M-Pesa payments</h2>
+      <h2>6. Loan processing fee and M-Pesa payments</h2>
       <p>
-        Account activation payments are not an assumed or universal requirement. The Service can initiate an
-        M-Pesa Daraja STK Push only when the owner has configured and approved an activation amount and
-        customer-facing policy, required ledger accounts are available, and payment credentials and callback
-        settings are configured. Live processing is separately disabled unless expressly enabled by the
-        operator. These technical controls do not themselves establish that an activation payment is lawful,
-        appropriate, refundable, or approved for production.
+        Opening and accessing a customer account does not require an activation payment. At the final review
+        step of a loan application, the customer is asked to pay the disclosed
+        <strong> Loan Processing Fee — KSh 50</strong> through the configured M-Pesa service. The fee is for
+        processing the application; it is not a wallet deposit and does not guarantee eligibility, approval,
+        an approved amount, or disbursement. The application is submitted for staff review only after the
+        payment is authoritatively confirmed by the payment provider.
       </p>
       <p>
-        The current activation screen displays the amount, purpose, refundability, wallet treatment, customer
-        disclosure, and configured terms-version string, and requires a checkbox before requesting an STK
-        Push. It does not display the separate internal accounting-treatment field. The provider callback is
-        checked against a Daraja status query before the payment is confirmed, but no scheduled retry or
-        reconciliation worker is implemented. An uncertain initiation or missing callback can therefore
-        remain pending; do not make another payment while the first is pending. A payment prompt is not proof
-        of payment, and activation follows only after confirmed success. The application stores its own
-        transaction reference but currently does not retain or display the Safaricom receipt number; keep
-        Safaricom&apos;s confirmation and contact <strong>loanplus.info@gmail.com or +254107052973</strong>
-        promptly about an unrecognised, duplicated, failed, or unreconciled payment. The owner must verify and
-        monitor these supplied contacts. No in-app refund or cancellation workflow is implemented. The owner
-        has mentioned a possible KSh 50 activation fee, but this amount is unverified, is not a configured
-        customer term, and must not be charged or represented as approved without separate review and approval.
-        The owner must approve and operationalise accurate refund, cancellation, and complaint terms before
-        enabling any payment policy.
-      </p>
-      <p>
-        Daraja processing may involve Safaricom and its payment systems. We do not promise uninterrupted
-        provider availability. Do not send money to a number or payee unless the in-product instructions and
-        payment details have been verified.
+        An STK Push prompt or acceptance, a screenshot, or a customer-reported payment is not proof of payment.
+        A pending, timed-out, or otherwise unresolved result remains under investigation; do not make another
+        payment while the prior request is unresolved. Keep Safaricom&apos;s confirmation and contact
+        <strong> loanplus.info@gmail.com or +254107052973</strong> about an unrecognised, duplicated, failed,
+        or unreconciled payment. The owner must verify and monitor these supplied contacts. Refund and
+        cancellation handling must follow the final approved customer policy; no in-app refund or cancellation
+        action is represented here. Daraja processing may involve Safaricom and its payment systems, and
+        uninterrupted provider availability is not promised.
       </p>
 
       <h2>7. Referrals and support</h2>

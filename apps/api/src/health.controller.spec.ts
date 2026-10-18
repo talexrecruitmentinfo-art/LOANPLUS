@@ -36,6 +36,14 @@ describe('HealthController', () => {
     expect(controller.getVersion()).toEqual({ releaseId: 'abc1234', source: 'render' });
   });
 
+  it('falls back to valid Render metadata when the configured release is invalid', () => {
+    process.env.APP_RELEASE_SHA = 'not-a-commit';
+    process.env.RENDER_GIT_COMMIT = 'abc1234';
+    const controller = new HealthController({} as PrismaService);
+
+    expect(controller.getVersion()).toEqual({ releaseId: 'abc1234', source: 'render' });
+  });
+
   it('returns unknown when no valid release identifier is available', () => {
     delete process.env.APP_RELEASE_SHA;
     delete process.env.RENDER_GIT_COMMIT;

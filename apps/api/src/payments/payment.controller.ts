@@ -2,7 +2,7 @@ import { Body, Controller, ForbiddenException, Get, Headers, Param, Post, Req, U
 import { Throttle } from '@nestjs/throttler';
 import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard } from '../auth/session.guard';
-import { InitiateActivationPaymentDto } from './payment.dto';
+import { InitiateLoanProcessingFeeDto } from './payment.dto';
 import { PaymentService } from './payment.service';
 
 function assertSameOrigin(request: AuthenticatedRequest): void {
@@ -23,29 +23,17 @@ function assertSameOrigin(request: AuthenticatedRequest): void {
 export class PaymentController {
   constructor(private readonly payments: PaymentService) {}
 
-  @Get('activation/terms')
-  async getActivationTerms() {
-    return { data: await this.payments.getActivationTerms() };
-  }
-
-  @Get('activation/status')
-  @UseGuards(CustomerSessionGuard)
-  @Throttle({ default: { limit: 12, ttl: 60_000 } })
-  async getActivationStatus(@Req() request: AuthenticatedRequest) {
-    return { data: await this.payments.getCustomerActivationStatus(request.principal!.id) };
-  }
-
-  @Post('activation')
+  @Post('loan-processing-fee')
   @UseGuards(CustomerSessionGuard)
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
-  async initiateActivation(
-    @Body() dto: InitiateActivationPaymentDto,
+  async initiateLoanProcessingFee(
+    @Body() dto: InitiateLoanProcessingFeeDto,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Req() request: AuthenticatedRequest,
   ) {
     assertSameOrigin(request);
     return {
-      data: await this.payments.initiateActivationPayment(request.principal!.id, dto, idempotencyKey),
+      data: await this.payments.initiateLoanProcessingFee(request.principal!.id, dto, idempotencyKey),
     };
   }
 

@@ -1,26 +1,27 @@
-import { ConflictException, ServiceUnavailableException } from '@nestjs/common';
-import { randomBytes, randomInt } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
-import { ActivationSettingsService } from './activation-settings.service';
+import { CreateLoanApplicationDto } from '../loans/loan.dto';
+import { LoanService } from '../loans/loan.service';
+import { InitiateLoanProcessingFeeDto } from './payment.dto';
 import { MpesaService } from './mpesa.service';
 import { PaymentService } from './payment.service';
-import { ConfigureActivationDto, InitiateActivationPaymentDto } from './payment.dto';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const databaseTest = databaseUrl ? it : it.skip;
 
-describe('activation payment database integration', () => {
+describe('loan processing-fee payment database integration', () => {
   let prisma: PrismaService;
   let payments: PaymentService;
-  let settings: ActivationSettingsService;
+  let loans: LoanService;
   let adminId: string;
-  let customerIds: string[] = [];
-  let clearingAccountId: string;
+  let userId: string;
+  let productId: string;
+  let applicationId: string;
+  let paymentId: string;
+  let accountIds: string[] = [];
   let callbackUrl = '';
   let merchantRequestId = '';
-  let providerResultCode = 0;
-  const originalApprovalEnvironment = process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT;
 
   const mpesa = {
     assertConfiguredForPayments: jest.fn(),
@@ -32,7 +33,7 @@ describe('activation payment database integration', () => {
     queryStkStatus: jest.fn(async (checkoutRequestId: string) => ({
       checkoutRequestId,
       merchantRequestId,
-      resultCode: providerResultCode,
+      resultCode: 0,
       resultDescription: 'Test fixture provider response',
     })),
   } as unknown as MpesaService;
@@ -47,227 +48,175 @@ describe('activation payment database integration', () => {
     if (!['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname) || !parsedUrl.pathname.endsWith('_test')) {
       throw new Error('TEST_DATABASE_URL must point to a local database whose name ends in _test.');
     }
-    process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT = 'staging';
     prisma = new PrismaService();
     await prisma.$connect();
     const ledger = new LedgerService(prisma);
     payments = new PaymentService(prisma, mpesa, ledger);
-    settings = new ActivationSettingsService(prisma);
+    loans = new LoanService(prisma, ledger);
 
     const admin = await prisma.superadminUser.create({
       data: {
-        email: `payment-admin-${Date.now()}-${randomBytes(4).toString('hex')}@example.invalid`,
+        email: `processing-fee-admin-${Date.now()}-${randomBytes(4).toString('hex')}@example.invalid`,
         passwordHash: 'test-fixture-only',
         emailVerifiedAt: new Date(),
       },
       select: { id: true },
     });
     adminId = admin.id;
-    const clearing = await prisma.ledgerAccount.create({
+    const accounts = await Promise.all([
+      prisma.ledgerAccount.create({
+        data: { code: 'MPESA_CLEARING', name: 'Test M-Pesa clearing', accountType: 'ASSET' },
+        select: { id: true },
+      }),
+      prisma.ledgerAccount.create({
+        data: { code: 'LOAN_PROCESSING_FEES', name: 'Test loan processing-fee revenue', accountType: 'REVENUE' },
+        select: { id: true },
+      }),
+    ]);
+    accountIds = accounts.map((account) => account.id);
+    const user = await prisma.user.create({
       data: {
-        code: `MPESA_CLEARING_${randomBytes(4).toString('hex')}`,
-        name: 'Test M-Pesa clearing account',
-        accountType: 'ASSET',
+        fullName: 'Processing Fee Test Customer',
+        email: `processing-fee-${Date.now()}-${randomBytes(4).toString('hex')}@example.invalid`,
+        phone: '+254712345678',
+        nationalIdCiphertext: 'test-fixture-only',
+        nationalIdHash: randomBytes(32).toString('hex'),
+        passwordHash: 'test-fixture-only',
+        termsVersion: 'test-v1',
+        privacyVersion: 'test-v1',
       },
       select: { id: true },
     });
-    clearingAccountId = clearing.id;
-    await prisma.ledgerAccount.update({ where: { id: clearingAccountId }, data: { code: 'MPESA_CLEARING' } });
-    const userData = Array.from({ length: 2 }, (_, index) => ({
-      fullName: `Payment Test Customer ${index + 1}`,
-      email: `payment-${Date.now()}-${index}-${randomBytes(4).toString('hex')}@example.invalid`,
-      phone: `+2547${randomInt(0, 100_000_000).toString().padStart(8, '0')}`,
-      nationalIdCiphertext: 'test-fixture-only',
-      nationalIdHash: randomBytes(32).toString('hex'),
-      passwordHash: 'test-fixture-only',
-      termsVersion: 'test-v1',
-      privacyVersion: 'test-v1',
-    }));
-    const users = await prisma.user.createMany({ data: userData });
-    if (users.count !== 2) throw new Error('Could not create isolated payment test users.');
-    const createdUsers = await prisma.user.findMany({ where: { email: { in: userData.map((user) => user.email) } }, select: { id: true } });
-    customerIds = createdUsers.map((user) => user.id);
+    userId = user.id;
+    const product = await prisma.loanProduct.create({
+      data: {
+        name: 'Processing Fee Integration Product',
+        description: 'Test-only configured product for isolated payment integration checks.',
+        minimumPrincipalKes: 500,
+        maximumPrincipalKes: 5000,
+        durationDays: 30,
+        interestRateBps: 1000,
+        flatFeeKes: 10,
+        termsVersion: 'test-product-v1',
+        isAvailable: true,
+      },
+      select: { id: true },
+    });
+    productId = product.id;
+    await loans.configureProcessingFeeRevenueAccount(
+      'LOAN_PROCESSING_FEES',
+      'Configure isolated integration-test accounting only.',
+      adminId,
+    );
   });
 
   afterAll(async () => {
     if (!databaseUrl || !prisma) return;
-    const paymentIds = await prisma.paymentTransaction.findMany({ where: { userId: { in: customerIds } }, select: { id: true } });
-    const ids = paymentIds.map((payment) => payment.id);
-    if (ids.length) {
-      await prisma.paymentCallbackEvent.deleteMany({ where: { paymentTransactionId: { in: ids } } });
-      await prisma.paymentReconciliationAttempt.deleteMany({ where: { paymentTransactionId: { in: ids } } });
-      await prisma.ledgerEntry.deleteMany({ where: { transaction: { paymentId: { in: ids } } } });
-      await prisma.ledgerTransaction.deleteMany({ where: { paymentId: { in: ids } } });
-      await prisma.idempotencyRecord.deleteMany({ where: { paymentTransactionId: { in: ids } } });
-      await prisma.activationPaymentRequest.deleteMany({ where: { paymentTransactionId: { in: ids } } });
-      await prisma.paymentTransaction.deleteMany({ where: { id: { in: ids } } });
+    if (userId) {
+      const paymentsForUser = await prisma.paymentTransaction.findMany({ where: { userId }, select: { id: true } });
+      const ids = paymentsForUser.map((payment) => payment.id);
+      if (ids.length) {
+        await prisma.paymentCallbackEvent.deleteMany({ where: { paymentTransactionId: { in: ids } } });
+        await prisma.paymentReconciliationAttempt.deleteMany({ where: { paymentTransactionId: { in: ids } } });
+        await prisma.ledgerEntry.deleteMany({ where: { transaction: { paymentId: { in: ids } } } });
+        await prisma.ledgerTransaction.deleteMany({ where: { paymentId: { in: ids } } });
+        await prisma.idempotencyRecord.deleteMany({ where: { paymentTransactionId: { in: ids } } });
+        await prisma.activationPaymentRequest.deleteMany({ where: { paymentTransactionId: { in: ids } } });
+        await prisma.paymentTransaction.deleteMany({ where: { id: { in: ids } } });
+      }
+      await prisma.loanApplication.deleteMany({ where: { userId } });
+      await prisma.loanProduct.deleteMany({ where: { id: productId } });
+      await prisma.ledgerEntry.deleteMany({ where: { ledgerAccountId: { in: accountIds } } });
+      await prisma.ledgerAccount.deleteMany({ where: { id: { in: accountIds } } });
+      await prisma.systemSetting.deleteMany({ where: { key: 'loan.processing_fee_revenue_account' } });
+      await prisma.authAuditLog.deleteMany({ where: { actorId: userId } });
+      await prisma.user.deleteMany({ where: { id: userId } });
     }
-    await prisma.ledgerEntry.deleteMany({ where: { ledgerAccountId: { in: [clearingAccountId].filter(Boolean) } } });
-    await prisma.ledgerAccount.deleteMany({ where: { id: clearingAccountId } });
-    await prisma.ledgerAccount.deleteMany({ where: { userId: { in: customerIds } } });
-    await prisma.systemSetting.deleteMany({ where: { key: { in: ['activation.amount_kes', 'activation.payment_policy'] } } });
-    await prisma.authAuditLog.deleteMany({ where: { actorId: { in: [...customerIds, adminId].filter(Boolean) } } });
-    await prisma.user.deleteMany({ where: { id: { in: customerIds } } });
-    await prisma.adminAuditLog.deleteMany({ where: { superadminId: adminId } });
-    await prisma.superadminUser.deleteMany({ where: { id: adminId } });
+    if (adminId) {
+      await prisma.adminAuditLog.deleteMany({ where: { superadminId: adminId } });
+      await prisma.superadminUser.deleteMany({ where: { id: adminId } });
+    }
     await prisma.$disconnect();
-    if (originalApprovalEnvironment === undefined) delete process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT;
-    else process.env.ACTIVATION_POLICY_APPROVAL_ENVIRONMENT = originalApprovalEnvironment;
   });
 
-  databaseTest('keeps unapproved activation disabled and confirms only provider-verified successful payments', async () => {
-    const unapproved = Object.assign(new ConfigureActivationDto(), {
-      amountKes: 50,
-      approved: false,
-      purpose: 'Development test activation disclosure.',
-      refundability: 'CONDITIONAL_REFUND',
-      creditedToWallet: true,
-      accountingTreatment: 'No live accounting configured for this test.',
-      customerDisclosure: 'Development test disclosure; no live payment is performed.',
-      termsVersion: 'test-activation-v1',
-      reason: 'Keep test activation disabled before approval.',
+  databaseTest('submits only after confirmed fee, posts revenue without wallet credit, and settles callbacks once', async () => {
+    const applicationDto = Object.assign(new CreateLoanApplicationDto(), {
+      productId,
+      requestedPrincipalKes: 3000,
+      guarantorOneName: 'First Guarantor',
+      guarantorOnePhone: '0712345678',
+      guarantorTwoName: 'Second Guarantor',
+      guarantorTwoPhone: '0723456789',
     });
-    await settings.configure(unapproved, adminId);
-    const input = Object.assign(new InitiateActivationPaymentDto(), {
-      phoneNumber: '0712345678',
-      termsAccepted: true,
-      termsVersion: 'test-activation-v1',
-    });
-    await expect(payments.initiateActivationPayment(customerIds[0], input, 'activation-test-key-0001')).rejects.toBeInstanceOf(ServiceUnavailableException);
+    const draft = await loans.createApplication(userId, applicationDto, 'loan-application-idempotency-01');
+    applicationId = draft.id;
+    expect(draft.status).toBe('DRAFT');
+    expect(await prisma.loanApplication.findUniqueOrThrow({
+      where: { id: applicationId },
+      select: { submittedAt: true },
+    })).toEqual({ submittedAt: null });
 
-    const approved = Object.assign(new ConfigureActivationDto(), { ...unapproved, approved: true, reason: 'Approved only for the integration fixture.' });
-    await settings.configure(approved, adminId);
-    const started = await payments.initiateActivationPayment(customerIds[0], input, 'activation-test-key-0001');
-    expect(started.status).toBe('PENDING');
-    expect(started.amountKes).toBe(50);
-    const repeated = await payments.initiateActivationPayment(customerIds[0], input, 'activation-test-key-0001');
-    expect(repeated.reference).toBe(started.reference);
-    await expect(payments.initiateActivationPayment(
-      customerIds[0],
-      Object.assign(new InitiateActivationPaymentDto(), {
-        phoneNumber: '0712345679',
-        termsAccepted: true,
-        termsVersion: 'test-activation-v1',
-      }),
-      'activation-test-key-0001',
-    )).rejects.toBeInstanceOf(ConflictException);
-    expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(1);
+    const started = await payments.initiateLoanProcessingFee(
+      userId,
+      Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId, reviewConfirmed: true }),
+      'loan-processing-fee-idempotency-01',
+    );
+    expect(started).toMatchObject({ status: 'PENDING', amountKes: 50, currency: 'KES' });
+    const transaction = await prisma.paymentTransaction.findUniqueOrThrow({
+      where: { internalReference: started.reference },
+    });
+    paymentId = transaction.id;
+    expect(transaction).toMatchObject({
+      type: 'LOAN_PROCESSING_FEE',
+      loanApplicationId: applicationId,
+      status: 'PENDING',
+    });
+    expect(await prisma.loanApplication.findUniqueOrThrow({ where: { id: applicationId } })).toMatchObject({
+      status: 'PROCESSING_PAYMENT_PENDING',
+    });
 
-    const payment = await prisma.paymentTransaction.findUniqueOrThrow({ where: { internalReference: started.reference } });
-    const request = await prisma.activationPaymentRequest.findUniqueOrThrow({ where: { paymentTransactionId: payment.id } });
-    expect(request.termsAcceptedVersion).toBe('test-activation-v1');
-    expect(request.termsAcceptedAt).toBeInstanceOf(Date);
-    await prisma.paymentTransaction.update({
-      where: { id: payment.id },
-      data: { status: 'FAILED', failureCode: 'MPESA_RESULT_4999' },
-    });
-    await expect(payments.initiateActivationPayment(
-      customerIds[0],
-      input,
-      'activation-test-key-0003',
-    )).rejects.toBeInstanceOf(ConflictException);
-    expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(1);
-    await prisma.paymentTransaction.update({
-      where: { id: payment.id },
-      data: { status: 'PENDING', failureCode: null },
-    });
-    const token = new URL(callbackUrl).pathname.split('/').at(-1)!;
-    providerResultCode = 4999;
-    await payments.handleMpesaCallback(token, {
-      Body: { stkCallback: {
-        CheckoutRequestID: request.checkoutRequestId,
-        MerchantRequestID: request.merchantRequestId,
-        ResultCode: 4999,
-        ResultDesc: 'Request is still processing.',
-      } },
-    });
-    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } })).status).toBe('PENDING');
-    expect(await prisma.paymentCallbackEvent.count({
-      where: { paymentTransactionId: payment.id, providerResultCode: '4999' },
-    })).toBe(1);
-    const reconciliationKey = 'reconciliation-payment-test-0001';
-    const firstReconciliation = await payments.reconcileActivationPayment(
-      payment.id,
-      reconciliationKey,
-      adminId,
-      'Investigate delayed callback without resolving the payment',
-      '127.0.0.1',
-    );
-    const repeatedReconciliation = await payments.reconcileActivationPayment(
-      payment.id,
-      reconciliationKey,
-      adminId,
-      'Investigate delayed callback without resolving the payment',
-      '127.0.0.1',
-    );
-    expect(firstReconciliation).toMatchObject({ outcome: 'UNRESOLVED_PROCESSING', providerResultCode: '4999' });
-    expect(repeatedReconciliation.id).toBe(firstReconciliation.id);
-    expect(await prisma.paymentReconciliationAttempt.count({ where: { paymentTransactionId: payment.id } })).toBe(1);
-    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } })).status).toBe('PENDING');
-    expect(await prisma.ledgerTransaction.count({ where: { paymentId: payment.id } })).toBe(0);
-    const callback = {
+    const checkoutRequestId = new URL(callbackUrl).searchParams.get('unused') ??
+      await prisma.activationPaymentRequest.findUniqueOrThrow({
+        where: { paymentTransactionId: paymentId },
+        select: { checkoutRequestId: true },
+      }).then((request) => request.checkoutRequestId);
+    if (!checkoutRequestId) throw new Error('Mock provider checkout ID was not persisted.');
+    const payload = {
       Body: {
         stkCallback: {
-          CheckoutRequestID: request.checkoutRequestId,
-          MerchantRequestID: request.merchantRequestId,
+          CheckoutRequestID: checkoutRequestId,
+          MerchantRequestID: merchantRequestId,
           ResultCode: 0,
-          ResultDesc: 'Success',
+          ResultDesc: 'Payment confirmed in integration fixture.',
           CallbackMetadata: {
             Item: [
               { Name: 'Amount', Value: 50 },
-              { Name: 'MpesaReceiptNumber', Value: 'TESTRECEIPT1' },
+              { Name: 'MpesaReceiptNumber', Value: 'TESTFEE123' },
               { Name: 'PhoneNumber', Value: 254712345678 },
             ],
           },
         },
       },
     };
-    providerResultCode = 0;
-    await payments.handleMpesaCallback(token, callback);
-    await payments.handleMpesaCallback(token, callback);
-    expect(mpesa.queryStkStatus).toHaveBeenCalledTimes(3);
-    const confirmedPayment = await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } });
-    expect(confirmedPayment).toMatchObject({
-      status: 'CONFIRMED',
-      amountKes: 50,
-      currency: 'KES',
-      receiptReference: 'TESTRECEIPT1',
-    });
-    expect((await prisma.user.findUniqueOrThrow({ where: { id: customerIds[0] } })).activationStatus).toBe('ACTIVE');
-    expect(await new LedgerService(prisma).getCustomerWallet(customerIds[0])).toEqual({ balanceKes: 50, currency: 'KES' });
-    expect(await prisma.ledgerTransaction.count({ where: { paymentId: payment.id } })).toBe(1);
-    expect(await prisma.ledgerEntry.aggregate({
-      where: {
-        account: { userId: customerIds[0] },
-        transaction: { paymentId: payment.id, status: 'POSTED' },
-      },
-      _sum: { creditKes: true },
-    })).toMatchObject({ _sum: { creditKes: 50 } });
-    expect(await prisma.paymentCallbackEvent.count({
-      where: { paymentTransactionId: payment.id, providerReceiptReference: 'TESTRECEIPT1' },
-    })).toBe(1);
-    await expect(payments.getCustomerActivationStatus(customerIds[1])).resolves.toMatchObject({
-      activationStatus: 'PENDING',
-      payment: null,
-    });
+    const callbackToken = new URL(callbackUrl).pathname.split('/').at(-1);
+    if (!callbackToken) throw new Error('Mock provider callback token was not retained.');
 
-    const failed = await payments.initiateActivationPayment(customerIds[1], input, 'activation-test-key-0002');
-    const failedPayment = await prisma.paymentTransaction.findUniqueOrThrow({ where: { internalReference: failed.reference } });
-    const failedRequest = await prisma.activationPaymentRequest.findUniqueOrThrow({ where: { paymentTransactionId: failedPayment.id } });
-    const failedToken = new URL(callbackUrl).pathname.split('/').at(-1)!;
-    providerResultCode = 1032;
-    await payments.handleMpesaCallback(failedToken, {
-      Body: {
-        stkCallback: {
-          CheckoutRequestID: failedRequest.checkoutRequestId,
-          MerchantRequestID: failedRequest.merchantRequestId,
-          ResultCode: 1032,
-          ResultDesc: 'Cancelled by user',
-        },
-      },
-    });
-    expect((await prisma.paymentTransaction.findUniqueOrThrow({ where: { id: failedPayment.id } })).status).toBe('PENDING');
-    expect(await prisma.paymentReconciliationAttempt.count({ where: { paymentTransactionId: failedPayment.id } })).toBe(0);
-    expect((await prisma.user.findUniqueOrThrow({ where: { id: customerIds[1] } })).activationStatus).toBe('PENDING');
+    await payments.handleMpesaCallback(callbackToken, payload);
+    await payments.handleMpesaCallback(callbackToken, payload);
+
+    const [confirmedPayment, submittedApplication, entries, wallet] = await Promise.all([
+      prisma.paymentTransaction.findUniqueOrThrow({ where: { id: paymentId } }),
+      prisma.loanApplication.findUniqueOrThrow({ where: { id: applicationId } }),
+      prisma.ledgerEntry.findMany({ where: { transaction: { paymentId } }, include: { account: true } }),
+      prisma.ledgerAccount.findMany({ where: { userId } }),
+    ]);
+    expect(confirmedPayment).toMatchObject({ status: 'CONFIRMED', amountKes: 50, receiptReference: 'TESTFEE123' });
+    expect(submittedApplication.status).toBe('SUBMITTED');
+    expect(submittedApplication.submittedAt).toBeInstanceOf(Date);
+    expect(entries).toHaveLength(2);
+    expect(entries.find((entry) => entry.account.id === accountIds[0])).toMatchObject({ debitKes: 50, creditKes: 0 });
+    expect(entries.find((entry) => entry.account.id === accountIds[1])).toMatchObject({ debitKes: 0, creditKes: 50 });
+    expect(wallet).toHaveLength(0);
+    expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(1);
   });
 });

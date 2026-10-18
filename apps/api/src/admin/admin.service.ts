@@ -21,8 +21,8 @@ export class AdminService {
       totalCustomers,
       activeCustomers,
       pendingIdentityReviews,
-      pendingActivations,
-      confirmedActivations,
+      pendingProcessingFees,
+      confirmedProcessingFees,
       pendingPayments,
       failedPayments,
       submittedApplications,
@@ -43,10 +43,10 @@ export class AdminService {
       recentActivity,
     ] = await Promise.all([
       this.prisma.user.count(),
-      this.prisma.user.count({ where: { isActive: true, activationStatus: 'ACTIVE' } }),
+      this.prisma.user.count({ where: { isActive: true } }),
       this.prisma.user.count({ where: { identityStatus: { in: [IdentityStatus.PENDING, IdentityStatus.NEEDS_REVIEW] } } }),
-      this.prisma.paymentTransaction.count({ where: { type: PaymentType.ACTIVATION, status: PaymentStatus.PENDING } }),
-      this.prisma.paymentTransaction.count({ where: { type: PaymentType.ACTIVATION, status: PaymentStatus.CONFIRMED } }),
+      this.prisma.paymentTransaction.count({ where: { type: PaymentType.LOAN_PROCESSING_FEE, status: PaymentStatus.PENDING } }),
+      this.prisma.paymentTransaction.count({ where: { type: PaymentType.LOAN_PROCESSING_FEE, status: PaymentStatus.CONFIRMED } }),
       this.prisma.paymentTransaction.count({ where: { status: PaymentStatus.PENDING } }),
       this.prisma.paymentTransaction.count({ where: { status: PaymentStatus.FAILED } }),
       this.prisma.loanApplication.count({ where: { status: { in: [LoanApplicationStatus.SUBMITTED, LoanApplicationStatus.UNDER_REVIEW] } } }),
@@ -66,7 +66,7 @@ export class AdminService {
         where: {
           status: PaymentStatus.CONFIRMED,
           currency: 'KES',
-          type: { in: [PaymentType.ACTIVATION, PaymentType.REPAYMENT] },
+          type: { in: [PaymentType.ACTIVATION, PaymentType.LOAN_PROCESSING_FEE, PaymentType.REPAYMENT] },
         },
         _sum: { amountKes: true },
       }),
@@ -88,9 +88,9 @@ export class AdminService {
       metrics: {
         customers: { total: totalCustomers, active: activeCustomers },
         pendingIdentityReviews,
-        activationPayments: {
-          pending: pendingActivations + pendingLegacyProcessing,
-          confirmed: confirmedActivations,
+        loanProcessingFees: {
+          pending: pendingProcessingFees,
+          confirmed: confirmedProcessingFees,
         },
         paymentReconciliation: {
           pending: pendingPayments + pendingLegacyProcessing,
@@ -127,7 +127,6 @@ export class AdminService {
         email: true,
         role: true,
         identityStatus: true,
-        activationStatus: true,
         isActive: true,
         createdAt: true,
         _count: { select: { paymentTransactions: true, loans: true, loanApplications: true } },

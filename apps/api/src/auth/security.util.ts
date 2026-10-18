@@ -10,7 +10,6 @@ export interface AuthPrincipal {
   phone?: string;
   fullName?: string;
   identityStatus?: string;
-  activationStatus?: string;
   referralCode?: string | null;
   sessionHash: string;
 }

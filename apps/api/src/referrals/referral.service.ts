@@ -48,7 +48,7 @@ export class ReferralService {
     return this.prisma.referral.findMany({
       include: {
         referrer: { select: { id: true, fullName: true, email: true } },
-        referredUser: { select: { id: true, fullName: true, email: true, activationStatus: true } },
+        referredUser: { select: { id: true, fullName: true, email: true } },
         reward: true,
       },
       orderBy: { createdAt: 'desc' },

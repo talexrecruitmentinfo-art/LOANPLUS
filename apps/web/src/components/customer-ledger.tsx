@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
 import { formatMoney, PLATFORM_CURRENCY } from '@/lib/currency';
@@ -41,8 +41,10 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const requestId = ++refreshSequence.current;
     setRefreshing(true);
     setError('');
     try {
@@ -51,6 +53,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         apiRequest<LedgerEntry[]>('/wallet/transactions', { cache: 'no-store' }),
         apiRequest<PaymentRecord[]>('/payments', { cache: 'no-store' }),
       ]);
+      if (requestId !== refreshSequence.current) return;
       if (nextWallet.currency !== PLATFORM_CURRENCY.code) {
         throw new Error('The wallet currency does not match the supported platform currency.');
       }
@@ -58,17 +61,23 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
       setEntries(nextEntries);
       setPayments(nextPayments);
     } catch (reason) {
+      if (requestId !== refreshSequence.current) return;
       if (reason instanceof Error && reason.message.includes('Authentication required')) {
         router.replace('/login');
       }
       setError(reason instanceof Error ? reason.message : 'Account activity could not be loaded.');
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (requestId === refreshSequence.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [router]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    return () => { refreshSequence.current += 1; };
+  }, [refresh]);
 
   const filteredEntries = useMemo(() => entries.filter((entry) => {
     const query = search.trim().toLowerCase();
