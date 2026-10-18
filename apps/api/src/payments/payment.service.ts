@@ -20,6 +20,7 @@ import { LedgerService } from '../ledger/ledger.service';
 import { MpesaService } from './mpesa.service';
 import { InitiateLoanProcessingFeeDto } from './payment.dto';
 import { buildMpesaCallbackUrl } from './mpesa-callback-url';
+import { getLoanProcessingFeePolicy, LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
 
 interface ActivationPolicy {
   approved: boolean;
@@ -48,8 +49,6 @@ const PROVIDER_REVIEW_OUTCOMES = new Set([
 ]);
 
 const ACTIVATION_AMOUNT_KES = 50;
-const LOAN_PROCESSING_FEE_KES = 50;
-
 interface MpesaCallback {
   CheckoutRequestID: string;
   MerchantRequestID: string;
@@ -94,6 +93,9 @@ export class PaymentService {
         currency: existing.currency,
         message: 'This application already has a processing-fee payment attempt. Its outcome must be resolved before another payment is considered.',
       };
+    }
+    if (getLoanProcessingFeePolicy().status !== 'CONFIGURED') {
+      throw new ServiceUnavailableException('Approved loan processing-fee policy is not configured.');
     }
 
     const [user, application, revenueSetting] = await Promise.all([

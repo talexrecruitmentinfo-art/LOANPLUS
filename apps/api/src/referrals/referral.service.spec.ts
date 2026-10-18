@@ -13,6 +13,7 @@ describe('customer referral overview', () => {
     }]);
     const prisma = {
       user: { findUnique },
+      loanApplication: { findFirst: jest.fn().mockResolvedValue({ id: 'approved-application' }) },
       referral: { findMany },
     } as unknown as PrismaService;
     const service = new ReferralService(prisma);
@@ -29,5 +30,27 @@ describe('customer referral overview', () => {
       }),
     }));
     expect(overview.referrals[0]?.referredUser).toEqual({ fullName: 'Referred Customer' });
+    expect(overview.eligible).toBe(true);
+  });
+
+  it('does not create or expose a referral link until the customer has an approved loan application', async () => {
+    const findUnique = jest.fn().mockResolvedValue({ referralCode: null });
+    const updateMany = jest.fn();
+    const findFirst = jest.fn().mockResolvedValue(null);
+    const findMany = jest.fn().mockResolvedValue([]);
+    const service = new ReferralService({
+      user: { findUnique, updateMany },
+      loanApplication: { findFirst },
+      referral: { findMany },
+    } as unknown as PrismaService);
+
+    const overview = await service.getCustomerOverview('referrer-id');
+
+    expect(overview).toMatchObject({ eligible: false, referralCode: null, referralLink: null, total: 0 });
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { userId: 'referrer-id', status: { in: ['APPROVED', 'ACCEPTED'] } },
+      select: { id: true },
+    });
   });
 });

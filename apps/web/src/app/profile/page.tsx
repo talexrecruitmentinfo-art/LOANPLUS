@@ -74,6 +74,7 @@ export default function ProfilePage() {
           </section>
           <nav className="customer-profile-links" aria-label="Account settings">
             <Link href="/settings/security"><span><b>Password and security</b><small>Change your password and review sign-in protection</small></span><span aria-hidden="true">↗</span></Link>
+            <Link href="/trust"><span><b>Trust Centre</b><small>Review fees, privacy, and account protection</small></span><span aria-hidden="true">↗</span></Link>
             <Link href="/referrals"><span><b>Referrals</b><small>View your referral activity</small></span><span aria-hidden="true">↗</span></Link>
             <Link href="/support"><span><b>Contact support</b><small>Get help with your account</small></span><span aria-hidden="true">↗</span></Link>
           </nav>

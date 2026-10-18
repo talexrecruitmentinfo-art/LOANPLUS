@@ -112,6 +112,15 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
           <small>Available in {PLATFORM_CURRENCY.name} · {PLATFORM_CURRENCY.code}</small>
         </section>
       )}
+      {view === 'wallet' && <section className="wallet-actions" aria-label="Wallet services">
+        <h2>Wallet services</h2>
+        <div>
+          <button type="button" disabled aria-label="Deposit unavailable: M-Pesa wallet deposits are not enabled">Deposit</button>
+          <button type="button" disabled aria-label="Send Money unavailable: internal wallet transfers are not enabled">Send Money</button>
+          <button type="button" disabled aria-label="Withdrawal unavailable: an authorized payout integration is not enabled">Withdraw</button>
+        </div>
+        <p>Deposits, internal transfers, and M-Pesa withdrawals are not available yet. Your displayed balance remains the posted ledger balance.</p>
+      </section>}
       {view === 'transactions' && (
         <section className="customer-filter-row" aria-label="Filter account activity">
           <label>Search activity<input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Reference or type" /></label>

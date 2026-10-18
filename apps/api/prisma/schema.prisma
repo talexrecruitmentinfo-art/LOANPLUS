@@ -203,6 +203,8 @@ model SuperadminUser {
   auditEvents                   AdminAuditLog[]
   reviewedLoanApplications      LoanApplication[]
   systemSettings                SystemSetting[]
+  createdWebsiteRevisions       WebsiteContentRevision[]       @relation("WebsiteRevisionCreator")
+  publishedWebsiteRevisions     WebsiteContentRevision[]       @relation("WebsiteRevisionPublisher")
   loanDisbursements             LoanDisbursement[]
   paymentReconciliationAttempts PaymentReconciliationAttempt[]
 
@@ -526,6 +528,24 @@ model SystemSetting {
   updatedBy   SuperadminUser? @relation(fields: [updatedById], references: [id], onDelete: Restrict)
 
   @@map("system_settings")
+}
+
+model WebsiteContentRevision {
+  id             String         @id @default(cuid())
+  version        Int
+  status         String         @db.VarChar(16)
+  content        Json
+  createdById    String
+  publishedById  String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  publishedAt    DateTime?
+  createdBy      SuperadminUser @relation("WebsiteRevisionCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  publishedBy    SuperadminUser? @relation("WebsiteRevisionPublisher", fields: [publishedById], references: [id], onDelete: Restrict)
+
+  @@unique([version])
+  @@index([status, updatedAt])
+  @@map("website_content_revisions")
 }
 
 model Referral {

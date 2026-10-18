@@ -12,8 +12,11 @@ const settings = await readFile(new URL('../src/components/platform-settings-pan
 const money = await readFile(new URL('../src/lib/currency.ts', import.meta.url), 'utf8');
 const redesign = await readFile(new URL('../src/app/customer-redesign.css', import.meta.url), 'utf8');
 const customerShell = await readFile(new URL('../src/components/customer-app-shell.tsx', import.meta.url), 'utf8');
+const trust = await readFile(new URL('../src/app/trust/page.tsx', import.meta.url), 'utf8');
 const login = await readFile(new URL('../src/app/login/page.tsx', import.meta.url), 'utf8');
 const register = await readFile(new URL('../src/app/register/page.tsx', import.meta.url), 'utf8');
+const publicHomepage = await readFile(new URL('../src/components/public-homepage.tsx', import.meta.url), 'utf8');
+const paymentController = await readFile(new URL('../../api/src/payments/payment.controller.ts', import.meta.url), 'utf8');
 
 test('wallet and transactions are loaded from authenticated ledger endpoints without cached reads', () => {
   assert.match(wallet, /apiRequest<Wallet>\('\/wallet', \{ cache: 'no-store' \}\)/);
@@ -24,12 +27,33 @@ test('wallet and transactions are loaded from authenticated ledger endpoints wit
   assert.match(wallet, /entry\.transaction\.status/);
   assert.match(wallet, /const refreshSequence = useRef\(0\)/);
   assert.match(wallet, /if \(requestId !== refreshSequence\.current\) return/);
+  assert.match(wallet, /Deposit unavailable: M-Pesa wallet deposits are not enabled/);
+  assert.match(wallet, /Send Money unavailable: internal wallet transfers are not enabled/);
+  assert.match(wallet, /Withdrawal unavailable: an authorized payout integration is not enabled/);
+});
+
+test('Trust Centre uses authenticated identity and backend fee status, with real policy and support links', () => {
+  assert.match(trust, /apiRequest<TrustProfile>\('\/auth\/me'/);
+  assert.match(trust, /apiRequest<ProcessingFeeQuote>\('\/payments\/loan-processing-fee-quote'/);
+  assert.match(trust, /identityStatus\.replaceAll/);
+  assert.match(trust, /refundPolicyStatus/);
+  for (const route of ['/terms', '/privacy', '/settings/security', '/referrals', '/support']) {
+    assert.ok(trust.includes(`href="${route}"`), `Trust Centre should link to ${route}`);
+  }
+  assert.doesNotMatch(trust, /VERIFIED.*true|isVerified/);
 });
 
 test('home shows authenticated recent activity and keeps the overview available when wallet data fails', () => {
   assert.match(dashboard, /apiRequest<LedgerEntry\[]>\('\/wallet\/transactions', \{ cache: 'no-store' \}\)/);
   assert.match(dashboard, /apiRequest<PaymentAttempt\[]>\('\/payments', \{ cache: 'no-store' \}\)/);
+  assert.match(dashboard, /apiRequest<Product\[]>\('\/loans\/products', \{ cache: 'no-store' \}\)/);
+  assert.match(dashboard, /No available loan products/);
+  assert.match(dashboard, /Loan products could not be loaded/);
+  assert.match(dashboard, /Retry/);
   assert.match(dashboard, /wallet \? formatKes\(wallet\.balanceKes\) : 'Unavailable'/);
+  assert.match(dashboard, /Deposit unavailable: wallet deposits are not enabled/);
+  assert.match(dashboard, /Send Money unavailable: internal transfers are not enabled/);
+  assert.match(dashboard, /Withdraw unavailable: payouts are not enabled/);
   assert.doesNotMatch(dashboard, /if \(!wallet\) return/);
   assert.match(dashboard, /Do not submit another payment while this request remains unresolved/);
 });
@@ -70,6 +94,20 @@ test('loan application collects guarantors, reviews details, and uses the proces
   assert.doesNotMatch(loans, /activationStatus/);
   assert.match(loans, /approvedTermsSnapshot/);
   assert.match(loans, /terms\.termsVersion/);
+  assert.match(loans, /loan-processing-fee-quote/);
+  assert.match(loans, /estimateTotalRepayment/);
+  assert.doesNotMatch(loans, /KSh 50|formatMoney\(50\)/);
+});
+
+test('processing-fee quote comes from the backend constant and discloses unconfigured refund policy', () => {
+  assert.match(paymentController, /LOAN_PROCESSING_FEE_KES/);
+  assert.match(paymentController, /refundPolicyStatus: policy\.status/);
+});
+
+test('public homepage never substitutes a hardcoded fee when its backend request fails', () => {
+  assert.match(publicHomepage, /processingFeeKes: null/);
+  assert.match(publicHomepage, /Fee information unavailable/);
+  assert.doesNotMatch(publicHomepage, /processingFeeKes: 50/);
 });
 
 test('platform currency controls reject unsupported currencies and render KES settings', () => {

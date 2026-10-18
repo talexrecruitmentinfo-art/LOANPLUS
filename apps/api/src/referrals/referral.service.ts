@@ -7,19 +7,29 @@ export class ReferralService {
   constructor(private readonly prisma: PrismaService) {}
 
   async getCustomerOverview(userId: string) {
-    let customer = await this.prisma.user.findUnique({ where: { id: userId }, select: { referralCode: true } });
+    const [customer, approvedApplication] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { referralCode: true } }),
+      this.prisma.loanApplication.findFirst({
+        where: { userId, status: { in: ['APPROVED', 'ACCEPTED'] } },
+        select: { id: true },
+      }),
+    ]);
     if (!customer) throw new NotFoundException('Customer account was not found.');
-    if (!customer.referralCode) {
+    const eligible = approvedApplication !== null;
+    let referralCode = eligible ? customer.referralCode : null;
+    if (eligible && !referralCode) {
       for (let attempt = 0; attempt < 3 && !customer.referralCode; attempt += 1) {
         await this.prisma.user.updateMany({
           where: { id: userId, referralCode: null },
           data: { referralCode: randomBytes(8).toString('hex').toUpperCase() },
         });
-        customer = await this.prisma.user.findUnique({ where: { id: userId }, select: { referralCode: true } });
-        if (!customer) throw new NotFoundException('Customer account was not found.');
+        const refreshedCustomer = await this.prisma.user.findUnique({ where: { id: userId }, select: { referralCode: true } });
+        if (!refreshedCustomer) throw new NotFoundException('Customer account was not found.');
+        referralCode = refreshedCustomer.referralCode;
+        if (referralCode) break;
       }
     }
-    if (!customer.referralCode) throw new NotFoundException('Referral link could not be created.');
+    if (eligible && !referralCode) throw new NotFoundException('Referral link could not be created.');
     const referrals = await this.prisma.referral.findMany({
       where: { referrerId: userId },
       select: {
@@ -32,11 +42,12 @@ export class ReferralService {
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
-    const link = new URL('/register', process.env.WEB_ORIGIN ?? 'http://localhost:3000');
-    link.searchParams.set('ref', customer.referralCode);
+    const link = referralCode ? new URL('/register', process.env.WEB_ORIGIN ?? 'http://localhost:3000') : null;
+    link?.searchParams.set('ref', referralCode!);
     return {
-      referralCode: customer.referralCode,
-      referralLink: link.toString(),
+      eligible,
+      referralCode,
+      referralLink: link?.toString() ?? null,
       total: referrals.length,
       qualified: referrals.filter((referral) => referral.status === 'QUALIFIED' || referral.status === 'REWARDED').length,
       referrals,

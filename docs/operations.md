@@ -36,6 +36,25 @@ Prisma uses `DATABASE_URL` for the runtime datasource and `DIRECT_URL` for direc
 
 ## Render API deployment
 
+### Website content and media
+
+Website content is versioned in `website_content_revisions`. Run the reviewed
+Prisma migration before the new API release. Public website reads are
+`Cache-Control: no-store` so a successful publication is visible on the next
+page request without a redeployment or cache purge; uploaded images use random,
+immutable asset URLs and can be safely cached for one year.
+
+Administrator-uploaded website images are restricted to PNG, JPEG and WebP,
+limited to 5 MB, and checked against their declared file signatures before
+being stored. The API stores them under `WEBSITE_ASSET_DIR` (default
+`./uploads/website`). Production deployments must set this to durable,
+private-writable persistent storage and include that storage in the normal
+backup/recovery plan. The repository's Docker Compose app profile mounts the
+`website_assets` named volume at `/app/uploads/website`; configure an equivalent
+persistent disk or object-storage-backed implementation for other hosting
+environments. If media storage is lost, published content may refer to missing
+images; the public API never exposes draft content or directory listings.
+
 The repository uses pnpm 12.3.4 (`packageManager` in the root manifest and `pnpm-lock.yaml`). Configure the existing Render Node web service with root directory `.` and Node `24.21.0`. Do not use `yarn` as the build command. Set:
 
 ```sh
@@ -123,6 +142,8 @@ For the production LoanPlus Render API, set `MPESA_CALLBACK_URL=https://loanplus
 This STK URL is not a C2B URL. C2B v2 validation and confirmation routes/processing are separate and are not implemented in this repository; do not register the STK callback as either C2B endpoint or claim C2B v2 is supported. Do not enable live processing until Daraja credentials, provider-side callback delivery, customer policy, and payment reconciliation have been verified. `REDIS_URL` and `DATABASE_HOST` are not read by the API application.
 
 New applications use the KSh 50 loan processing fee. No customer account activation fee is collected. The fee is initiated only after the authenticated customer has saved and reviewed an application draft and is posted from the M-Pesa clearing asset to the configured KES processing-fee revenue account; it is never wallet funding. A draft becomes submitted only within the transaction that records authoritative payment confirmation and balanced ledger entries. Configure `loan.processing_fee_revenue_account` to an active KES revenue account before allowing fee collection.
+
+Fee initiation additionally requires API environment values `LOAN_PROCESSING_FEE_POLICY_APPROVED=true`, a published non-draft `LOAN_PROCESSING_FEE_POLICY_VERSION`, and its exact customer-facing `LOAN_PROCESSING_FEE_POLICY_DISCLOSURE`. These values are validated by the payment API and are exposed in the quote before the customer can initiate payment. Keep approval false and the version/disclosure blank until counsel and the accountable owner approve and publish the exact refund/cancellation policy. Do not allow marketing content or a Superadmin UI field to self-certify legal approval. This gate does not provide an in-app refund workflow; operational refund handling must also be approved and available before enabling fee collection.
 
 The fee flow calls Daraja STK Push at `/mpesa/stkpush/v1/processrequest` and STK Query at `/mpesa/stkpushquery/v1/query`. An accepted initiation is only a request acceptance and leaves the payment pending. STK Query result `0` alone does not settle a payment; a token-bound callback must match the saved checkout/merchant IDs, be reconciled with a successful STK Query, and contain the expected KES 50 amount, encrypted-phone match, and valid receipt before the receipt is persisted and settlement proceeds. Query result `4999`, all other nonzero result codes without a verified source-specific mapping, network failures, and temporary provider errors remain unresolved. The code does not map unverified nonzero results to a final failure, cancellation, or expiration; do not retry while an outcome is uncertain. Callback bodies are not cryptographic signatures, so the opaque callback token and authoritative provider query are required. Callback history, payment outcome, receipt, balanced ledger entries, application submission, and audit event are committed transactionally. Duplicate callbacks cannot post duplicate financial effects. Historical activation payments remain identifiable for reconciliation and are not rewritten to processing-fee purpose; no new activation payment can be initiated.
 

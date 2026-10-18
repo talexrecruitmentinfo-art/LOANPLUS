@@ -11,6 +11,7 @@ import { ReferralModule } from './referrals/referral.module';
 import { SupportModule } from './support/support.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { AdminModule } from './admin/admin.module';
+import { WebsiteModule } from './website/website.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { AdminModule } from './admin/admin.module';
     ReferralModule,
     SupportModule,
     AdminModule,
+    WebsiteModule,
   ],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

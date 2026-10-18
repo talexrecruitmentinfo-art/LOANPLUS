@@ -17,6 +17,14 @@ interface Product {
   termsVersion: string;
 }
 
+interface ProcessingFeeQuote {
+  amountKes: number;
+  currency: string;
+  refundPolicyStatus: string;
+  refundPolicyVersion: string | null;
+  refundPolicyDisclosure: string | null;
+}
+
 interface LoanApplication {
   id: string;
   requestedPrincipalKes: number;
@@ -77,6 +85,17 @@ const emptyForm: ApplicationForm = {
   guarantorTwoPhone: '',
 };
 
+function estimateTotalRepayment(product: Product, principalKes: number): number | null {
+  if (!Number.isSafeInteger(principalKes) || principalKes < 1 ||
+    !Number.isSafeInteger(product.interestRateBps) || product.interestRateBps < 0 ||
+    !Number.isSafeInteger(product.flatFeeKes) || product.flatFeeKes < 0) return null;
+  const weightedPrincipal = principalKes * product.interestRateBps;
+  if (!Number.isSafeInteger(weightedPrincipal)) return null;
+  const interest = Math.floor(weightedPrincipal / 10_000) + (weightedPrincipal % 10_000 === 0 ? 0 : 1);
+  const total = principalKes + interest + product.flatFeeKes;
+  return Number.isSafeInteger(total) ? total : null;
+}
+
 function statusLabel(application: LoanApplication): string {
   if (application.status === 'DRAFT' || application.status === 'PROCESSING_PAYMENT_PENDING') {
     if (application.processingFeePayment?.failureCode) return 'Processing Payment Unresolved';
@@ -113,6 +132,7 @@ function fieldError(name: string, value: string, product?: Product): string {
 
 export default function LoanProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
+  const [processingFeeQuote, setProcessingFeeQuote] = useState<ProcessingFeeQuote | null>(null);
   const [applications, setApplications] = useState<LoanApplication[]>([]);
   const [form, setForm] = useState<ApplicationForm>(emptyForm);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -133,6 +153,9 @@ export default function LoanProductsPage() {
   }
 
   useEffect(() => {
+    apiRequest<ProcessingFeeQuote>('/payments/loan-processing-fee-quote', { cache: 'no-store' })
+      .then(setProcessingFeeQuote)
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Processing-fee details could not be loaded.'));
     Promise.all([
       apiRequest<Product[]>('/loans/products').then(setProducts),
       apiRequest('/auth/me', { cache: 'no-store' }).then(() => setSignedIn(true)).catch(() => setSignedIn(false)),
@@ -164,7 +187,7 @@ export default function LoanProductsPage() {
   }
 
   async function payProcessingFee() {
-    if (!product || !signedIn) return;
+    if (!product || !signedIn || !processingFeeQuote || processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes) || processingFeeQuote.refundPolicyStatus !== 'CONFIGURED' || !processingFeeQuote.refundPolicyDisclosure) return;
     setBusyId('new-application');
     setError('');
     setNotice('');
@@ -244,7 +267,7 @@ export default function LoanProductsPage() {
       <section className="dashboard-welcome">
         <p className="eyebrow">LOAN APPLICATION</p>
         <h1>Apply with clear terms.</h1>
-        <p>Complete your application, review the details, then pay the KSh 50 processing fee. Payment does not guarantee approval or disbursement.</p>
+        <p>Complete your application, review the details, then pay the configured loan processing fee. Payment does not guarantee approval or disbursement.</p>
       </section>
       {notice && <p className="admin-inline-notice" role="status">Payment request status: pending verification. {notice}</p>}
       {error && <p className="admin-inline-error" role="alert">{error}</p>}
@@ -290,12 +313,24 @@ export default function LoanProductsPage() {
                 <div><dt>Requested amount</dt><dd>{formatMoney(Number(form.requestedPrincipalKes))}</dd></div>
                 <div><dt>Guarantor 1</dt><dd>{form.guarantorOneName} · {form.guarantorOnePhone}</dd></div>
                 <div><dt>Guarantor 2</dt><dd>{form.guarantorTwoName} · {form.guarantorTwoPhone}</dd></div>
-                <div><dt>Loan Processing Fee</dt><dd>{formatMoney(50)}</dd></div>
+                {product && Number.isSafeInteger(Number(form.requestedPrincipalKes)) && <>
+                  <div><dt>Configured interest rate</dt><dd>{(product.interestRateBps / 100).toFixed(2)}%</dd></div>
+                  <div><dt>Repayment term</dt><dd>{product.durationDays} days</dd></div>
+                  <div><dt>Configured product fee</dt><dd>{formatMoney(product.flatFeeKes)}</dd></div>
+                  <div><dt>Estimated total repayment</dt><dd>{(() => {
+                    const estimate = estimateTotalRepayment(product, Number(form.requestedPrincipalKes));
+                    return estimate === null ? 'Unavailable' : formatMoney(estimate);
+                  })()}</dd></div>
+                </>}
+                <div><dt>Loan Processing Fee</dt><dd>{processingFeeQuote ? formatMoney(processingFeeQuote.amountKes) : 'Unavailable'}</dd></div>
               </dl>
-              <p>The fee is for processing your application. It is not wallet funding, loan approval, or a promise of loan disbursement. The application will only be submitted after verified M-Pesa payment.</p>
+              <p>The processing fee is paid separately and is not included in the estimated repayment. Estimates use the current configured product terms; an authorized approved offer may differ and must be reviewed before acceptance. The fee is not wallet funding, loan approval, or a promise of disbursement. Your M-Pesa PIN is entered only in Safaricom’s prompt.</p>
+              {processingFeeQuote?.refundPolicyStatus === 'CONFIGURED' && processingFeeQuote.refundPolicyDisclosure && <p>{processingFeeQuote.refundPolicyDisclosure} <small>Policy version {processingFeeQuote.refundPolicyVersion}.</small></p>}
+              {processingFeeQuote?.refundPolicyStatus !== 'CONFIGURED' && <p role="status">Approved refund conditions are not configured, so processing-fee payment is unavailable. Review the published terms or contact support.</p>}
+              {(!processingFeeQuote || processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes)) && <p role="alert">Processing-fee details are unavailable, so payment cannot be started. Refresh the page to try again.</p>}
               <div className="loan-review-actions">
                 <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => setReviewing(false)}>Edit details</button>
-                <button className="button" type="button" disabled={busyId !== null} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : 'Pay Loan Processing Fee — KSh 50'}</button>
+                <button className="button" type="button" disabled={busyId !== null || !processingFeeQuote || processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes) || processingFeeQuote.refundPolicyStatus !== 'CONFIGURED' || !processingFeeQuote.refundPolicyDisclosure} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : `Pay Loan Processing Fee — ${processingFeeQuote ? formatMoney(processingFeeQuote.amountKes) : 'unavailable'}`}</button>
               </div>
             </div>
           )}
@@ -328,11 +363,11 @@ export default function LoanProductsPage() {
                 <p>Draft saved. Review the application details and continue to the processing-fee payment step.</p>
                 <small>Guarantor 1: {guarantor('guarantorOneName')} · {guarantor('guarantorOnePhone')}</small>
                 <small>Guarantor 2: {guarantor('guarantorTwoName')} · {guarantor('guarantorTwoPhone')}</small>
-                <p>Loan Processing Fee — KSh 50. Paying it does not guarantee approval or disbursement and does not add funds to your wallet.</p>
-                <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => void resumeProcessingFee(application.id)}>Review details and request fee payment</button>
+                <p>Loan Processing Fee — {processingFeeQuote ? formatMoney(processingFeeQuote.amountKes) : 'details unavailable'}. Paying it does not guarantee approval or disbursement and does not add funds to your wallet.</p>
+                <button className="quiet-button" type="button" disabled={busyId !== null || !processingFeeQuote || processingFeeQuote.currency !== 'KES' || !Number.isSafeInteger(processingFeeQuote.amountKes) || processingFeeQuote.refundPolicyStatus !== 'CONFIGURED' || !processingFeeQuote.refundPolicyDisclosure} onClick={() => void resumeProcessingFee(application.id)}>Review details and request fee payment</button>
               </div>}
               {fee && <dl>
-                <div><dt>Loan Processing Fee — KSh 50</dt><dd>{fee.status === 'CONFIRMED' ? 'Paid and verified' : fee.status === 'FAILED' ? 'Failed' : fee.failureCode ? 'Unresolved — do not pay again' : fee.status.replaceAll('_', ' ')}</dd></div>
+                <div><dt>Loan Processing Fee — {formatMoney(fee.amountKes)}</dt><dd>{fee.status === 'CONFIRMED' ? 'Paid and verified' : fee.status === 'FAILED' ? 'Failed' : fee.failureCode ? 'Unresolved — do not pay again' : fee.status.replaceAll('_', ' ')}</dd></div>
                 <div><dt>Payment reference</dt><dd>{fee.internalReference}</dd></div>
                 {fee.confirmedAt && <div><dt>Confirmed</dt><dd>{new Date(fee.confirmedAt).toLocaleString('en-KE')}</dd></div>}
                 {fee.status === 'PENDING' && <div><dt>Payment outcome</dt><dd>Refresh this page to see the latest verified status. Do not make another payment while this request is pending or unresolved.</dd></div>}

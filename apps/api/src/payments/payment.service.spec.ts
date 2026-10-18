@@ -273,6 +273,9 @@ describe('M-Pesa payment callback reconciliation', () => {
       nodeEnv: process.env.NODE_ENV,
       encryptionKey: process.env.ID_ENCRYPTION_KEY_BASE64,
       callbackUrl: process.env.MPESA_CALLBACK_URL,
+      policyApproved: process.env.LOAN_PROCESSING_FEE_POLICY_APPROVED,
+      policyVersion: process.env.LOAN_PROCESSING_FEE_POLICY_VERSION,
+      policyDisclosure: process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE,
     };
 
     afterEach(() => {
@@ -280,6 +283,9 @@ describe('M-Pesa payment callback reconciliation', () => {
         NODE_ENV: originalEnvironment.nodeEnv,
         ID_ENCRYPTION_KEY_BASE64: originalEnvironment.encryptionKey,
         MPESA_CALLBACK_URL: originalEnvironment.callbackUrl,
+        LOAN_PROCESSING_FEE_POLICY_APPROVED: originalEnvironment.policyApproved,
+        LOAN_PROCESSING_FEE_POLICY_VERSION: originalEnvironment.policyVersion,
+        LOAN_PROCESSING_FEE_POLICY_DISCLOSURE: originalEnvironment.policyDisclosure,
       })) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
@@ -290,6 +296,9 @@ describe('M-Pesa payment callback reconciliation', () => {
       process.env.NODE_ENV = 'test';
       process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
       process.env.MPESA_CALLBACK_URL = 'https://api.example.com/api/v1/payments/mpesa/callback';
+      process.env.LOAN_PROCESSING_FEE_POLICY_APPROVED = 'true';
+      process.env.LOAN_PROCESSING_FEE_POLICY_VERSION = 'approved-v1';
+      process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE = 'Refunds follow the approved loan processing-fee policy.';
       const create = jest.fn(async () => ({
         id: 'payment-id',
         internalReference: `LPP${'A'.repeat(32)}`,
@@ -393,6 +402,25 @@ describe('M-Pesa payment callback reconciliation', () => {
         Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId: 'application-id', reviewConfirmed: false }),
         'loan-fee-idempotency-0001',
       )).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('does not initiate a fee payment without an approved refund policy', async () => {
+      delete process.env.LOAN_PROCESSING_FEE_POLICY_APPROVED;
+      delete process.env.LOAN_PROCESSING_FEE_POLICY_VERSION;
+      delete process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE;
+      const initiateStkPush = jest.fn();
+      const paymentService = new PaymentService(
+        { paymentTransaction: { findUnique: jest.fn().mockResolvedValue(null) } } as unknown as PrismaService,
+        { initiateStkPush } as unknown as MpesaService,
+        {} as LedgerService,
+      );
+
+      await expect(paymentService.initiateLoanProcessingFee(
+        'user-id',
+        Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId: 'application-id', reviewConfirmed: true }),
+        'loan-fee-idempotency-0001',
+      )).rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(initiateStkPush).not.toHaveBeenCalled();
     });
   });
 

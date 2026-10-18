@@ -1,5 +1,10 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000/api/v1';
 
+export function resolveApiAsset(path: string): string {
+  if (!path.startsWith('/api/v1/platform/website/assets/')) return path;
+  return `${API_BASE}${path.slice('/api/v1'.length)}`;
+}
+
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response;
   try {

@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { normalizeKenyaPhone } from '../auth/security.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
+import { LOAN_PROCESSING_FEE_KES } from '../payments/processing-fee.constants';
 import { AcceptLoanOfferDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
 
 const OPEN_LOAN_STATUSES = [
@@ -233,7 +234,7 @@ export class LoanService {
 
   async getProcessingFeeSettings() {
     const setting = await this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } });
-    return { revenueAccountCode: typeof setting?.value === 'string' ? setting.value : null, amountKes: 50, currency: 'KES' };
+    return { revenueAccountCode: typeof setting?.value === 'string' ? setting.value : null, amountKes: LOAN_PROCESSING_FEE_KES, currency: 'KES' };
   }
 
   async configureProcessingFeeRevenueAccount(accountCode: string, reason: string, reviewerId: string, ipAddress?: string) {
@@ -262,7 +263,7 @@ export class LoanService {
         },
       });
     });
-    return { revenueAccountCode: normalizedCode, amountKes: 50, currency: 'KES' };
+    return { revenueAccountCode: normalizedCode, amountKes: LOAN_PROCESSING_FEE_KES, currency: 'KES' };
   }
 
   listLoansAwaitingDisbursement() {

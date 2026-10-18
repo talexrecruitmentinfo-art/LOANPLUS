@@ -4,6 +4,7 @@ import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard } from '../auth/session.guard';
 import { InitiateLoanProcessingFeeDto } from './payment.dto';
 import { PaymentService } from './payment.service';
+import { getLoanProcessingFeePolicy, LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
 
 function assertSameOrigin(request: AuthenticatedRequest): void {
   const expected = new URL(process.env.WEB_ORIGIN ?? 'http://localhost:3000').origin;
@@ -22,6 +23,20 @@ function assertSameOrigin(request: AuthenticatedRequest): void {
 @Controller('payments')
 export class PaymentController {
   constructor(private readonly payments: PaymentService) {}
+
+  @Get('loan-processing-fee-quote')
+  async getLoanProcessingFeeQuote() {
+    const policy = getLoanProcessingFeePolicy();
+    return {
+      data: {
+        amountKes: LOAN_PROCESSING_FEE_KES,
+        currency: 'KES',
+        refundPolicyStatus: policy.status,
+        refundPolicyVersion: policy.version,
+        refundPolicyDisclosure: policy.disclosure,
+      },
+    };
+  }
 
   @Post('loan-processing-fee')
   @UseGuards(CustomerSessionGuard)

@@ -14,6 +14,18 @@ import CustomerAppShell from '@/components/customer-app-shell';
 export const metadata: Metadata = {
   title: 'LoanPlus | Clearer borrowing, built around you',
   description: 'Explore responsible borrowing options and manage your LoanPlus account.',
+  openGraph: {
+    title: 'LoanPlus',
+    description: 'Explore straightforward loan options with clear terms.',
+    type: 'website',
+    images: ['/icons/loanplus-512.png'],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'LoanPlus',
+    description: 'Explore straightforward loan options with clear terms.',
+    images: ['/icons/loanplus-512.png'],
+  },
   manifest: '/manifest.webmanifest',
   appleWebApp: { capable: true, statusBarStyle: 'default', title: 'LoanPlus' },
   icons: {

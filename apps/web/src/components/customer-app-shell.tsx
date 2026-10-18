@@ -12,7 +12,7 @@ type BeforeInstallPrompt = Event & {
 
 const customerRoutes = [
   '/dashboard', '/loans', '/wallet', '/transactions', '/profile',
-  '/referrals', '/support', '/settings/security',
+  '/referrals', '/support', '/trust', '/settings/security',
 ];
 
 const navigationItems = [
@@ -29,6 +29,7 @@ const adminNavigationItems = [
   { href: '/admin/payments', label: 'Payments' },
   { href: '/admin/reconciliation', label: 'Reconciliation' },
   { href: '/admin/loans', label: 'Loans' },
+  { href: '/admin/website', label: 'Website' },
   { href: '/admin/audit', label: 'Audit' },
   { href: '/admin/settings', label: 'Settings' },
 ];
@@ -103,6 +104,7 @@ function CustomerNavigation({ pathname }: { pathname: string }) {
           <summary aria-label="More customer options"><NavigationIcon name="more" /><span>More</span></summary>
           <div className="customer-more-panel">
             <Link href="/support">Support <span aria-hidden="true">↗</span></Link>
+            <Link href="/trust">Trust Centre <span aria-hidden="true">↗</span></Link>
             <Link href="/settings/security">Security <span aria-hidden="true">↗</span></Link>
             <Link href="/referrals">Referrals <span aria-hidden="true">↗</span></Link>
             {installEligible && !installed && (

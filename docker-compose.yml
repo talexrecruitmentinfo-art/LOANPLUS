@@ -35,6 +35,7 @@ services:
       DIRECT_URL: postgresql://loanplus:${POSTGRES_PASSWORD:-loanplus_dev_only}@${DATABASE_HOST:-postgres}:5432/loanplus?schema=public
       REDIS_URL: redis://redis:6379
       API_PORT: 4000
+      WEBSITE_ASSET_DIR: /app/uploads/website
       WEB_ORIGIN: http://localhost:3000
       ID_ENCRYPTION_KEY_BASE64: ${ID_ENCRYPTION_KEY_BASE64:-}
       ID_HASH_KEY: ${ID_HASH_KEY:-}
@@ -58,6 +59,8 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "4000:4000"
+    volumes:
+      - website_assets:/app/uploads/website
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,3 +91,4 @@ services:
 
 volumes:
   postgres_data:
+  website_assets:

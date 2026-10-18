@@ -20,6 +20,16 @@ interface LoanApplication {
 }
 interface LedgerEntry { id: string; debitKes: number; creditKes: number; createdAt: string; transaction: { internalReference: string; transactionType: string; status: string } }
 interface PaymentAttempt { internalReference: string; type: string; amountKes: number; currency: string; status: string; createdAt: string; providerResult: { message: string } }
+interface Product {
+  id: string;
+  name: string;
+  description: string;
+  minimumPrincipalKes: number;
+  maximumPrincipalKes: number;
+  durationDays: number;
+  interestRateBps: number;
+  flatFeeKes: number;
+}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -28,6 +38,8 @@ export default function DashboardPage() {
   const [applications, setApplications] = useState<LoanApplication[]>([]);
   const [recentEntries, setRecentEntries] = useState<LedgerEntry[]>([]);
   const [paymentAttempts, setPaymentAttempts] = useState<PaymentAttempt[]>([]);
+  const [products, setProducts] = useState<Product[] | null>(null);
+  const [productsLoading, setProductsLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const applicationStatus = (application: LoanApplication) => {
@@ -47,6 +59,18 @@ export default function DashboardPage() {
     return application.status.replaceAll('_', ' ');
   };
 
+  async function refreshProducts() {
+    setProductsLoading(true);
+    try {
+      setProducts((await apiRequest<Product[]>('/loans/products', { cache: 'no-store' })).slice(0, 3));
+    } catch (reason) {
+      setProducts(null);
+      setError(reason instanceof Error ? reason.message : 'Available loan products could not be loaded.');
+    } finally {
+      setProductsLoading(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     async function loadDashboard() {
@@ -54,11 +78,12 @@ export default function DashboardPage() {
         const profile = await apiRequest<Customer>('/auth/me', { cache: 'no-store' });
         if (cancelled) return;
         setCustomer(profile);
-        const [walletResult, applicationsResult, entriesResult, paymentsResult] = await Promise.allSettled([
+        const [walletResult, applicationsResult, entriesResult, paymentsResult, productsResult] = await Promise.allSettled([
           apiRequest<Wallet>('/wallet', { cache: 'no-store' }),
           apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }),
           apiRequest<LedgerEntry[]>('/wallet/transactions', { cache: 'no-store' }),
           apiRequest<PaymentAttempt[]>('/payments', { cache: 'no-store' }),
+          apiRequest<Product[]>('/loans/products', { cache: 'no-store' }),
         ]);
         if (cancelled) return;
         if (walletResult.status === 'fulfilled') setWallet(walletResult.value);
@@ -69,6 +94,12 @@ export default function DashboardPage() {
         else setError((current) => current || 'Recent wallet activity could not be loaded.');
         if (paymentsResult.status === 'fulfilled') setPaymentAttempts(paymentsResult.value.slice(0, 3));
         else setError((current) => current || 'Payment status could not be loaded.');
+        if (productsResult.status === 'fulfilled') setProducts(productsResult.value.slice(0, 3));
+        else {
+          setProducts(null);
+          setError((current) => current || 'Available loan products could not be loaded.');
+        }
+        setProductsLoading(false);
       } catch (reason) {
         if (!cancelled && reason instanceof Error && reason.message.includes('Authentication required')) {
           router.replace('/login');
@@ -86,27 +117,43 @@ export default function DashboardPage() {
   if (loading) return <main className="dashboard-loading">Loading your account…</main>;
   if (!customer) return <main className="dashboard-loading">{error || 'Your account could not be loaded.'}</main>;
   return (
-    <main className="dashboard-page">
+    <main className="dashboard-page dashboard-home">
       <header className="dashboard-top">
         <Link className="wordmark" href="/"><span className="brand-mark">L+</span> loanplus</Link>
         <Link className="quiet-button" href="/profile">My profile</Link>
       </header>
-      <section className="dashboard-welcome">
-        <p className="eyebrow">CUSTOMER ACCOUNT</p>
-        <h1>Hello, {customer.fullName.split(' ')[0]}.</h1>
-        <p>Your account is available without an activation fee. Loan applications require a KSh 50 processing fee and remain subject to eligibility and manual review.</p>
+      <section className="dashboard-welcome dashboard-home-welcome">
+        <p className="eyebrow">WELCOME TO LOANPLUS</p>
+        <h1>Hello, {customer.fullName.trim().split(/\s+/)[0]}.</h1>
+        <p>Your account at a glance.</p>
       </section>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <section className="account-status">
-        <h2>Account overview</h2>
-        <dl>
-          <div><dt>Wallet balance</dt><dd>{wallet ? formatKes(wallet.balanceKes) : 'Unavailable'}</dd></div>
-          <div><dt>Email</dt><dd>{customer.email}</dd></div>
-          <div><dt>Identity status</dt><dd><span className="status-label">{customer.identityStatus.replaceAll('_', ' ')}</span></dd></div>
-          <div><dt>National ID</dt><dd>Protected · ID document not collected</dd></div>
-        </dl>
-        {!wallet && <Link className="quiet-button" href="/wallet">Open wallet to retry balance</Link>}
-        <Link className="button dashboard-activate" href="/loans">Apply for a loan <span aria-hidden="true">↗</span></Link>
+      <section className="dashboard-wallet-card" aria-label="Wallet balance">
+        <div><span>Wallet balance</span><Link href="/wallet">View wallet <span aria-hidden="true">›</span></Link></div>
+        <strong>{wallet ? formatKes(wallet.balanceKes) : 'Unavailable'}</strong>
+        <small>{wallet ? wallet.currency : 'Balance could not be verified'}</small>
+      </section>
+      {!wallet && <p className="dashboard-retry"><Link href="/wallet">Open wallet to retry balance</Link></p>}
+      <section className="dashboard-quick-actions" aria-label="Quick actions">
+        <Link className="dashboard-action" href="/loans"><span aria-hidden="true">↗</span><b>Apply for a loan</b></Link>
+        <button className="dashboard-action" type="button" disabled aria-label="Deposit unavailable: wallet deposits are not enabled"><span aria-hidden="true">＋</span><b>Deposit</b></button>
+        <button className="dashboard-action" type="button" disabled aria-label="Send Money unavailable: internal transfers are not enabled"><span aria-hidden="true">⇄</span><b>Send Money</b></button>
+        <button className="dashboard-action" type="button" disabled aria-label="Withdraw unavailable: payouts are not enabled"><span aria-hidden="true">↗</span><b>Withdraw</b></button>
+        <p>Deposits, internal transfers, and withdrawals are not yet available.</p>
+      </section>
+      <section className="dashboard-products" aria-labelledby="dashboard-products-title">
+        <div className="dashboard-section-heading"><h2 id="dashboard-products-title">Loan products</h2><Link href="/loans">View all <span aria-hidden="true">›</span></Link></div>
+        {productsLoading ? <p className="dashboard-products-empty" role="status">Loading configured loan products…</p> : products === null ? <p className="dashboard-products-empty" role="alert">Loan products could not be loaded. <button className="quiet-button" type="button" onClick={() => void refreshProducts()}>Retry</button></p> : products.length === 0 ? <p className="dashboard-products-empty">No available loan products.</p> : products.map((item) => (
+          <Link className="dashboard-product-row" href="/loans" key={item.id}>
+            <span className="dashboard-product-icon" aria-hidden="true">L+</span>
+            <span className="dashboard-product-copy"><b>{item.name}</b><small>{item.description}</small><small>From {formatKes(item.minimumPrincipalKes)} to {formatKes(item.maximumPrincipalKes)} · {item.durationDays} days</small></span>
+            <span className="dashboard-product-arrow" aria-hidden="true">›</span>
+          </Link>
+        ))}
+      </section>
+      <section className="dashboard-shortcuts" aria-label="More account services">
+        <Link href="/transactions">Payments and activity <span aria-hidden="true">›</span></Link>
+        <Link href="/referrals">Referral programme <span aria-hidden="true">›</span></Link>
       </section>
       {paymentAttempts.some((payment) => payment.status === 'PENDING') && (
         <section className="dashboard-empty" aria-live="polite">

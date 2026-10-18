@@ -16,7 +16,9 @@ COPY apps/api apps/api
 
 RUN pnpm install --filter @loanplus/api... --frozen-lockfile \
     && pnpm --filter @loanplus/api db:generate \
-    && pnpm --filter @loanplus/api build
+    && pnpm --filter @loanplus/api build \
+    && mkdir -p /app/uploads/website \
+    && chown -R node:node /app/uploads
 
 RUN mkdir -p /home/node/.cache/node/corepack && chown -R node:node /home/node/.cache
 ENV NODE_ENV=production
