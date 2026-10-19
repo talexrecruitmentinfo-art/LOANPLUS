@@ -163,7 +163,7 @@ describe('loan processing-fee payment database integration', () => {
 
     const started = await payments.initiateLoanProcessingFee(
       userId,
-      Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId, reviewConfirmed: true }),
+      Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId, reviewConfirmed: true, mpesaPhoneNumber: '+254712345678' }),
       'loan-processing-fee-idempotency-01',
     );
     expect(started).toMatchObject({ status: 'PENDING', amountKes: 50, currency: 'KES' });
@@ -175,6 +175,16 @@ describe('loan processing-fee payment database integration', () => {
       type: 'LOAN_PROCESSING_FEE',
       loanApplicationId: applicationId,
       status: 'PENDING',
+    });
+    expect(await prisma.activationPaymentRequest.findUniqueOrThrow({
+      where: { paymentTransactionId: paymentId },
+      select: { policySnapshot: true },
+    })).toMatchObject({
+      policySnapshot: expect.objectContaining({
+        purpose: 'LOAN_PROCESSING_FEE',
+        amountKes: 50,
+        currency: 'KES',
+      }),
     });
     expect(await prisma.loanApplication.findUniqueOrThrow({ where: { id: applicationId } })).toMatchObject({
       status: 'PROCESSING_PAYMENT_PENDING',
@@ -229,6 +239,7 @@ describe('loan processing-fee payment database integration', () => {
       Object.assign(new InitiateLoanProcessingFeeDto(), {
         applicationId: secondDraft.id,
         reviewConfirmed: true,
+        mpesaPhoneNumber: '+254712345678',
       }),
       'loan-processing-fee-idempotency-02',
     );

@@ -33,14 +33,14 @@ test('loan application requires the five fields and review before the processing
   assert.match(loanPage, /reviewConfirmed: true/);
   assert.match(loanPage, /Refresh status/);
   assert.match(paymentStatus, /loan-processing-fee\/unresolved/);
-  assert.match(loanPage, /Payment unresolved — do not pay again/);
+  assert.match(loanPage, /Payment outcome not yet verified — do not pay again/);
   assert.match(loanPage, /Boolean\(unresolvedFee\)/);
   assert.match(loanPage, /Refresh payment status/);
   assert.match(loanPage, /Payment pending — confirmation in progress/);
-  assert.match(loanPage, /Confirmed — paid; application submitted for review/);
+  assert.match(loanPage, /Payment confirmed — application submitted for review/);
   assert.match(loanPage, /href="\/support"/);
   assert.match(paymentStatus, /loan-processing-fee\/unresolved/);
-  assert.match(loanPage, /Payment unresolved — do not pay again/);
+  assert.match(loanPage, /Payment outcome not yet verified — do not pay again/);
   assert.match(loanPage, /Boolean\(unresolvedFee\)/);
   assert.match(loanPage, /Refresh payment status/);
   assert.match(loanPage, /href="\/support"/);

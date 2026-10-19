@@ -1,4 +1,4 @@
-import { Equals, IsString, Length } from 'class-validator';
+import { Equals, IsString, Length, Matches } from 'class-validator';
 
 export class InitiateLoanProcessingFeeDto {
   @IsString()
@@ -7,4 +7,9 @@ export class InitiateLoanProcessingFeeDto {
 
   @Equals(true)
   reviewConfirmed!: true;
+
+  @IsString()
+  @Length(9, 16)
+  @Matches(/^\+?[\d ()-]{9,16}$/)
+  mpesaPhoneNumber!: string;
 }

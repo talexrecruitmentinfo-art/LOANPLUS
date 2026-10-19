@@ -248,6 +248,7 @@ export class LoanService {
             confirmedAt: true,
             receiptReference: true,
             failureCode: true,
+            initiationPhase: true,
           },
         },
         loan: { select: { status: true, disbursedAt: true, disbursement: { select: { amountKes: true, status: true, paymentReference: true, confirmedAt: true } } } },

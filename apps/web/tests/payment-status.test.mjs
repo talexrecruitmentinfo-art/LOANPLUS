@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { checkPaymentStatus } from '../src/lib/payment-status.mjs';
+import { checkPaymentStatus, createPaymentStatusRefresher } from '../src/lib/payment-status.mjs';
 
 const loanPage = await readFile(new URL('../src/app/loans/page.tsx', import.meta.url), 'utf8');
+const paymentStatus = await readFile(new URL('../src/lib/payment-status.mjs', import.meta.url), 'utf8');
 const unresolvedFee = {
   reference: 'LPP2A26FAA44E67AFED44C9E13F79547C4E',
   status: 'PENDING',
@@ -115,8 +116,65 @@ test('status check failure keeps existing unresolved payment state intact until 
 });
 
 test('authentication and payment-status failures expose a retry control and always terminate loading', async () => {
-  assert.match(loanPage, /finally \{\s*setUnresolvedFeeLoading\(false\);\s*\}/);
+  assert.match(paymentStatus, /finally \{\s*if \(requestId === requestSequence\) onComplete\(\);/);
   assert.match(loanPage, /Retry payment status/);
   assert.match(loanPage, /disabled=\{busyId !== null \|\| unresolvedFeeLoading\} onClick=\{\(\) => void refreshPaymentStatus\(\)\}/);
+  assert.match(loanPage, /unresolvedFee && !unresolvedFeeError && !unresolvedFeeLoading/);
+  assert.match(loanPage, /unresolvedFeeLoading && signedIn && <p className="fee-unavailable-notice" role="status">Checking the saved processing-fee status/);
   assert.match(loanPage, /paymentActionInFlight\.current/);
+});
+
+test('a newer payment-status response cannot be overwritten by a slower stale response', async () => {
+  const pendingLookups = [];
+  const applied = [];
+  let completed = 0;
+  const apiRequest = async (path) => {
+    if (path === '/auth/me') return { id: 'customer' };
+    return new Promise((resolve) => pendingLookups.push(resolve));
+  };
+  const refresher = createPaymentStatusRefresher(
+    apiRequest,
+    (result) => applied.push(result),
+    () => { completed += 1; },
+  );
+
+  const olderRefresh = refresher.refresh();
+  await new Promise((resolve) => setImmediate(resolve));
+  const newerRefresh = refresher.refresh();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  pendingLookups[1](null);
+  await newerRefresh;
+  pendingLookups[0](unresolvedFee);
+  await olderRefresh;
+
+  assert.deepEqual(applied, [{ authenticated: true, unresolvedFee: null, error: '' }]);
+  assert.equal(completed, 1);
+});
+
+test('verified terminal outcomes clear the unresolved banner and confirmed receipts are displayed', async () => {
+  const result = await checkPaymentStatus(async (path) => path === '/auth/me' ? { id: 'customer' } : null);
+
+  assert.deepEqual(result, { authenticated: true, unresolvedFee: null, error: '' });
+  assert.match(loanPage, /fee\.status === 'FAILED' \|\| fee\.status === 'CANCELLED' \|\| fee\.status === 'EXPIRED'/);
+  assert.match(loanPage, /fee\.receiptReference && <div><dt>M-Pesa receipt<\/dt><dd>\{fee\.receiptReference\}<\/dd><\/div>/);
+});
+
+test('refresh reloads the customer application payment record and never initiates another STK request', async () => {
+  assert.match(loanPage, /void refreshPaymentStatus\(\)/);
+  assert.match(loanPage, /refreshApplications\(\)\.catch/);
+  assert.match(loanPage, /cache: 'no-store'/);
+  assert.match(loanPage, /Payment outcome not yet verified — do not pay again/);
+  assert.match(loanPage, /contact support<\/Link> to reconcile this original attempt/);
+  assert.doesNotMatch(loanPage.match(/const refreshPaymentStatus = useCallback\(async \(\) => \{([\s\S]*?)\n  \}, \[paymentStatusRefresher\]\)/)?.[1] ?? '', /method:\s*'POST'|\/payments\/loan-processing-fee['"]/);
+});
+
+test('loan-fee initiation requires explicit M-Pesa number confirmation and sends the confirmed number', async () => {
+  assert.match(loanPage, /M-Pesa phone number for the prompt/);
+  assert.match(loanPage, /I confirm this is the M-Pesa number that should receive the displayed processing-fee prompt/);
+  assert.match(loanPage, /!mpesaPhoneConfirmed/);
+  assert.match(loanPage, /JSON\.stringify\(\{ applicationId, reviewConfirmed: true, mpesaPhoneNumber \}\)/);
+  assert.match(loanPage, /fee\.initiationPhase === 'PROVIDER_ACCEPTED' \? 'Awaiting prompt — check/);
+  assert.match(loanPage, /Payment confirmed — application submitted for review/);
+  assert.match(loanPage, /Payment requires review — do not pay again/);
 });

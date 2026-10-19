@@ -16,3 +16,12 @@ export type PaymentStatusResult =
 export function checkPaymentStatus(
   apiRequest: <T>(path: string, init?: RequestInit) => Promise<T>,
 ): Promise<PaymentStatusResult>;
+
+export function createPaymentStatusRefresher(
+  apiRequest: <T>(path: string, init?: RequestInit) => Promise<T>,
+  onResult: (result: PaymentStatusResult, isCurrent: () => boolean) => void | Promise<void>,
+  onComplete: () => void,
+): {
+  refresh: () => Promise<void>;
+  cancel: () => void;
+};

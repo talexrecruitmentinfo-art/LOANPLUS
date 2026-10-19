@@ -133,11 +133,18 @@ export class PaymentService {
     if (dto.reviewConfirmed !== true) {
       throw new BadRequestException('Review the application details before requesting the processing-fee payment.');
     }
+    const phoneNumber = normalizeKenyaPhone(dto.mpesaPhoneNumber);
     if (!idempotencyKey || !/^[a-zA-Z0-9._:-]{16,128}$/.test(idempotencyKey)) {
       throw new BadRequestException('A valid Idempotency-Key header is required.');
     }
     const requestHash = createHash('sha256')
-      .update(JSON.stringify({ userId, applicationId: dto.applicationId, amountKes: LOAN_PROCESSING_FEE_KES, reviewConfirmed: true }))
+      .update(JSON.stringify({
+        userId,
+        applicationId: dto.applicationId,
+        amountKes: LOAN_PROCESSING_FEE_KES,
+        reviewConfirmed: true,
+        mpesaPhoneNumber: phoneNumber,
+      }))
       .digest('hex');
     const scopedKey = `loan-processing:${createHash('sha256').update(`${userId}:${dto.applicationId}:${idempotencyKey}`).digest('hex')}`;
     const existing = await this.prisma.paymentTransaction.findUnique({ where: { idempotencyKey: scopedKey } });
@@ -158,12 +165,13 @@ export class PaymentService {
         message: 'This application already has a processing-fee payment attempt. Its outcome must be resolved before another payment is considered.',
       };
     }
-    if (getLoanProcessingFeePolicy().status !== 'CONFIGURED') {
+    const feePolicy = getLoanProcessingFeePolicy();
+    if (feePolicy.status !== 'CONFIGURED' || !feePolicy.version || !feePolicy.disclosure) {
       throw new ServiceUnavailableException('Approved loan processing-fee policy is not configured.');
     }
 
     const [user, application, revenueSetting] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: userId }, select: { isActive: true, phone: true } }),
+      this.prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } }),
       this.prisma.loanApplication.findFirst({
         where: { id: dto.applicationId, userId },
         select: {
@@ -182,7 +190,6 @@ export class PaymentService {
     if (!hasAcceptedProductTerms(application.applicationData, application.productId, application.requestedPrincipalKes)) {
       throw new ConflictException('This application has no recorded acceptance of its product terms. Review and submit a new application before paying.');
     }
-    const phoneNumber = normalizeKenyaPhone(user.phone);
     if (application.processingFeePayment) {
       return {
         reference: application.processingFeePayment.internalReference,
@@ -261,6 +268,13 @@ export class PaymentService {
                 userId,
                 callbackTokenHash: hashToken(callbackToken),
                 phoneNumberCiphertext: encryptSensitiveValue(phoneNumber),
+                policySnapshot: {
+                  purpose: 'LOAN_PROCESSING_FEE',
+                  amountKes: LOAN_PROCESSING_FEE_KES,
+                  currency: 'KES',
+                  termsVersion: feePolicy.version,
+                  customerDisclosure: feePolicy.disclosure,
+                },
                 expiresAt: new Date(Date.now() + 15 * 60 * 1000),
               },
             },
@@ -359,31 +373,56 @@ export class PaymentService {
         message: 'The payment request outcome is being checked. Do not submit another payment while it remains unresolved.',
       };
     }
-    await this.prisma.$transaction(async (tx) => {
-      const requestBinding = await tx.activationPaymentRequest.updateMany({
-        where: {
-          paymentTransactionId: payment.id,
-          OR: [
-            { checkoutRequestId: null, merchantRequestId: null },
-            {
-              checkoutRequestId: providerRequest.checkoutRequestId,
-              merchantRequestId: providerRequest.merchantRequestId,
-            },
-          ],
-        },
-        data: {
-          checkoutRequestId: providerRequest.checkoutRequestId,
-          merchantRequestId: providerRequest.merchantRequestId,
-        },
-      });
-      if (requestBinding.count !== 1) {
-        throw new ConflictException('Provider identifiers could not be safely associated with the payment.');
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const requestBinding = await tx.activationPaymentRequest.updateMany({
+          where: {
+            paymentTransactionId: payment.id,
+            OR: [
+              { checkoutRequestId: null, merchantRequestId: null },
+              {
+                checkoutRequestId: providerRequest.checkoutRequestId,
+                merchantRequestId: providerRequest.merchantRequestId,
+              },
+            ],
+          },
+          data: {
+            checkoutRequestId: providerRequest.checkoutRequestId,
+            merchantRequestId: providerRequest.merchantRequestId,
+          },
+        });
+        if (requestBinding.count !== 1) {
+          throw new ConflictException('Provider identifiers could not be safely associated with the payment.');
+        }
+        await tx.paymentTransaction.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: { initiationPhase: 'PROVIDER_ACCEPTED' },
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      let unresolvedMarkerPersisted = false;
+      let markerErrorType = 'None';
+      try {
+        const markedUnresolved = await this.prisma.paymentTransaction.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: {
+            failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+            initiationPhase: 'PROVIDER_IDS_NOT_PERSISTED',
+          },
+        });
+        unresolvedMarkerPersisted = markedUnresolved.count === 1;
+      } catch (markerError) {
+        markerErrorType = markerError instanceof Error ? markerError.constructor.name : 'Unknown';
       }
-      await tx.paymentTransaction.updateMany({
-        where: { id: payment.id, status: PaymentStatus.PENDING },
-        data: { initiationPhase: 'PROVIDER_ACCEPTED' },
-      });
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      logger.warn(`STK identifiers could not be persisted for payment ${payment.internalReference} (phase=PROVIDER_ACCEPTED; step=PERSIST_PROVIDER_IDENTIFIERS; unresolvedMarkerPersisted=${unresolvedMarkerPersisted}; errorType=${error instanceof Error ? error.constructor.name : 'Unknown'}; markerErrorType=${markerErrorType}).`);
+      return {
+        reference: payment.internalReference,
+        status: PaymentStatus.PENDING,
+        amountKes: LOAN_PROCESSING_FEE_KES,
+        currency: 'KES',
+        message: 'Safaricom returned a payment request response, but its identifiers could not be saved. The payment remains unresolved; do not submit another payment while it is being reconciled.',
+      };
+    }
 
     return {
       reference: payment.internalReference,
@@ -579,7 +618,9 @@ export class PaymentService {
         const isLegacyUnresolved = failureCode === 'MPESA_RESULT_4999';
         const needsProviderIdentifiers = payment.type === PaymentType.LOAN_PROCESSING_FEE &&
           payment.status === PaymentStatus.PENDING &&
-          failureCode === 'INITIATION_OUTCOME_UNCERTAIN' &&
+          (failureCode === 'INITIATION_OUTCOME_UNCERTAIN' ||
+            payment.initiationPhase === 'STK_REQUESTED' ||
+            payment.initiationPhase === 'PROVIDER_IDS_NOT_PERSISTED') &&
           !payment.activationRequest?.checkoutRequestId &&
           !payment.activationRequest?.merchantRequestId;
         return {
@@ -733,7 +774,9 @@ export class PaymentService {
         if (submittedIdentifiers && (
           currentPayment.type !== PaymentType.LOAN_PROCESSING_FEE ||
           currentPayment.status !== PaymentStatus.PENDING ||
-          currentPayment.failureCode !== 'INITIATION_OUTCOME_UNCERTAIN' ||
+          (currentPayment.failureCode !== 'INITIATION_OUTCOME_UNCERTAIN' &&
+            currentPayment.initiationPhase !== 'STK_REQUESTED' &&
+            currentPayment.initiationPhase !== 'PROVIDER_IDS_NOT_PERSISTED') ||
           currentPayment.activationRequest?.checkoutRequestId !== null ||
           currentPayment.activationRequest?.merchantRequestId !== null
         )) {
@@ -1094,7 +1137,9 @@ export class PaymentService {
         throw new ConflictException('A different Superadmin must independently review the provider evidence.');
       }
       if (payment.type !== PaymentType.LOAN_PROCESSING_FEE || payment.status !== PaymentStatus.PENDING ||
-        payment.failureCode !== 'INITIATION_OUTCOME_UNCERTAIN' ||
+        (payment.failureCode !== 'INITIATION_OUTCOME_UNCERTAIN' &&
+          payment.initiationPhase !== 'STK_REQUESTED' &&
+          payment.initiationPhase !== 'PROVIDER_IDS_NOT_PERSISTED') ||
         evidenceAttempt.submittedAccountReference !== payment.internalReference.slice(-12) ||
         payment.activationRequest?.checkoutRequestId !== null ||
         payment.activationRequest?.merchantRequestId !== null) {

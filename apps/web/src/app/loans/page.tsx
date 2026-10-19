@@ -1,10 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { apiRequest } from '@/lib/api';
 import { formatMoney } from '@/lib/currency';
-import { checkPaymentStatus } from '@/lib/payment-status.mjs';
+import { createPaymentStatusRefresher } from '@/lib/payment-status.mjs';
 
 interface Product {
   id: string;
@@ -72,6 +72,7 @@ interface LoanApplication {
     createdAt: string;
     confirmedAt: string | null;
     receiptReference: string | null;
+    initiationPhase: string | null;
   };
   loan: null | {
     status: string;
@@ -131,7 +132,7 @@ function statusLabel(application: LoanApplication): string {
 function fieldError(name: string, value: string, product?: Product): string {
   if (!value.trim()) return 'This field is required.';
   if (name.endsWith('Name') && value.trim().replace(/\s+/g, ' ').length < 2) return 'Enter the full name.';
-  if (name.endsWith('Phone') && !/^(?:\+?254|0)?[17]\d{8}$/.test(value.replace(/[\s()-]/g, ''))) {
+  if ((name.endsWith('Phone') || name === 'mpesaPhoneNumber') && !/^(?:\+?254|0)?[17]\d{8}$/.test(value.replace(/[\s()-]/g, ''))) {
     return 'Enter a valid Kenyan mobile number.';
   }
   if (name === 'requestedPrincipalKes') {
@@ -158,6 +159,8 @@ export default function LoanProductsPage() {
   const [reviewing, setReviewing] = useState(false);
   const [resumingApplicationId, setResumingApplicationId] = useState<string | null>(null);
   const [termsAccepted, setTermsAccepted] = useState(false);
+  const [mpesaPhoneNumber, setMpesaPhoneNumber] = useState('');
+  const [mpesaPhoneConfirmed, setMpesaPhoneConfirmed] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const [acceptedOffers, setAcceptedOffers] = useState<Record<string, boolean>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -169,6 +172,7 @@ export default function LoanProductsPage() {
   const creationKey = useRef<string | null>(null);
   const feeKey = useRef<string | null>(null);
   const paymentActionInFlight = useRef(false);
+  const applicationsRequestSequence = useRef(0);
 
   const product = products.find((item) => item.id === form.productId);
 
@@ -176,25 +180,43 @@ export default function LoanProductsPage() {
     if (product) document.getElementById('apply-heading')?.scrollIntoView({ block: 'start' });
   }, [form.productId, product]);
 
-  async function refreshApplications() {
-    setApplications(await apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }));
-  }
+  const refreshApplications = useCallback(async () => {
+    const requestId = ++applicationsRequestSequence.current;
+    const nextApplications = await apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' });
+    if (requestId === applicationsRequestSequence.current) setApplications(nextApplications);
+  }, []);
 
-  async function refreshPaymentStatus() {
-    setUnresolvedFeeLoading(true);
-    setUnresolvedFeeError('');
-    try {
-      const result = await checkPaymentStatus(apiRequest);
+  const paymentStatusRefresher = useMemo(() => createPaymentStatusRefresher(
+    apiRequest,
+    async (result, isCurrent) => {
       setSignedIn(result.authenticated);
       if (result.error) {
         setUnresolvedFeeError(result.error);
       } else if ('unresolvedFee' in result) {
         setUnresolvedFee(result.unresolvedFee);
+        setError('');
       }
-    } finally {
-      setUnresolvedFeeLoading(false);
-    }
-  }
+      if (!result.authenticated) {
+        setApplications([]);
+        return;
+      }
+      try {
+        await refreshApplications();
+      } catch (reason) {
+        if (isCurrent()) {
+          setError(reason instanceof Error ? reason.message : 'Application payment details could not be refreshed.');
+        }
+      }
+    },
+    () => setUnresolvedFeeLoading(false),
+  ), [refreshApplications]);
+
+  const refreshPaymentStatus = useCallback(async () => {
+    setUnresolvedFeeLoading(true);
+    setUnresolvedFeeError('');
+    applicationsRequestSequence.current += 1;
+    await paymentStatusRefresher.refresh();
+  }, [paymentStatusRefresher]);
 
   async function refreshProducts() {
     setProductsLoading(true);
@@ -227,12 +249,12 @@ export default function LoanProductsPage() {
   useEffect(() => {
     void refreshProcessingFeeQuote();
     void refreshProducts();
-    Promise.all([
-      refreshPaymentStatus(),
-      apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }).then(setApplications)
-        .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Applications could not be loaded.')),
-    ]).finally(() => setLoading(false));
-  }, []);
+    void refreshPaymentStatus().finally(() => setLoading(false));
+    return () => {
+      applicationsRequestSequence.current += 1;
+      paymentStatusRefresher.cancel();
+    };
+  }, [paymentStatusRefresher, refreshApplications, refreshPaymentStatus]);
 
   function updateField(field: keyof ApplicationForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -263,6 +285,8 @@ export default function LoanProductsPage() {
     setForm({ ...emptyForm, productId: selectedProduct.id });
     setFieldErrors({});
     setTermsAccepted(false);
+    setMpesaPhoneNumber('');
+    setMpesaPhoneConfirmed(false);
     setReviewing(false);
     setError('');
   }
@@ -284,6 +308,11 @@ export default function LoanProductsPage() {
 
   async function payProcessingFee() {
     if (paymentActionInFlight.current) return;
+    const phoneError = fieldError('mpesaPhoneNumber', mpesaPhoneNumber);
+    if (phoneError || !mpesaPhoneConfirmed) {
+      setError(phoneError || 'Confirm the M-Pesa number that should receive the payment prompt.');
+      return;
+    }
     if (!product || !signedIn || !termsAccepted || feeUnavailableReason || unresolvedFeeLoading || unresolvedFee || unresolvedFeeError) {
       setError(feeUnavailableReason || (!termsAccepted
         ? 'Accept the reviewed product terms before continuing.'
@@ -315,7 +344,7 @@ export default function LoanProductsPage() {
       const payment = await apiRequest<{ reference: string; status: string; message: string }>('/payments/loan-processing-fee', {
         method: 'POST',
         headers: { 'Idempotency-Key': feeKey.current },
-        body: JSON.stringify({ applicationId, reviewConfirmed: true }),
+        body: JSON.stringify({ applicationId, reviewConfirmed: true, mpesaPhoneNumber }),
       });
       setNotice(payment.message);
       creationKey.current = null;
@@ -323,6 +352,8 @@ export default function LoanProductsPage() {
       setReviewing(false);
       setForm(emptyForm);
       setTermsAccepted(false);
+      setMpesaPhoneNumber('');
+      setMpesaPhoneConfirmed(false);
       setResumingApplicationId(null);
       await refreshApplications();
       await refreshPaymentStatus();
@@ -353,6 +384,8 @@ export default function LoanProductsPage() {
     setFieldErrors({});
     setReviewing(true);
     setTermsAccepted(false);
+    setMpesaPhoneNumber('');
+    setMpesaPhoneConfirmed(false);
     setError('');
     setNotice('');
   }
@@ -388,12 +421,12 @@ export default function LoanProductsPage() {
       </section>
       {notice && <p className="admin-inline-notice" role="status">{notice}</p>}
       {error && <p className="admin-inline-error" role="alert">{error}</p>}
-      {unresolvedFee && <div className="fee-unavailable-notice" role="alert">
-        <p><b>Payment unresolved — do not pay again.</b> The original processing-fee attempt is not confirmed. Reference <code>{unresolvedFee.reference}</code>{unresolvedFee.initiationPhase ? ` · ${unresolvedFee.initiationPhase.replaceAll('_', ' ').toLowerCase()}` : ''}. No second STK request will be started.</p>
-        <p>{unresolvedFee.message} <Link href="/support">Contact support</Link> if Safaricom evidence or assistance is needed.</p>
+      {unresolvedFee && !unresolvedFeeError && !unresolvedFeeLoading && <div className="fee-unavailable-notice" role="alert">
+        <p><b>Payment outcome not yet verified — do not pay again.</b> LoanPlus has not established whether this original request was accepted or completed. Reference <code>{unresolvedFee.reference}</code>{unresolvedFee.initiationPhase ? ` · ${unresolvedFee.initiationPhase.replaceAll('_', ' ').toLowerCase()}` : ''}.</p>
+        <p>{unresolvedFee.message} Refresh to check the latest saved status. If it remains unresolved, <Link href="/support">contact support</Link> to reconcile this original attempt using provider evidence. Do not start a replacement payment.</p>
         <button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading} onClick={() => void refreshPaymentStatus()}>Refresh payment status</button>
       </div>}
-      {!unresolvedFee && unresolvedFeeLoading && signedIn && <p className="fee-unavailable-notice" role="status">Checking previous processing-fee payment status. Payment remains unavailable until this check completes.</p>}
+      {unresolvedFeeLoading && signedIn && <p className="fee-unavailable-notice" role="status">Checking the saved processing-fee status. Payment remains unavailable until this check completes.</p>}
       {unresolvedFeeError && <div className="fee-unavailable-notice" role="alert">
         <p>{unresolvedFeeError} <Link href="/login">Sign in</Link> or retry; do not pay again until payment status is verified.</p>
         <button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading} onClick={() => void refreshPaymentStatus()}>Retry payment status</button>
@@ -452,12 +485,24 @@ export default function LoanProductsPage() {
                 <div><dt>Loan Processing Fee</dt><dd>{feeQuoteAmount}</dd></div>
               </dl>
               <p><b>Fee required:</b> A {feeQuoteAmount} loan processing fee is required before this application can be submitted. It covers processing this loan application and is paid separately from your loan repayment. Payment does not guarantee loan approval or disbursement. Your M-Pesa PIN is entered only in Safaricom’s prompt.</p>
+              <label>M-Pesa phone number for the prompt
+                <input type="tel" inputMode="tel" autoComplete="tel" placeholder="07XX XXX XXX" value={mpesaPhoneNumber} onChange={(event) => {
+                  setMpesaPhoneNumber(event.target.value);
+                  setMpesaPhoneConfirmed(false);
+                }} aria-invalid={Boolean(mpesaPhoneNumber && fieldError('mpesaPhoneNumber', mpesaPhoneNumber))} required />
+                <small>Enter the Kenyan number you want to use. It may be different from your account number.</small>
+                {mpesaPhoneNumber && fieldError('mpesaPhoneNumber', mpesaPhoneNumber) && <small role="alert">{fieldError('mpesaPhoneNumber', mpesaPhoneNumber)}</small>}
+              </label>
+              <label className="check-row loan-terms-acceptance">
+                <input type="checkbox" checked={mpesaPhoneConfirmed} onChange={(event) => setMpesaPhoneConfirmed(event.target.checked)} />
+                <span>I confirm this is the M-Pesa number that should receive the displayed processing-fee prompt.</span>
+              </label>
               <p>Estimates use the current configured product terms; an authorized approved offer may differ and must be reviewed before acceptance. The processing fee is not wallet funding.</p>
               {processingFeeQuote?.refundPolicyStatus === 'CONFIGURED' && processingFeeQuote.refundPolicyDisclosure && <p>{processingFeeQuote.refundPolicyDisclosure} <small>Policy version {processingFeeQuote.refundPolicyVersion}.</small></p>}
               {feeUnavailableReason && <div className="fee-unavailable-notice" role="status"><p>{feeUnavailableReason} Contact support if you need help; the fee will not be charged.</p>{processingFeeQuoteError && <button className="quiet-button" type="button" disabled={processingFeeQuoteLoading} onClick={() => void refreshProcessingFeeQuote()}>Retry fee quote</button>}</div>}
               <label className="check-row loan-terms-acceptance">
                 <input type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} />
-                <span>I confirm my information is accurate and accept the displayed product terms, version {product.termsVersion}. I understand payment of a processing fee does not guarantee approval or disbursement.</span>
+                <span>I confirm my information is accurate, accept product terms version {product.termsVersion}, and authorize the displayed {feeQuoteAmount} processing fee to be requested via M-Pesa for this application. It is separate from loan repayment and does not guarantee approval or disbursement.</span>
               </label>
               <div className="loan-review-actions">
                 <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => {
@@ -468,7 +513,7 @@ export default function LoanProductsPage() {
                   }
                   setReviewing(false);
                 }}>{resumingApplicationId ? 'Back to applications' : 'Edit details'}</button>
-                <button className="button" type="button" disabled={busyId !== null || unresolvedFeeLoading || !termsAccepted || Boolean(feeUnavailableReason) || Boolean(unresolvedFee) || Boolean(unresolvedFeeError)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : unresolvedFee || unresolvedFeeError ? 'Payment unresolved — do not pay again' : unresolvedFeeLoading ? 'Checking payment status…' : `Pay ${feeQuoteAmount}`}</button>
+                <button className="button" type="button" disabled={busyId !== null || unresolvedFeeLoading || !termsAccepted || !mpesaPhoneConfirmed || Boolean(fieldError('mpesaPhoneNumber', mpesaPhoneNumber)) || Boolean(feeUnavailableReason) || Boolean(unresolvedFee) || Boolean(unresolvedFeeError)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : unresolvedFee || unresolvedFeeError ? 'Payment unresolved — do not pay again' : unresolvedFeeLoading ? 'Checking payment status…' : `Pay ${feeQuoteAmount}`}</button>
               </div>
             </div>
           )}
@@ -494,7 +539,7 @@ export default function LoanProductsPage() {
         ))}
       </section>
       {signedIn && <section className="customer-ledger-list">
-        <div className="customer-ledger-heading"><h2>My loan applications</h2><div><span>{applications.length}</span><button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => void refreshApplications().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Application status could not be refreshed.'))}>Refresh status</button></div></div>
+        <div className="customer-ledger-heading"><h2>My loan applications</h2><div><span>{applications.length}</span><button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading} onClick={() => void refreshPaymentStatus()}>Refresh status</button></div></div>
         {applications.length === 0 ? <p>No applications yet. Select a loan product and complete the application above.</p> : applications.map((application) => {
           const terms = application.approvedTermsSnapshot;
           const guarantor = (key: string) => typeof application.applicationData[key] === 'string' ? application.applicationData[key] as string : '—';
@@ -513,9 +558,10 @@ export default function LoanProductsPage() {
                 <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => resumeProcessingFee(application)}>Review fee requirement</button>
               </div>}
               {fee && <dl>
-                <div><dt>Loan Processing Fee — {formatMoney(fee.amountKes)}</dt><dd>{fee.status === 'CONFIRMED' ? 'Confirmed — paid; application submitted for review' : fee.status === 'PENDING' ? fee.failureCode ? 'Payment unresolved — do not pay again' : 'Payment pending — confirmation in progress' : fee.failureCode === 'MPESA_RESULT_4999' ? 'Payment unresolved — do not pay again' : fee.status === 'FAILED' || fee.status === 'CANCELLED' || fee.status === 'EXPIRED' ? 'Verified unsuccessful — contact support for next steps' : fee.status.replaceAll('_', ' ')}</dd></div>
+                <div><dt>Loan Processing Fee — {formatMoney(fee.amountKes)}</dt><dd>{fee.status === 'CONFIRMED' ? 'Payment confirmed — application submitted for review' : fee.status === 'PENDING' ? fee.failureCode ? 'Payment requires review — do not pay again' : fee.initiationPhase === 'PROVIDER_ACCEPTED' ? 'Awaiting prompt — check the M-Pesa number you confirmed' : 'Payment pending — confirmation in progress' : fee.failureCode === 'MPESA_RESULT_4999' ? 'Payment requires review — do not pay again' : fee.status === 'FAILED' || fee.status === 'CANCELLED' || fee.status === 'EXPIRED' ? 'Payment failed — contact support for next steps' : fee.status.replaceAll('_', ' ')}</dd></div>
                 <div><dt>Payment reference</dt><dd>{fee.internalReference}</dd></div>
                 {fee.confirmedAt && <div><dt>Confirmed</dt><dd>{new Date(fee.confirmedAt).toLocaleString('en-KE')}</dd></div>}
+                {fee.receiptReference && <div><dt>M-Pesa receipt</dt><dd>{fee.receiptReference}</dd></div>}
                 {fee.status === 'PENDING' && <div><dt>Payment outcome</dt><dd>Refresh this page to see the latest verified status. Do not make another payment while this request is pending or unresolved.</dd></div>}
                 {(fee.status === 'FAILED' || fee.status === 'CANCELLED' || fee.status === 'EXPIRED') && fee.failureCode !== 'MPESA_RESULT_4999' && <div><dt>Next step</dt><dd>Do not retry this application’s fee. <Link href="/support">Contact support</Link> to continue under the verified payment outcome.</dd></div>}
               </dl>}

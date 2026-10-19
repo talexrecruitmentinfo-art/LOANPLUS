@@ -227,12 +227,13 @@ describe('PaymentService provider reconciliation', () => {
     expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
   });
 
-  it('records provider identifiers and evidence without querying Safaricom before independent review', async () => {
+  it('accepts independently sourced evidence when both provider IDs and the uncertainty marker were not persisted', async () => {
     const uncertainPayment = {
       ...payment,
       type: PaymentType.LOAN_PROCESSING_FEE,
       loanApplicationId: 'loan-application-id',
-      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      failureCode: null,
+      initiationPhase: 'STK_REQUESTED',
       activationRequest: {
         ...request,
         loanApplicationId: 'loan-application-id',
@@ -791,6 +792,39 @@ describe('PaymentService provider reconciliation', () => {
         },
       }),
     }));
+  });
+
+  it('surfaces STK-requested payments for evidence recovery when the uncertainty marker write failed', async () => {
+    const findMany = jest.fn(async () => [{
+      id: paymentId,
+      internalReference: 'LPP123456789012',
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      amountKes: 50,
+      currency: 'KES',
+      status: 'PENDING',
+      failureCode: null,
+      initiationPhase: 'STK_REQUESTED',
+      providerReference: null,
+      receiptReference: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      activationRequest: { checkoutRequestId: null, merchantRequestId: null, callbackEvents: [] },
+      reconciliationAttempts: [],
+      _count: { reconciliationAttempts: 0 },
+    }]);
+    const service = new PaymentService({
+      systemSetting: { findUnique: jest.fn(async () => null) },
+      paymentTransaction: { findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    const result = await service.listReconciliationQueue(undefined, 25);
+
+    expect(result.items[0]).toMatchObject({
+      initiationPhase: 'STK_REQUESTED',
+      needsProviderIdentifiers: true,
+      accountReference: '123456789012',
+      status: 'PENDING',
+    });
   });
 
   it('filters by exact internal, provider, or receipt reference without selecting customer identity', async () => {

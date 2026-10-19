@@ -35,3 +35,24 @@ export async function checkPaymentStatus(apiRequest) {
     return { authenticated: true, error: PAYMENT_STATUS_ERROR };
   }
 }
+
+export function createPaymentStatusRefresher(apiRequest, onResult, onComplete) {
+  let requestSequence = 0;
+
+  return {
+    async refresh() {
+      const requestId = ++requestSequence;
+      try {
+        const result = await checkPaymentStatus(apiRequest);
+        if (requestId === requestSequence) {
+          await onResult(result, () => requestId === requestSequence);
+        }
+      } finally {
+        if (requestId === requestSequence) onComplete();
+      }
+    },
+    cancel() {
+      requestSequence += 1;
+    },
+  };
+}
