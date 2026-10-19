@@ -1,58 +1,41 @@
 const AUTHENTICATION_ERROR =
-  'Your session could not be verified. Sign in again or retry to check payment status; do not pay until status is verified.';
-const PAYMENT_STATUS_ERROR =
-  'The existing payment status could not be checked. Retry; do not pay again until it can be verified.';
+  'Your session could not be verified. Sign in again or retry before starting a payment.';
+const APPLICATION_STATUS_ERROR =
+  'Saved applications and their payment statuses could not be checked. Retry before starting a payment.';
 
-function isUnresolvedFeeStatus(value) {
-  return value !== null &&
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    typeof value.reference === 'string' &&
-    value.reference.length > 0 &&
-    value.status === 'PENDING' &&
-    Number.isSafeInteger(value.amountKes) &&
-    value.amountKes > 0 &&
-    value.currency === 'KES' &&
-    (value.initiationPhase === null || typeof value.initiationPhase === 'string') &&
-    typeof value.createdAt === 'string' &&
-    typeof value.message === 'string';
+function hasPaymentHistory(application) {
+  return application !== null &&
+    typeof application === 'object' &&
+    !Array.isArray(application) &&
+    typeof application.id === 'string' &&
+    Array.isArray(application.processingFeePayments) &&
+    application.processingFeePayments.every((payment) =>
+      payment !== null &&
+      typeof payment === 'object' &&
+      !Array.isArray(payment) &&
+      typeof payment.id === 'string' &&
+      typeof payment.internalReference === 'string' &&
+      typeof payment.status === 'string' &&
+      Number.isSafeInteger(payment.amountKes) &&
+      (payment.failureCode === null || typeof payment.failureCode === 'string') &&
+      (payment.receiptReference === null || typeof payment.receiptReference === 'string'),
+    );
 }
 
-export async function checkPaymentStatus(apiRequest) {
+export async function loadLoanApplicationStatus(apiRequest) {
   try {
     await apiRequest('/auth/me', { cache: 'no-store' });
   } catch {
-    return { authenticated: false, error: AUTHENTICATION_ERROR };
+    return { authenticated: false, applications: null, error: AUTHENTICATION_ERROR };
   }
 
   try {
-    const unresolvedFee = await apiRequest('/payments/loan-processing-fee/unresolved', { cache: 'no-store' });
-    if (unresolvedFee !== null && !isUnresolvedFeeStatus(unresolvedFee)) {
-      return { authenticated: true, error: PAYMENT_STATUS_ERROR };
+    const applications = await apiRequest('/loans/applications', { cache: 'no-store' });
+    if (!Array.isArray(applications) || !applications.every(hasPaymentHistory)) {
+      return { authenticated: true, applications: null, error: APPLICATION_STATUS_ERROR };
     }
-    return { authenticated: true, unresolvedFee, error: '' };
+    return { authenticated: true, applications, error: '' };
   } catch {
-    return { authenticated: true, error: PAYMENT_STATUS_ERROR };
+    return { authenticated: true, applications: null, error: APPLICATION_STATUS_ERROR };
   }
-}
-
-export function createPaymentStatusRefresher(apiRequest, onResult, onComplete) {
-  let requestSequence = 0;
-
-  return {
-    async refresh() {
-      const requestId = ++requestSequence;
-      try {
-        const result = await checkPaymentStatus(apiRequest);
-        if (requestId === requestSequence) {
-          await onResult(result, () => requestId === requestSequence);
-        }
-      } finally {
-        if (requestId === requestSequence) onComplete();
-      }
-    },
-    cancel() {
-      requestSequence += 1;
-    },
-  };
 }

@@ -14,7 +14,7 @@ interface LoanApplication {
   approvedPrincipalKes: number | null;
   status: string;
   submittedAt: string | null;
-  processingFeePayment: null | { status: string; failureCode: string | null };
+  processingFeePayments: Array<{ status: string; failureCode: string | null }>;
   loan: null | { status: string; disbursement: null | { amountKes: number; status: string } };
   product: { name: string };
 }
@@ -44,9 +44,13 @@ export default function DashboardPage() {
   const [error, setError] = useState('');
   const applicationStatus = (application: LoanApplication) => {
     if (application.status === 'DRAFT' || application.status === 'PROCESSING_PAYMENT_PENDING') {
-      if (application.processingFeePayment?.failureCode) return 'Processing Payment Unresolved';
-      if (application.processingFeePayment?.status === 'FAILED') return 'Processing Payment Failed';
-      if (application.processingFeePayment?.status === 'PENDING') return 'Processing Payment Pending';
+      const latest = application.processingFeePayments[0];
+      if (application.processingFeePayments.some((payment) =>
+        payment.status === 'PENDING' || (payment.status === 'FAILED' && payment.failureCode === 'MPESA_RESULT_4999'),
+      )) return 'Processing Payment Unresolved';
+      if (latest?.status === 'CONFIRMED') return 'Payment Confirmed — Awaiting Review';
+      if (latest?.status === 'FAILED') return 'Processing Payment Failed';
+      if (latest?.status === 'PENDING') return 'Processing Payment Pending';
       if (application.status === 'PROCESSING_PAYMENT_PENDING') return 'Processing Payment Unresolved';
       return 'Draft — Processing Fee Required';
     }

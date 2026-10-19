@@ -6,7 +6,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { LedgerAccountType, LoanApplicationStatus, LoanStatus, Prisma } from '@prisma/client';
+import { LedgerAccountType, LoanApplicationStatus, LoanStatus, PaymentType, Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { normalizeKenyaPhone } from '../auth/security.util';
 import { PrismaService } from '../prisma/prisma.service';
@@ -237,7 +237,9 @@ export class LoanService {
         reviewedAt: true,
         offerExpiresAt: true,
         applicationData: true,
-        processingFeePayment: {
+        processingFeePayments: {
+          where: { type: PaymentType.LOAN_PROCESSING_FEE },
+          orderBy: { createdAt: 'desc' },
           select: {
             id: true,
             internalReference: true,
@@ -264,7 +266,9 @@ export class LoanService {
       include: {
         product: true,
         user: { select: { id: true, fullName: true, email: true, identityStatus: true } },
-        processingFeePayment: {
+        processingFeePayments: {
+          where: { type: PaymentType.LOAN_PROCESSING_FEE },
+          orderBy: { createdAt: 'desc' },
           select: { internalReference: true, status: true, amountKes: true, receiptReference: true, confirmedAt: true },
         },
       },

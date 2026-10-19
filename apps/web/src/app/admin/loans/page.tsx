@@ -26,13 +26,13 @@ interface Application {
   submittedAt: string | null;
   applicationData: Record<string, unknown>;
   product: { name: string };
-  processingFeePayment: null | {
+  processingFeePayments: Array<{
     internalReference: string;
     status: string;
     amountKes: number;
     receiptReference: string | null;
     confirmedAt: string | null;
-  };
+  }>;
   user: { fullName: string; email: string; identityStatus: string };
 }
 
@@ -151,8 +151,9 @@ export default function AdminLoansPage() {
             <div className="review-summary"><div><h3>{application.user.fullName}</h3><p>{application.user.email} · {application.product.name} · Ref {application.id}</p></div><span className="status-label">{application.status.replaceAll('_', ' ')}</span></div>
             <dl>
               <div><dt>Requested amount</dt><dd>{formatKes(application.requestedPrincipalKes)}</dd></div>
-              <div><dt>Processing fee</dt><dd>{application.processingFeePayment?.status === 'CONFIRMED' ? 'Paid and confirmed' : application.processingFeePayment?.status ?? 'Not paid'}</dd></div>
-              <div><dt>Fee reference</dt><dd>{application.processingFeePayment?.internalReference ?? '—'}</dd></div>
+              <div><dt>Processing fees</dt><dd>{application.processingFeePayments.length
+                ? application.processingFeePayments.map((payment) => `${payment.status} · ${payment.internalReference}${payment.receiptReference ? ` · receipt ${payment.receiptReference}` : ''}`).join(' | ')
+                : 'Not paid'}</dd></div>
               <div><dt>Identity status</dt><dd>{application.user.identityStatus.replaceAll('_', ' ')}</dd></div>
               <div><dt>Submitted</dt><dd>{application.submittedAt ? new Date(application.submittedAt).toLocaleString('en-KE') : 'Not recorded'}</dd></div>
             </dl>

@@ -295,7 +295,9 @@ export class AdminService {
             submittedAt: true,
             createdAt: true,
             product: { select: { name: true } },
-            processingFeePayment: {
+            processingFeePayments: {
+              where: { type: PaymentType.LOAN_PROCESSING_FEE },
+              orderBy: { createdAt: 'desc' },
               select: { internalReference: true, status: true, amountKes: true, receiptReference: true, confirmedAt: true },
             },
           },

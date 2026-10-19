@@ -58,10 +58,15 @@ describe('LoanService approved terms snapshot', () => {
 
   describe('LoanService application validation', () => {
     const create = jest.fn(async ({ data }: { data: Record<string, unknown> }) => data);
+    let unresolvedPaymentLookup: jest.Mock;
     let service: LoanService;
 
     beforeEach(() => {
       jest.clearAllMocks();
+      unresolvedPaymentLookup = jest.fn(async () => ({
+        internalReference: 'LPP2A26FAA44E67AFED44C9E13F79547C4E',
+        status: 'PENDING',
+      }));
       const prisma = {
         user: { findUnique: jest.fn(async () => ({ isActive: true })) },
         loanProduct: { findFirst: jest.fn(async () => ({
@@ -75,6 +80,7 @@ describe('LoanService approved terms snapshot', () => {
           flatFeeKes: 10,
         })) },
         loan: { findFirst: jest.fn(async () => null) },
+        paymentTransaction: { findFirst: unresolvedPaymentLookup },
         loanApplication: {
           findUnique: jest.fn(async () => null),
           create,
@@ -125,6 +131,15 @@ describe('LoanService approved terms snapshot', () => {
           }),
         }),
       }));
+    });
+
+    it('allows another eligible application while a previous application fee remains unresolved', async () => {
+      await service.createApplication('customer-id', application(), 'loan-application-key-0001');
+      await service.createApplication('customer-id', application({ requestedPrincipalKes: 3500 }), 'loan-application-key-0002');
+
+      expect(create).toHaveBeenCalledTimes(2);
+      expect(unresolvedPaymentLookup).not.toHaveBeenCalled();
+      expect(create.mock.calls.map(([{ data }]) => data.requestedPrincipalKes)).toEqual([3000, 3500]);
     });
 
     it.each([

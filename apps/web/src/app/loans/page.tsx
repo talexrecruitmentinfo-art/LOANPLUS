@@ -1,10 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiRequest } from '@/lib/api';
 import { formatMoney } from '@/lib/currency';
-import { createPaymentStatusRefresher } from '@/lib/payment-status.mjs';
+import { loadLoanApplicationStatus } from '@/lib/payment-status.mjs';
 
 interface Product {
   id: string;
@@ -26,16 +26,6 @@ interface ProcessingFeeQuote {
   refundPolicyDisclosure: string | null;
   paymentAvailable: boolean;
   unavailableReasons: string[];
-}
-
-interface UnresolvedProcessingFee {
-  reference: string;
-  status: string;
-  amountKes: number;
-  currency: string;
-  initiationPhase: string | null;
-  createdAt: string;
-  message: string;
 }
 
 interface LoanApplication {
@@ -62,7 +52,7 @@ interface LoanApplication {
   reviewedAt: string | null;
   offerExpiresAt: string | null;
   applicationData: Record<string, unknown>;
-  processingFeePayment: null | {
+  processingFeePayments: Array<{
     id: string;
     internalReference: string;
     status: string;
@@ -73,7 +63,7 @@ interface LoanApplication {
     confirmedAt: string | null;
     receiptReference: string | null;
     initiationPhase: string | null;
-  };
+  }>;
   loan: null | {
     status: string;
     disbursedAt: string | null;
@@ -113,9 +103,13 @@ function estimateTotalRepayment(product: Product, principalKes: number): number 
 
 function statusLabel(application: LoanApplication): string {
   if (application.status === 'DRAFT' || application.status === 'PROCESSING_PAYMENT_PENDING') {
-    if (application.processingFeePayment?.failureCode === 'MPESA_RESULT_4999') return 'Processing Payment Unresolved';
-    if (application.processingFeePayment?.status === 'FAILED') return 'Processing Payment Failed';
-    if (application.processingFeePayment?.status === 'PENDING') return 'Processing Payment Pending';
+    const latest = application.processingFeePayments[0];
+    if (application.processingFeePayments.some((attempt) =>
+      attempt.status === 'PENDING' || (attempt.status === 'FAILED' && attempt.failureCode === 'MPESA_RESULT_4999'),
+    )) return 'Processing Payment Unresolved';
+    if (latest?.status === 'CONFIRMED') return 'Payment Confirmed — Awaiting Review';
+    if (latest?.status === 'FAILED') return 'Processing Payment Failed';
+    if (latest?.status === 'PENDING') return 'Processing Payment Pending';
     return application.status === 'DRAFT' ? 'Draft' : 'Processing Payment Unresolved';
   }
   if (application.status === 'SUBMITTED') return 'Submitted — Awaiting Admin Review';
@@ -127,6 +121,24 @@ function statusLabel(application: LoanApplication): string {
   }
   if (application.status === 'REJECTED') return 'Rejected';
   return application.status.replaceAll('_', ' ');
+}
+
+function isRetryableFeeFailure(attempt: LoanApplication['processingFeePayments'][number] | undefined): boolean {
+  return attempt?.status === 'FAILED' &&
+    attempt.failureCode !== 'MPESA_RESULT_4999' &&
+    /^MPESA_RESULT_[1-9]\d*$/.test(attempt.failureCode ?? '') &&
+    attempt.receiptReference === null;
+}
+
+function canPayApplicationFee(application: LoanApplication): boolean {
+  if (application.processingFeePayments.some((attempt) =>
+    attempt.status === 'PENDING' ||
+    attempt.status === 'CONFIRMED' ||
+    (attempt.status === 'FAILED' && attempt.failureCode === 'MPESA_RESULT_4999'),
+  )) return false;
+  if (application.processingFeePayments.length === 0) return application.status === 'DRAFT';
+  return application.status === 'PROCESSING_PAYMENT_PENDING' &&
+    isRetryableFeeFailure(application.processingFeePayments[0]);
 }
 
 function fieldError(name: string, value: string, product?: Product): string {
@@ -151,9 +163,8 @@ export default function LoanProductsPage() {
   const [processingFeeQuoteError, setProcessingFeeQuoteError] = useState('');
   const [processingFeeQuoteLoading, setProcessingFeeQuoteLoading] = useState(true);
   const [applications, setApplications] = useState<LoanApplication[]>([]);
-  const [unresolvedFee, setUnresolvedFee] = useState<UnresolvedProcessingFee | null>(null);
-  const [unresolvedFeeError, setUnresolvedFeeError] = useState('');
-  const [unresolvedFeeLoading, setUnresolvedFeeLoading] = useState(true);
+  const [applicationStatusError, setApplicationStatusError] = useState('');
+  const [applicationStatusLoading, setApplicationStatusLoading] = useState(true);
   const [form, setForm] = useState<ApplicationForm>(emptyForm);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [reviewing, setReviewing] = useState(false);
@@ -173,6 +184,7 @@ export default function LoanProductsPage() {
   const feeKey = useRef<string | null>(null);
   const paymentActionInFlight = useRef(false);
   const applicationsRequestSequence = useRef(0);
+  const statusRequestSequence = useRef(0);
 
   const product = products.find((item) => item.id === form.productId);
 
@@ -186,37 +198,22 @@ export default function LoanProductsPage() {
     if (requestId === applicationsRequestSequence.current) setApplications(nextApplications);
   }, []);
 
-  const paymentStatusRefresher = useMemo(() => createPaymentStatusRefresher(
-    apiRequest,
-    async (result, isCurrent) => {
-      setSignedIn(result.authenticated);
-      if (result.error) {
-        setUnresolvedFeeError(result.error);
-      } else if ('unresolvedFee' in result) {
-        setUnresolvedFee(result.unresolvedFee);
-        setError('');
-      }
-      if (!result.authenticated) {
-        setApplications([]);
-        return;
-      }
-      try {
-        await refreshApplications();
-      } catch (reason) {
-        if (isCurrent()) {
-          setError(reason instanceof Error ? reason.message : 'Application payment details could not be refreshed.');
-        }
-      }
-    },
-    () => setUnresolvedFeeLoading(false),
-  ), [refreshApplications]);
-
   const refreshPaymentStatus = useCallback(async () => {
-    setUnresolvedFeeLoading(true);
-    setUnresolvedFeeError('');
+    const requestId = ++statusRequestSequence.current;
+    setApplicationStatusLoading(true);
+    setApplicationStatusError('');
     applicationsRequestSequence.current += 1;
-    await paymentStatusRefresher.refresh();
-  }, [paymentStatusRefresher]);
+    try {
+      const result = await loadLoanApplicationStatus<LoanApplication>(apiRequest);
+      if (requestId !== statusRequestSequence.current) return;
+      setSignedIn(result.authenticated);
+      setApplications(result.error ? [] : result.applications ?? []);
+      setApplicationStatusError(result.error);
+      if (!result.error) setError('');
+    } finally {
+      if (requestId === statusRequestSequence.current) setApplicationStatusLoading(false);
+    }
+  }, []);
 
   async function refreshProducts() {
     setProductsLoading(true);
@@ -251,10 +248,10 @@ export default function LoanProductsPage() {
     void refreshProducts();
     void refreshPaymentStatus().finally(() => setLoading(false));
     return () => {
+      statusRequestSequence.current += 1;
       applicationsRequestSequence.current += 1;
-      paymentStatusRefresher.cancel();
     };
-  }, [paymentStatusRefresher, refreshApplications, refreshPaymentStatus]);
+  }, [refreshPaymentStatus]);
 
   function updateField(field: keyof ApplicationForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -313,12 +310,12 @@ export default function LoanProductsPage() {
       setError(phoneError || 'Confirm the M-Pesa number that should receive the payment prompt.');
       return;
     }
-    if (!product || !signedIn || !termsAccepted || feeUnavailableReason || unresolvedFeeLoading || unresolvedFee || unresolvedFeeError) {
+    if (!product || !signedIn || !termsAccepted || feeUnavailableReason || applicationStatusLoading || applicationStatusError) {
       setError(feeUnavailableReason || (!termsAccepted
         ? 'Accept the reviewed product terms before continuing.'
-        : unresolvedFee
-          ? 'A previous processing-fee payment is unresolved. Do not pay again.'
-          : unresolvedFeeError || (unresolvedFeeLoading ? 'Checking the status of previous processing-fee payments. Do not pay again until this check completes.' : 'Sign in to continue with this application.')));
+        : applicationStatusError || (applicationStatusLoading
+          ? 'Checking saved applications and payment statuses. Wait for the check to complete before paying.'
+          : 'Sign in to continue with this application.')));
       return;
     }
     paymentActionInFlight.current = true;
@@ -421,15 +418,10 @@ export default function LoanProductsPage() {
       </section>
       {notice && <p className="admin-inline-notice" role="status">{notice}</p>}
       {error && <p className="admin-inline-error" role="alert">{error}</p>}
-      {unresolvedFee && !unresolvedFeeError && !unresolvedFeeLoading && <div className="fee-unavailable-notice" role="alert">
-        <p><b>Payment outcome not yet verified — do not pay again.</b> LoanPlus has not established whether this original request was accepted or completed. Reference <code>{unresolvedFee.reference}</code>{unresolvedFee.initiationPhase ? ` · ${unresolvedFee.initiationPhase.replaceAll('_', ' ').toLowerCase()}` : ''}.</p>
-        <p>{unresolvedFee.message} Refresh to check the latest saved status. If it remains unresolved, <Link href="/support">contact support</Link> to reconcile this original attempt using provider evidence. Do not start a replacement payment.</p>
-        <button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading} onClick={() => void refreshPaymentStatus()}>Refresh payment status</button>
-      </div>}
-      {unresolvedFeeLoading && signedIn && <p className="fee-unavailable-notice" role="status">Checking the saved processing-fee status. Payment remains unavailable until this check completes.</p>}
-      {unresolvedFeeError && <div className="fee-unavailable-notice" role="alert">
-        <p>{unresolvedFeeError} <Link href="/login">Sign in</Link> or retry; do not pay again until payment status is verified.</p>
-        <button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading} onClick={() => void refreshPaymentStatus()}>Retry payment status</button>
+      {applicationStatusLoading && <p className="fee-unavailable-notice" role="status">Checking your saved applications and payment statuses.</p>}
+      {applicationStatusError && <div className="fee-unavailable-notice" role="alert">
+        <p>{applicationStatusError} <Link href="/login">Sign in</Link> or retry. Payment initiation remains disabled until this check succeeds.</p>
+        <button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading} onClick={() => void refreshPaymentStatus()}>Retry status check</button>
       </div>}
       {!signedIn && !loading && <p className="product-list"><Link className="button" href="/login">Sign in to apply</Link></p>}
       {signedIn && product && (
@@ -513,7 +505,7 @@ export default function LoanProductsPage() {
                   }
                   setReviewing(false);
                 }}>{resumingApplicationId ? 'Back to applications' : 'Edit details'}</button>
-                <button className="button" type="button" disabled={busyId !== null || unresolvedFeeLoading || !termsAccepted || !mpesaPhoneConfirmed || Boolean(fieldError('mpesaPhoneNumber', mpesaPhoneNumber)) || Boolean(feeUnavailableReason) || Boolean(unresolvedFee) || Boolean(unresolvedFeeError)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : unresolvedFee || unresolvedFeeError ? 'Payment unresolved — do not pay again' : unresolvedFeeLoading ? 'Checking payment status…' : `Pay ${feeQuoteAmount}`}</button>
+                <button className="button" type="button" disabled={busyId !== null || applicationStatusLoading || Boolean(applicationStatusError) || !termsAccepted || !mpesaPhoneConfirmed || Boolean(fieldError('mpesaPhoneNumber', mpesaPhoneNumber)) || Boolean(feeUnavailableReason)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : applicationStatusError ? 'Retry status check before payment' : applicationStatusLoading ? 'Checking payment status…' : `Pay ${feeQuoteAmount}`}</button>
               </div>
             </div>
           )}
@@ -539,31 +531,43 @@ export default function LoanProductsPage() {
         ))}
       </section>
       {signedIn && <section className="customer-ledger-list">
-        <div className="customer-ledger-heading"><h2>My loan applications</h2><div><span>{applications.length}</span><button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading} onClick={() => void refreshPaymentStatus()}>Refresh status</button></div></div>
+        <div className="customer-ledger-heading"><h2>My loan applications</h2><div><span>{applications.length}</span><button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading} onClick={() => void refreshPaymentStatus()}>Refresh status</button></div></div>
         {applications.length === 0 ? <p>No applications yet. Select a loan product and complete the application above.</p> : applications.map((application) => {
           const terms = application.approvedTermsSnapshot;
           const guarantor = (key: string) => typeof application.applicationData[key] === 'string' ? application.applicationData[key] as string : '—';
-          const fee = application.processingFeePayment;
+          const feeAttempts = application.processingFeePayments;
+          const canPayFee = canPayApplicationFee(application);
           return (
             <article className="customer-loan-application" key={application.id}>
               <div><b>{terms?.productName ?? application.product.name}</b><small>Reference {application.id} · Requested {formatMoney(application.requestedPrincipalKes)}</small></div>
               <span className="status-label">{statusLabel(application)}</span>
-              {application.status === 'DRAFT' && !fee && <div className="draft-application-details">
+              {canPayFee && <div className="draft-application-details">
                 <p>Draft saved. Review the application details and continue to the processing-fee payment step.</p>
+                {feeAttempts.length > 0 && <p>The previous attempt was conclusively declined. A new attempt will be recorded separately; the old payment history will remain available.</p>}
                 <small>Guarantor 1: {guarantor('guarantorOneName')} · {guarantor('guarantorOnePhone')}</small>
                 <small>Guarantor 2: {guarantor('guarantorTwoName')} · {guarantor('guarantorTwoPhone')}</small>
                 <p>Loan Processing Fee — {feeQuoteAmount}. Paying it does not guarantee approval or disbursement and does not add funds to your wallet.</p>
                 {feeUnavailableReason && <p className="fee-unavailable-notice" role="status">{feeUnavailableReason}</p>}
                 {processingFeeQuoteError && <button className="quiet-button" type="button" disabled={processingFeeQuoteLoading} onClick={() => void refreshProcessingFeeQuote()}>Retry fee quote</button>}
-                <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => resumeProcessingFee(application)}>Review fee requirement</button>
+                <button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading || Boolean(applicationStatusError)} onClick={() => resumeProcessingFee(application)}>{feeAttempts.length > 0 ? 'Review fee retry' : 'Review fee requirement'}</button>
               </div>}
-              {fee && <dl>
-                <div><dt>Loan Processing Fee — {formatMoney(fee.amountKes)}</dt><dd>{fee.status === 'CONFIRMED' ? 'Payment confirmed — application submitted for review' : fee.status === 'PENDING' ? fee.failureCode ? 'Payment requires review — do not pay again' : fee.initiationPhase === 'PROVIDER_ACCEPTED' ? 'Awaiting prompt — check the M-Pesa number you confirmed' : 'Payment pending — confirmation in progress' : fee.failureCode === 'MPESA_RESULT_4999' ? 'Payment requires review — do not pay again' : fee.status === 'FAILED' || fee.status === 'CANCELLED' || fee.status === 'EXPIRED' ? 'Payment failed — contact support for next steps' : fee.status.replaceAll('_', ' ')}</dd></div>
-                <div><dt>Payment reference</dt><dd>{fee.internalReference}</dd></div>
-                {fee.confirmedAt && <div><dt>Confirmed</dt><dd>{new Date(fee.confirmedAt).toLocaleString('en-KE')}</dd></div>}
-                {fee.receiptReference && <div><dt>M-Pesa receipt</dt><dd>{fee.receiptReference}</dd></div>}
-                {fee.status === 'PENDING' && <div><dt>Payment outcome</dt><dd>Refresh this page to see the latest verified status. Do not make another payment while this request is pending or unresolved.</dd></div>}
-                {(fee.status === 'FAILED' || fee.status === 'CANCELLED' || fee.status === 'EXPIRED') && fee.failureCode !== 'MPESA_RESULT_4999' && <div><dt>Next step</dt><dd>Do not retry this application’s fee. <Link href="/support">Contact support</Link> to continue under the verified payment outcome.</dd></div>}
+              {feeAttempts.length > 0 && <dl>
+                {feeAttempts.map((fee) => <div key={fee.id}>
+                  <dt>Loan Processing Fee — {formatMoney(fee.amountKes)} · {fee.status === 'CONFIRMED'
+                    ? 'Payment confirmed — application submitted for review'
+                    : fee.status === 'PENDING'
+                      ? 'Payment outcome pending verification — do not pay again'
+                      : fee.status === 'FAILED' && fee.failureCode === 'MPESA_RESULT_4999'
+                        ? 'Payment requires reconciliation — do not pay again'
+                        : fee.status === 'FAILED'
+                          ? 'Payment failed'
+                          : fee.status.replaceAll('_', ' ')}</dt>
+                  <dd>Reference {fee.internalReference}</dd>
+                  {fee.confirmedAt && <dd>Confirmed {new Date(fee.confirmedAt).toLocaleString('en-KE')}</dd>}
+                  {fee.receiptReference && <dd>M-Pesa receipt {fee.receiptReference}</dd>}
+                  {(fee.status === 'PENDING' || fee.failureCode === 'MPESA_RESULT_4999') && <dd>Refresh the saved status or <Link href="/support">contact support</Link> for reconciliation. Do not create another attempt for this application while its outcome is uncertain.</dd>}
+                  {fee.status === 'FAILED' && !isRetryableFeeFailure(fee) && <dd>Do not retry this fee without confirmation. <Link href="/support">Contact support</Link> for the verified next step.</dd>}
+                </div>)}
               </dl>}
               {application.submittedAt && <small>Submitted {new Date(application.submittedAt).toLocaleString('en-KE')}</small>}
               {application.reviewedAt && <small>Decision recorded {new Date(application.reviewedAt).toLocaleString('en-KE')}</small>}

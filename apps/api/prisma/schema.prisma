@@ -315,7 +315,7 @@ model LoanApplication {
   product                LoanProduct           @relation(fields: [productId], references: [id], onDelete: Restrict)
   reviewer               SuperadminUser?       @relation(fields: [reviewerId], references: [id], onDelete: Restrict)
   loan                   Loan?
-  processingFeePayment   PaymentTransaction?
+  processingFeePayments  PaymentTransaction[]
 
   @@index([userId, submittedAt])
   @@index([status, submittedAt])
@@ -370,7 +370,7 @@ model PaymentTransaction {
   requestHash            String?                        @db.VarChar(64)
   userId                 String
   type                   PaymentType
-  loanApplicationId      String?                        @unique
+  loanApplicationId      String?
   amountKes              Int
   currency               String                         @default("KES") @db.Char(3)
   status                 PaymentStatus                  @default(PENDING)
@@ -392,6 +392,7 @@ model PaymentTransaction {
   repayments             Repayment[]
   withdrawals            WithdrawalRequest[]
 
+  @@index([loanApplicationId, createdAt])
   @@index([userId, createdAt])
   @@index([status, createdAt])
   @@map("payment_transactions")

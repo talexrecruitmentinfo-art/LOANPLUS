@@ -336,7 +336,7 @@ describe('M-Pesa payment callback reconciliation', () => {
       });
     });
 
-    it('creates one KSh 50 application-linked payment without activating or crediting the wallet', async () => {
+    it('allows independent application fees while preserving unresolved attempts, preventing duplicates, and keeping fees out of the wallet', async () => {
       process.env.NODE_ENV = 'test';
       process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
       process.env.MPESA_CALLBACK_URL = 'https://api.example.com/api/v1/payments/mpesa/callback';
@@ -350,9 +350,11 @@ describe('M-Pesa payment callback reconciliation', () => {
         type: PaymentType;
         loanApplicationId: string;
         requestHash: string;
-        status: 'PENDING' | 'CONFIRMED';
+        status: 'PENDING' | 'CONFIRMED' | 'FAILED';
         amountKes: number;
         currency: string;
+        failureCode: string | null;
+        receiptReference: string | null;
       }>();
       let createdPaymentCount = 0;
       const create = jest.fn(async ({ data }: { data: {
@@ -370,6 +372,8 @@ describe('M-Pesa payment callback reconciliation', () => {
           internalReference: `LPP${String(createdPaymentCount).padStart(12, '0')}`,
           status: 'PENDING' as const,
           currency: 'KES',
+          failureCode: null,
+          receiptReference: null,
         };
         createdPayments.set(data.idempotencyKey, payment);
         return { id: payment.id, internalReference: payment.internalReference };
@@ -403,8 +407,21 @@ describe('M-Pesa payment callback reconciliation', () => {
                 requestedPrincipalKes: 3000,
               },
             },
-            status: 'DRAFT',
-            processingFeePayment: null,
+            status: [...createdPayments.values()].some((payment) => payment.loanApplicationId === where.id)
+              ? 'PROCESSING_PAYMENT_PENDING'
+              : 'DRAFT',
+            processingFeePayments: [...createdPayments.values()]
+              .filter((payment) => payment.loanApplicationId === where.id)
+              .map((payment) => ({
+                id: payment.id,
+                userId: payment.userId,
+                internalReference: payment.internalReference,
+                status: payment.status,
+                amountKes: payment.amountKes,
+                currency: payment.currency,
+                failureCode: payment.failureCode,
+                receiptReference: payment.receiptReference,
+              })),
           })),
         },
         systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
@@ -416,7 +433,12 @@ describe('M-Pesa payment callback reconciliation', () => {
         })) },
         $transaction: jest.fn(async (callback: (tx: never) => Promise<unknown>) => callback({
           loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
-          paymentTransaction: { findFirst: jest.fn(async () => null), create, updateMany: updatePayment },
+          paymentTransaction: {
+            findMany: jest.fn(async ({ where }: { where: { loanApplicationId: string } }) =>
+              [...createdPayments.values()].filter((payment) => payment.loanApplicationId === where.loanApplicationId)),
+            create,
+            updateMany: updatePayment,
+          },
           activationPaymentRequest: { updateMany: updateRequest },
           idempotencyRecord: { create: jest.fn(async () => ({})) },
         } as never)),
@@ -465,12 +487,7 @@ describe('M-Pesa payment callback reconciliation', () => {
           }) },
         }),
       }));
-      expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-        where: expect.objectContaining({
-          userId: 'user-id',
-          type: PaymentType.LOAN_PROCESSING_FEE,
-        }),
-      }));
+      expect(prisma.paymentTransaction.findFirst).not.toHaveBeenCalled();
       expect(initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
         amountKes: 50,
         phoneNumber: '254112345678',
@@ -506,7 +523,6 @@ describe('M-Pesa payment callback reconciliation', () => {
       expect(postWithinTransaction).not.toHaveBeenCalled();
 
       const firstPayment = [...createdPayments.values()][0];
-      firstPayment.status = 'CONFIRMED';
       const secondResponse = await paymentService.initiateLoanProcessingFee(
         'user-id',
         Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId: 'application-id-2', reviewConfirmed: true, mpesaPhoneNumber: '+254712345678' }),
@@ -521,18 +537,35 @@ describe('M-Pesa payment callback reconciliation', () => {
         status: 'PENDING',
       });
       expect(firstPayment.loanApplicationId).toBe('application-id');
+      expect(firstPayment.status).toBe('PENDING');
       expect(createdPaymentCount).toBe(2);
       expect(initiateStkPush).toHaveBeenCalledTimes(2);
-      await expect(paymentService.initiateLoanProcessingFee(
+      const duplicateApplicationResponse = await paymentService.initiateLoanProcessingFee(
         'user-id',
         Object.assign(new InitiateLoanProcessingFeeDto(), {
           applicationId: 'application-id',
           reviewConfirmed: true,
-          mpesaPhoneNumber: '+254722345678',
+          mpesaPhoneNumber: '0112 345 678',
         }),
-        'loan-fee-idempotency-0001',
-      )).rejects.toBeInstanceOf(ConflictException);
+        'loan-fee-idempotency-0003',
+      );
+      expect(duplicateApplicationResponse).toMatchObject({
+        reference: firstResponse.reference,
+        status: 'PENDING',
+      });
       expect(initiateStkPush).toHaveBeenCalledTimes(2);
+
+      firstPayment.status = 'FAILED';
+      firstPayment.failureCode = 'MPESA_RESULT_1032';
+      const retryResponse = await paymentService.initiateLoanProcessingFee(
+        'user-id',
+        Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId: 'application-id', reviewConfirmed: true, mpesaPhoneNumber: '0112 345 678' }),
+        'loan-fee-idempotency-0004',
+      );
+      expect(retryResponse).toMatchObject({ status: 'PENDING', amountKes: 50 });
+      expect(createdPaymentCount).toBe(3);
+      expect([...createdPayments.values()].filter((payment) => payment.loanApplicationId === 'application-id')).toHaveLength(2);
+      expect(initiateStkPush).toHaveBeenCalledTimes(3);
 
       const replayedFirstResponse = await paymentService.initiateLoanProcessingFee(
         'user-id',
@@ -541,10 +574,10 @@ describe('M-Pesa payment callback reconciliation', () => {
       );
       expect(replayedFirstResponse).toMatchObject({
         reference: firstResponse.reference,
-        status: 'CONFIRMED',
+        status: 'FAILED',
       });
-      expect(createdPaymentCount).toBe(2);
-      expect(initiateStkPush).toHaveBeenCalledTimes(2);
+      expect(createdPaymentCount).toBe(3);
+      expect(initiateStkPush).toHaveBeenCalledTimes(3);
     });
 
     it('persists the uncertain STK request phase without retrying when initiation times out', async () => {
@@ -579,7 +612,7 @@ describe('M-Pesa payment callback reconciliation', () => {
               productTermsSnapshot: { productId: 'product-id', termsVersion: 'product-v1', requestedPrincipalKes: 3000 },
             },
             status: 'DRAFT',
-            processingFeePayment: null,
+            processingFeePayments: [],
           })),
         },
         systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
@@ -591,7 +624,7 @@ describe('M-Pesa payment callback reconciliation', () => {
         })) },
         $transaction: jest.fn(async (callback: (tx: never) => Promise<unknown>) => callback({
           loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
-          paymentTransaction: { findFirst: jest.fn(async () => null), create: paymentCreate, updateMany: updatePayment },
+          paymentTransaction: { findMany: jest.fn(async () => []), create: paymentCreate, updateMany: updatePayment },
           activationPaymentRequest: { updateMany: bindProviderIds },
           idempotencyRecord: { create: jest.fn(async () => ({})) },
         } as never)),
@@ -626,7 +659,7 @@ describe('M-Pesa payment callback reconciliation', () => {
       ]);
       expect(initiateStkPush).toHaveBeenCalledTimes(1);
       expect(bindProviderIds).not.toHaveBeenCalled();
-      expect(prisma.paymentTransaction.findFirst).toHaveBeenCalledTimes(1);
+      expect(prisma.paymentTransaction.findFirst).not.toHaveBeenCalled();
     });
 
     it('keeps an accepted STK request unresolved and evidence-recoverable when provider identifiers cannot be persisted', async () => {
@@ -647,7 +680,7 @@ describe('M-Pesa payment callback reconciliation', () => {
         .mockRejectedValueOnce(new ServiceUnavailableException('sensitive marker failure detail'));
       const transactionClient = {
         loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
-        paymentTransaction: { findFirst: jest.fn(async () => null), create: paymentCreate },
+        paymentTransaction: { findMany: jest.fn(async () => []), create: paymentCreate },
         activationPaymentRequest: { updateMany: jest.fn(async () => ({ count: 1 })) },
         idempotencyRecord: { create: jest.fn(async () => ({})) },
       };
@@ -670,7 +703,7 @@ describe('M-Pesa payment callback reconciliation', () => {
               productTermsSnapshot: { productId: 'product-id', termsVersion: 'terms-v1', requestedPrincipalKes: 3000 },
             },
             status: 'DRAFT',
-            processingFeePayment: null,
+            processingFeePayments: [],
           })),
         },
         systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
@@ -767,7 +800,7 @@ describe('M-Pesa payment callback reconciliation', () => {
               productTermsSnapshot: { productId: 'product-id', termsVersion: 'terms-v1', requestedPrincipalKes: 3000 },
             },
             status: 'DRAFT',
-            processingFeePayment: null,
+            processingFeePayments: [],
           })),
         },
         systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
@@ -779,7 +812,7 @@ describe('M-Pesa payment callback reconciliation', () => {
         })) },
         $transaction: jest.fn(async (callback: (tx: never) => Promise<unknown>) => callback({
           loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
-          paymentTransaction: { findFirst: jest.fn(async () => null), create: paymentCreate },
+          paymentTransaction: { findMany: jest.fn(async () => []), create: paymentCreate },
           idempotencyRecord: { create: jest.fn(async () => ({})) },
         } as never)),
       } as unknown as PrismaService;
@@ -817,47 +850,6 @@ describe('M-Pesa payment callback reconciliation', () => {
       } finally {
         warning.mockRestore();
       }
-    });
-
-    it('blocks a second fee payment while another application fee remains unresolved', async () => {
-      process.env.LOAN_PROCESSING_FEE_POLICY_APPROVED = 'true';
-      process.env.LOAN_PROCESSING_FEE_POLICY_VERSION = 'approved-v1';
-      process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE = 'Refunds follow the approved loan processing-fee policy.';
-      const prisma = {
-        paymentTransaction: {
-          findUnique: jest.fn(async () => null),
-          findFirst: jest.fn(async () => ({ internalReference: 'LPP2A26FAA44E67AFED44C9E13F79547C4E' })),
-        },
-        user: { findUnique: jest.fn(async () => ({ phone: '+254712345678', isActive: true })) },
-        loanApplication: {
-          findFirst: jest.fn(async () => ({
-            id: 'application-id',
-            productId: 'product-id',
-            requestedPrincipalKes: 3000,
-            applicationData: {
-              termsAccepted: true,
-              termsAcceptedAt: '2026-10-18T20:00:00.000Z',
-              productTermsSnapshot: { productId: 'product-id', termsVersion: 'terms-v1', requestedPrincipalKes: 3000 },
-            },
-            status: 'DRAFT',
-            processingFeePayment: null,
-          })),
-        },
-        systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
-      } as unknown as PrismaService;
-      const initiateStkPush = jest.fn();
-      const paymentService = new PaymentService(
-        prisma,
-        { assertConfiguredForPayments: jest.fn(), initiateStkPush } as unknown as MpesaService,
-        {} as LedgerService,
-      );
-
-      await expect(paymentService.initiateLoanProcessingFee(
-        'user-id',
-        Object.assign(new InitiateLoanProcessingFeeDto(), { applicationId: 'application-id', reviewConfirmed: true, mpesaPhoneNumber: '+254712345678' }),
-        'loan-fee-idempotency-0002',
-      )).rejects.toThrow('LPP2A26FAA44E67AFED44C9E13F79547C4E is unresolved');
-      expect(initiateStkPush).not.toHaveBeenCalled();
     });
 
     it('does not begin fee payment without an explicit reviewed-application confirmation', async () => {

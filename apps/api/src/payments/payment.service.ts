@@ -74,6 +74,17 @@ function hasAcceptedProductTerms(applicationData: Prisma.JsonValue, productId: s
     snapshot.termsVersion.length > 0;
 }
 
+function isRetryableFeeAttempt(attempt: {
+  status: PaymentStatus;
+  failureCode: string | null;
+  receiptReference: string | null;
+} | undefined): boolean {
+  return attempt?.status === PaymentStatus.FAILED &&
+    attempt.receiptReference === null &&
+    /^MPESA_RESULT_[1-9]\d*$/.test(attempt.failureCode ?? '') &&
+    attempt.failureCode !== 'MPESA_RESULT_4999';
+}
+
 @Injectable()
 export class PaymentService {
   constructor(
@@ -180,7 +191,20 @@ export class PaymentService {
           requestedPrincipalKes: true,
           applicationData: true,
           status: true,
-          processingFeePayment: { select: { id: true, internalReference: true, status: true, amountKes: true, currency: true } },
+          processingFeePayments: {
+            where: { type: PaymentType.LOAN_PROCESSING_FEE },
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              userId: true,
+              internalReference: true,
+              status: true,
+              amountKes: true,
+              currency: true,
+              failureCode: true,
+              receiptReference: true,
+            },
+          },
         },
       }),
       this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
@@ -190,31 +214,31 @@ export class PaymentService {
     if (!hasAcceptedProductTerms(application.applicationData, application.productId, application.requestedPrincipalKes)) {
       throw new ConflictException('This application has no recorded acceptance of its product terms. Review and submit a new application before paying.');
     }
-    if (application.processingFeePayment) {
+    const attempts = application.processingFeePayments;
+    if (attempts.some((attempt) => attempt.userId !== userId)) {
+      throw new ConflictException('This application has a fee-payment record with an invalid customer association. Contact support.');
+    }
+    const latestAttempt = attempts[0];
+    const unresolvedAttempt = attempts.find((attempt) =>
+      attempt.status === PaymentStatus.PENDING ||
+      (attempt.status === PaymentStatus.FAILED &&
+        attempt.failureCode === 'MPESA_RESULT_4999' &&
+        attempt.receiptReference === null),
+    );
+    const confirmedAttempt = attempts.find((attempt) => attempt.status === PaymentStatus.CONFIRMED);
+    const retryableFailure = isRetryableFeeAttempt(latestAttempt);
+    if (unresolvedAttempt || confirmedAttempt || (latestAttempt && !retryableFailure)) {
+      const existingAttempt = unresolvedAttempt ?? confirmedAttempt ?? latestAttempt;
       return {
-        reference: application.processingFeePayment.internalReference,
-        status: application.processingFeePayment.status,
-        amountKes: application.processingFeePayment.amountKes,
-        currency: application.processingFeePayment.currency,
+        reference: existingAttempt.internalReference,
+        status: existingAttempt.status,
+        amountKes: existingAttempt.amountKes,
+        currency: existingAttempt.currency,
         message: 'This application already has a processing-fee payment attempt. Its outcome must be resolved before another payment is considered.',
       };
     }
-    if (application.status !== 'DRAFT') {
+    if (application.status !== 'DRAFT' && !(application.status === 'PROCESSING_PAYMENT_PENDING' && retryableFailure)) {
       throw new ConflictException('Only an unpaid draft application can begin processing-fee payment.');
-    }
-    const unresolvedPayment = await this.prisma.paymentTransaction.findFirst({
-      where: {
-        userId,
-        type: PaymentType.LOAN_PROCESSING_FEE,
-        OR: [
-          { status: PaymentStatus.PENDING },
-          { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
-        ],
-      },
-      select: { internalReference: true },
-    });
-    if (unresolvedPayment) {
-      throw new ConflictException(`Processing-fee payment ${unresolvedPayment.internalReference} is unresolved. Do not start another payment until it is reconciled.`);
     }
     const revenueCode = typeof revenueSetting?.value === 'string' ? revenueSetting.value : null;
     if (!revenueCode) throw new ServiceUnavailableException('Loan processing-fee accounting is not configured.');
@@ -234,22 +258,39 @@ export class PaymentService {
     let payment: { id: string; internalReference: string };
     try {
       payment = await this.prisma.$transaction(async (tx) => {
-        const unresolved = await tx.paymentTransaction.findFirst({
+        const currentAttempts = await tx.paymentTransaction.findMany({
           where: {
-            userId,
+            loanApplicationId: application.id,
             type: PaymentType.LOAN_PROCESSING_FEE,
-            OR: [
-              { status: PaymentStatus.PENDING },
-              { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
-            ],
           },
-          select: { internalReference: true },
+          orderBy: { createdAt: 'desc' },
+          select: {
+            userId: true,
+            internalReference: true,
+            status: true,
+            failureCode: true,
+            amountKes: true,
+            currency: true,
+            receiptReference: true,
+          },
         });
-        if (unresolved) {
-          throw new ConflictException(`Processing-fee payment ${unresolved.internalReference} is unresolved. Do not start another payment until it is reconciled.`);
+        if (currentAttempts.some((attempt) => attempt.userId !== userId)) {
+          throw new ConflictException('This application has a fee-payment record with an invalid customer association. Contact support.');
+        }
+        const activeAttempt = currentAttempts.find((attempt) =>
+          attempt.status === PaymentStatus.PENDING ||
+          attempt.status === PaymentStatus.CONFIRMED ||
+          (attempt.status === PaymentStatus.FAILED &&
+            attempt.failureCode === 'MPESA_RESULT_4999' &&
+            attempt.receiptReference === null),
+        );
+        const latest = currentAttempts[0];
+        const mayRetry = isRetryableFeeAttempt(latest);
+        if (activeAttempt || (latest && !mayRetry)) {
+          throw new ConflictException('This application already has a payment attempt that cannot safely be retried.');
         }
         const claimed = await tx.loanApplication.updateMany({
-          where: { id: application.id, userId, status: 'DRAFT' },
+          where: { id: application.id, userId, status: { in: ['DRAFT', 'PROCESSING_PAYMENT_PENDING'] } },
           data: { status: 'PROCESSING_PAYMENT_PENDING' },
         });
         if (claimed.count !== 1) throw new ConflictException('This application already has a payment attempt or has been submitted.');
@@ -296,30 +337,24 @@ export class PaymentService {
       if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2002' || error.code === 'P2034')) {
         const current = await this.prisma.loanApplication.findFirst({
           where: { id: dto.applicationId, userId },
-          select: { processingFeePayment: { select: { internalReference: true, status: true, amountKes: true, currency: true } } },
+          select: {
+            processingFeePayments: {
+              where: { type: PaymentType.LOAN_PROCESSING_FEE },
+              orderBy: { createdAt: 'desc' },
+              take: 1,
+              select: { internalReference: true, status: true, amountKes: true, currency: true },
+            },
+          },
         });
-        if (current?.processingFeePayment) {
+        const currentAttempt = current?.processingFeePayments[0];
+        if (currentAttempt) {
           return {
-            reference: current.processingFeePayment.internalReference,
-            status: current.processingFeePayment.status,
-            amountKes: current.processingFeePayment.amountKes,
-            currency: current.processingFeePayment.currency,
+            reference: currentAttempt.internalReference,
+            status: currentAttempt.status,
+            amountKes: currentAttempt.amountKes,
+            currency: currentAttempt.currency,
             message: 'This application already has a processing-fee payment attempt. Its outcome must be resolved before another payment is considered.',
           };
-        }
-        const unresolved = await this.prisma.paymentTransaction.findFirst({
-          where: {
-            userId,
-            type: PaymentType.LOAN_PROCESSING_FEE,
-            OR: [
-              { status: PaymentStatus.PENDING },
-              { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999' },
-            ],
-          },
-          select: { internalReference: true },
-        });
-        if (unresolved) {
-          throw new ConflictException(`Processing-fee payment ${unresolved.internalReference} is unresolved. Do not start another payment until it is reconciled.`);
         }
       }
       throw error;
@@ -1832,7 +1867,7 @@ export class PaymentService {
               id: request.loanApplicationId,
               userId: payment.userId,
               status: 'PROCESSING_PAYMENT_PENDING',
-              processingFeePayment: { is: { id: payment.id, userId: payment.userId, type: PaymentType.LOAN_PROCESSING_FEE } },
+              processingFeePayments: { some: { id: payment.id, userId: payment.userId, type: PaymentType.LOAN_PROCESSING_FEE } },
             },
             select: { id: true },
           });
