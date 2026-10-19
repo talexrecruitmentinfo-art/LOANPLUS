@@ -487,15 +487,24 @@ export class AuthService {
     return { token, principal: { id: challenge.superadmin.id, role: 'SUPERADMIN', email: challenge.superadmin.email } };
   }
 
-  async logoutSuperadmin(sessionHash: string, adminId: string, ipAddress?: string): Promise<void> {
+  async logoutSuperadmin(sessionHash: string, ipAddress?: string): Promise<void> {
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
-      await tx.superadminSession.updateMany({ where: { tokenHash: sessionHash, revokedAt: null }, data: { revokedAt: now } });
+      const session = await tx.superadminSession.findUnique({
+        where: { tokenHash: sessionHash },
+        select: { superadminId: true },
+      });
+      if (!session) return;
+      const revoked = await tx.superadminSession.updateMany({
+        where: { tokenHash: sessionHash, revokedAt: null },
+        data: { revokedAt: now },
+      });
+      if (revoked.count !== 1) return;
       await tx.adminAuditLog.create({
-        data: { superadminId: adminId, action: 'LOGOUT', outcome: 'SUCCESS', ipAddress },
+        data: { superadminId: session.superadminId, action: 'LOGOUT', outcome: 'SUCCESS', ipAddress },
       });
       await tx.authAuditLog.create({
-        data: { actorType: 'SUPERADMIN', actorId: adminId, action: 'LOGOUT', outcome: 'SUCCESS', ipAddress },
+        data: { actorType: 'SUPERADMIN', actorId: session.superadminId, action: 'LOGOUT', outcome: 'SUCCESS', ipAddress },
       });
     });
   }

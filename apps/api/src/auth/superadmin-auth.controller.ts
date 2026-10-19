@@ -5,6 +5,7 @@ import { AuthService } from './auth.service';
 import { SuperadminOtpDto, SuperadminPasswordDto } from './auth.dto';
 import { SuperadminSessionGuard } from './session.guard';
 import type { AuthenticatedRequest } from './request.types';
+import { hashToken } from './security.util';
 
 const ADMIN_COOKIE = 'lp_admin_session';
 const ADMIN_SESSION_MS = 8 * 60 * 60 * 1000;
@@ -62,20 +63,19 @@ export class SuperadminAuthController {
   }
 
   @Post('logout')
-  @UseGuards(SuperadminSessionGuard)
   async logout(
     @Req() request: AuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
   ) {
     assertSameOrigin(request);
-    const principal = request.principal!;
-    await this.auth.logoutSuperadmin(principal.sessionHash, principal.id, request.ip);
     response.clearCookie(ADMIN_COOKIE, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict',
       path: '/',
     });
+    const token = request.cookies?.[ADMIN_COOKIE] as string | undefined;
+    if (token) await this.auth.logoutSuperadmin(hashToken(token), request.ip);
     return { data: { loggedOut: true } };
   }
 }

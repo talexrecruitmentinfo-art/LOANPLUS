@@ -35,7 +35,7 @@ describe('Superadmin email OTP authentication flow', () => {
   };
   const adminEmail = 'operator@example.invalid';
   let challenges: TestChallenge[];
-  let sessions: Array<{ tokenHash: string; expiresAt: Date }>;
+  let sessions: Array<{ tokenHash: string; expiresAt: Date; superadminId: string; revokedAt: Date | null }>;
   let deliveredCodes: string[];
   let sendOtp: jest.Mock;
   let auth: AuthService;
@@ -123,9 +123,24 @@ describe('Superadmin email OTP authentication flow', () => {
         }),
       },
       superadminSession: {
-        create: jest.fn(async (args: { data: { tokenHash: string; expiresAt: Date } }) => {
-          sessions.push(args.data);
+        create: jest.fn(async (args: { data: { tokenHash: string; expiresAt: Date; superadminId: string } }) => {
+          const session = { ...args.data, revokedAt: null };
+          sessions.push(session);
           return args.data;
+        }),
+        findUnique: jest.fn(async ({ where }: { where: { tokenHash: string } }) => {
+          const session = sessions.find(({ tokenHash }) => tokenHash === where.tokenHash);
+          return session ? { superadminId: session.superadminId } : null;
+        }),
+        updateMany: jest.fn(async ({ where, data }: {
+          where: { tokenHash: string; revokedAt: null };
+          data: { revokedAt: Date };
+        }) => {
+          const session = sessions.find(({ tokenHash, revokedAt }) =>
+            tokenHash === where.tokenHash && revokedAt === null);
+          if (!session) return { count: 0 };
+          session.revokedAt = data.revokedAt;
+          return { count: 1 };
         }),
       },
       adminAuditLog: { create: jest.fn(async () => ({})) },
@@ -144,8 +159,13 @@ describe('Superadmin email OTP authentication flow', () => {
         }),
       },
       superadminSession: {
-        findFirst: jest.fn(async ({ where }: { where: { tokenHash: string } }) => {
-          const session = sessions.find(({ tokenHash }) => tokenHash === where.tokenHash);
+        findFirst: jest.fn(async ({ where }: { where: {
+          tokenHash: string;
+          revokedAt: null;
+          expiresAt: { gt: Date };
+        } }) => {
+          const session = sessions.find(({ tokenHash, revokedAt, expiresAt }) =>
+            tokenHash === where.tokenHash && revokedAt === null && expiresAt > where.expiresAt.gt);
           return session ? { ...session, superadmin: admin } : null;
         }),
       },
@@ -292,6 +312,30 @@ describe('Superadmin email OTP authentication flow', () => {
     expect(controller.getCurrentSuperadmin(authenticatedRequest)).toMatchObject({
       data: { id: admin.id, role: 'SUPERADMIN' },
     });
+  });
+
+  it('clears and revokes an expired administrator session without allowing it to access protected routes', async () => {
+    const token = 'expired-admin-session-token';
+    sessions.push({
+      tokenHash: hashToken(token),
+      expiresAt: new Date(Date.now() - 1),
+      superadminId: admin.id,
+      revokedAt: null,
+    });
+    const expiredRequest = request();
+    expiredRequest.cookies = { lp_admin_session: token };
+    const guard = new SuperadminSessionGuard(prisma);
+    const context = {
+      switchToHttp: () => ({ getRequest: () => expiredRequest }),
+    } as ExecutionContext;
+    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(UnauthorizedException);
+
+    const clearCookie = jest.fn();
+    const result = await controller.logout(expiredRequest, { clearCookie } as unknown as ExpressResponse);
+
+    expect(result).toEqual({ data: { loggedOut: true } });
+    expect(clearCookie).toHaveBeenCalledWith('lp_admin_session', expect.objectContaining({ path: '/' }));
+    expect(sessions[0].revokedAt).toBeInstanceOf(Date);
   });
 
   it('limits both OTP endpoints to five requests per minute', () => {
