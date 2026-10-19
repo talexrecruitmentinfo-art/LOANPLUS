@@ -102,6 +102,7 @@ describe('M-Pesa payment callback reconciliation', () => {
       },
       paymentTransaction: {
         id: 'payment-id',
+        internalReference: 'LPP_TEST_CALLBACK',
         userId: 'user-id',
         type: PaymentType.ACTIVATION,
         loanApplicationId: null,
@@ -248,11 +249,28 @@ describe('M-Pesa payment callback reconciliation', () => {
   });
 
   it('leaves a callback pending when the STK query fails', async () => {
+    const errorLog = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     queryStkStatus.mockRejectedValueOnce(new ServiceUnavailableException('Provider query failed.'));
-    await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
-      .rejects.toBeInstanceOf(ServiceUnavailableException);
-    expect(paymentStatus).toBe('PENDING');
-    expect(postLedger).not.toHaveBeenCalled();
+    try {
+      await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
+        .rejects.toBeInstanceOf(ServiceUnavailableException);
+      expect(paymentStatus).toBe('PENDING');
+      expect(postLedger).not.toHaveBeenCalled();
+      expect(errorLog).toHaveBeenCalledWith(JSON.stringify({
+        event: 'mpesa_callback_processing_failed',
+        paymentId: 'payment-id',
+        paymentReference: 'LPP_TEST_CALLBACK',
+        step: 'PROVIDER_STATUS_QUERY',
+        errorType: 'ServiceUnavailableException',
+        errorCode: 'HTTP_503',
+      }));
+      const loggedEvent = JSON.parse(errorLog.mock.calls[0][0]) as Record<string, unknown>;
+      expect(loggedEvent).not.toHaveProperty('callbackToken');
+      expect(loggedEvent).not.toHaveProperty('payload');
+      expect(errorLog.mock.calls[0][0]).not.toContain('+254712345678');
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it('acknowledges a concurrent duplicate only when the matching callback event exists', async () => {

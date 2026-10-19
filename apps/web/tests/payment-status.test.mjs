@@ -98,6 +98,38 @@ test('status check can be retried after an error and return the saved unresolved
   assert.match(loanPage, /Retry status check/);
 });
 
+test('a refreshed confirmed payment replaces the unresolved status without creating another payment', async () => {
+  let currentApplication = unresolvedApplication;
+  const requests = [];
+  const apiRequest = async (path, options) => {
+    requests.push([path, options]);
+    if (path === '/auth/me') return { id: 'customer' };
+    return [currentApplication];
+  };
+
+  const pending = await loadLoanApplicationStatus(apiRequest);
+  currentApplication = {
+    ...unresolvedApplication,
+    status: 'SUBMITTED',
+    submittedAt: '2026-10-19T21:00:00.000Z',
+    processingFeePayments: [{
+      ...unresolvedApplication.processingFeePayments[0],
+      status: 'CONFIRMED',
+      failureCode: null,
+      confirmedAt: '2026-10-19T21:00:00.000Z',
+      receiptReference: 'TESTRECEIPT1',
+    }],
+  };
+  const confirmed = await loadLoanApplicationStatus(apiRequest);
+
+  assert.equal(pending.applications[0].processingFeePayments[0].status, 'PENDING');
+  assert.equal(confirmed.applications[0].processingFeePayments[0].status, 'CONFIRMED');
+  assert.equal(confirmed.applications[0].status, 'SUBMITTED');
+  assert.ok(requests.every(([path, options]) => path !== '/payments/loan-processing-fee' && options.cache === 'no-store'));
+  assert.match(loanPage, /Payment confirmed — application submitted for review/);
+  assert.match(loanPage, /applicationsRequestId === applicationsRequestSequence\.current/);
+});
+
 test('an existing unresolved fee remains visible on its application without globally blocking new applications', async () => {
   const result = await loadLoanApplicationStatus(async (path) =>
     path === '/auth/me' ? { id: 'customer' } : [{ id: 'new-application', processingFeePayments: [] }, unresolvedApplication],

@@ -200,14 +200,16 @@ export default function LoanProductsPage() {
 
   const refreshPaymentStatus = useCallback(async () => {
     const requestId = ++statusRequestSequence.current;
+    const applicationsRequestId = ++applicationsRequestSequence.current;
     setApplicationStatusLoading(true);
     setApplicationStatusError('');
-    applicationsRequestSequence.current += 1;
     try {
       const result = await loadLoanApplicationStatus<LoanApplication>(apiRequest);
       if (requestId !== statusRequestSequence.current) return;
       setSignedIn(result.authenticated);
-      setApplications(result.error ? [] : result.applications ?? []);
+      if (!result.error && applicationsRequestId === applicationsRequestSequence.current) {
+        setApplications(result.applications ?? []);
+      }
       setApplicationStatusError(result.error);
       if (!result.error) setError('');
     } finally {
