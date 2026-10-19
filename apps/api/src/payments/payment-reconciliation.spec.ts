@@ -59,14 +59,33 @@ describe('PaymentService provider reconciliation', () => {
       completedAt: new Date(),
     }));
     const paymentUpdate = jest.fn(async () => ({ count: 1 }));
-    const findPriorAttempt = jest.fn(async (): Promise<{
+    const evidenceAttempt = {
+      id: 'attempt-id',
+      paymentTransactionId: paymentId,
+      superadminId: 'submitting-superadmin-id',
+      outcome: 'EVIDENCE_SUBMITTED_AWAITING_REVIEW',
+      providerResultCode: null,
+      reasonCode: 'INDEPENDENT_EVIDENCE_REVIEW_REQUIRED',
+      operatorNote: 'Safaricom record supplied for independent review',
+      submittedAccountReference: '123456789012',
+      submittedCheckoutRequestId: request.checkoutRequestId,
+      submittedMerchantRequestId: request.merchantRequestId,
+      evidenceSource: 'SAFARICOM_PORTAL',
+      evidenceReference: 'CASE-123456',
+    };
+    const findPriorAttempt = jest.fn(async ({ where }: { where?: { id?: string } }): Promise<{
       id: string;
       outcome: string;
       providerResultCode: string | null;
       reasonCode: string | null;
       operatorNote: string;
       superadminId: string;
-    } | null> => null);
+      submittedAccountReference?: string | null;
+      submittedCheckoutRequestId?: string | null;
+      submittedMerchantRequestId?: string | null;
+      evidenceSource?: string | null;
+      evidenceReference?: string | null;
+    } | null> => where?.id === evidenceAttempt.id ? evidenceAttempt : null);
     const findRecentAttempt = jest.fn(async (): Promise<{ id: string } | null> => null);
     const transactionClient = {
       paymentReconciliationAttempt: {
@@ -187,7 +206,7 @@ describe('PaymentService provider reconciliation', () => {
     expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
   });
 
-  it('records submitted identifiers and binds them only after a matching Safaricom query', async () => {
+  it('records provider identifiers and evidence without querying Safaricom before independent review', async () => {
     const uncertainPayment = {
       ...payment,
       type: PaymentType.LOAN_PROCESSING_FEE,
@@ -208,33 +227,65 @@ describe('PaymentService provider reconciliation', () => {
       'superadmin-id',
       'Safaricom identifiers supplied from official records',
       '127.0.0.1',
-      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId, evidenceSource: 'SAFARICOM_PORTAL', evidenceReference: 'CASE-123456' },
     );
 
-    expect(fixture.queryStkStatus).toHaveBeenCalledWith(request.checkoutRequestId);
-    expect(fixture.queryStkStatus.mock.invocationCallOrder[0]).toBeLessThan(
-      fixture.transactionClient.activationPaymentRequest.updateMany.mock.invocationCallOrder[0],
-    );
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
     expect(fixture.createAttempt).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         submittedCheckoutRequestId: request.checkoutRequestId,
         submittedMerchantRequestId: request.merchantRequestId,
         submittedAccountReference: '123456789012',
+        evidenceSource: 'SAFARICOM_PORTAL',
+        evidenceReference: 'CASE-123456',
       }),
     }));
-    expect(fixture.transactionClient.activationPaymentRequest.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: request.id,
-        paymentTransactionId: paymentId,
-        userId: payment.userId,
-        checkoutRequestId: null,
-        merchantRequestId: null,
-      },
-      data: {
-        checkoutRequestId: request.checkoutRequestId,
-        merchantRequestId: request.merchantRequestId,
-      },
+    expect(result).toMatchObject({
+      outcome: 'EVIDENCE_SUBMITTED_AWAITING_REVIEW',
+      reasonCode: 'INDEPENDENT_EVIDENCE_REVIEW_REQUIRED',
     });
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('requires a different Superadmin and matching provider IDs before binding, without settling from query success', async () => {
+    const uncertainPayment = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      activationRequest: { ...request, loanApplicationId: 'loan-application-id', checkoutRequestId: null, merchantRequestId: null },
+    };
+    const fixture = createService(0, uncertainPayment);
+
+    await expect(fixture.service.verifyUncertainProcessingFeeEvidence(
+      paymentId,
+      'attempt-id',
+      'evidence-review-same-admin-001',
+      'submitting-superadmin-id',
+      'Independently checking official provider record',
+      true,
+      '127.0.0.1',
+    )).rejects.toThrow('A different Superadmin must independently review');
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
+
+    const result = await fixture.service.verifyUncertainProcessingFeeEvidence(
+      paymentId,
+      'attempt-id',
+      'evidence-review-second-admin-001',
+      'reviewing-superadmin-id',
+      'Independently checked official provider record',
+      true,
+      '127.0.0.1',
+    );
+
+    expect(fixture.queryStkStatus).toHaveBeenCalledWith(request.checkoutRequestId);
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: request.id, checkoutRequestId: null, merchantRequestId: null }),
+      data: { checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+    }));
     expect(result).toMatchObject({
       outcome: 'SUCCESS_AWAITING_VERIFIED_CALLBACK',
       providerResultCode: '0',
@@ -244,7 +295,66 @@ describe('PaymentService provider reconciliation', () => {
     expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
   });
 
-  it('does not bind supplied identifiers when Safaricom returns mismatched identifiers', async () => {
+  it('does not bind evidence IDs when the independent review query returns mismatched identifiers', async () => {
+    const uncertainPayment = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      activationRequest: { ...request, loanApplicationId: 'loan-application-id', checkoutRequestId: null, merchantRequestId: null },
+    };
+    const fixture = createService(0, uncertainPayment);
+    fixture.queryStkStatus.mockResolvedValueOnce({
+      checkoutRequestId: request.checkoutRequestId,
+      merchantRequestId: 'different-merchant-id',
+      resultCode: 0,
+      resultDescription: 'Sanitized fixture response',
+    });
+
+    const result = await fixture.service.verifyUncertainProcessingFeeEvidence(
+      paymentId,
+      'attempt-id',
+      'evidence-review-mismatch-001',
+      'reviewing-superadmin-id',
+      'Safaricom IDs do not match the official evidence',
+      true,
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({ outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH', reasonCode: 'PROVIDER_IDENTIFIERS_MISMATCH' });
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('leaves payment and identifiers unchanged when the independent review query is unavailable', async () => {
+    const uncertainPayment = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      activationRequest: { ...request, loanApplicationId: 'loan-application-id', checkoutRequestId: null, merchantRequestId: null },
+    };
+    const fixture = createService(0, uncertainPayment);
+    fixture.queryStkStatus.mockRejectedValueOnce(new ServiceUnavailableException('Provider unavailable.'));
+
+    const result = await fixture.service.verifyUncertainProcessingFeeEvidence(
+      paymentId,
+      'attempt-id',
+      'evidence-review-unavailable-01',
+      'reviewing-superadmin-id',
+      'Provider status query is unavailable',
+      true,
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({ outcome: 'UNRESOLVED_PROVIDER_UNAVAILABLE', reasonCode: 'PROVIDER_UNAVAILABLE_DURING_EVIDENCE_REVIEW' });
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('does not query or bind evidence submitted by one Superadmin when Safaricom identifiers might mismatch', async () => {
     const uncertainPayment = {
       ...payment,
       type: PaymentType.LOAN_PROCESSING_FEE,
@@ -258,23 +368,17 @@ describe('PaymentService provider reconciliation', () => {
       },
     };
     const fixture = createService(0, uncertainPayment);
-    fixture.queryStkStatus.mockResolvedValueOnce({
-      checkoutRequestId: request.checkoutRequestId,
-      merchantRequestId: 'different-merchant-id',
-      resultCode: 0,
-      resultDescription: 'Sanitized test result',
-    });
-
     const result = await fixture.service.reconcileActivationPayment(
       paymentId,
       'uncertain-initiation-refresh-02',
       'superadmin-id',
       'Safaricom response does not match supplied request identifiers',
       '127.0.0.1',
-      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId, evidenceSource: 'SAFARICOM_PORTAL', evidenceReference: 'CASE-123457' },
     );
 
-    expect(result).toMatchObject({ outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH', reasonCode: 'PROVIDER_IDENTIFIERS_MISMATCH' });
+    expect(result).toMatchObject({ outcome: 'EVIDENCE_SUBMITTED_AWAITING_REVIEW', reasonCode: 'INDEPENDENT_EVIDENCE_REVIEW_REQUIRED' });
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
     expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
     expect(fixture.paymentUpdate).not.toHaveBeenCalled();
     expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
@@ -301,7 +405,7 @@ describe('PaymentService provider reconciliation', () => {
       'superadmin-id',
       'Safaricom AccountReference does not match payment',
       '127.0.0.1',
-      { accountReference: 'OTHERREF0001', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+      { accountReference: 'OTHERREF0001', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId, evidenceSource: 'SAFARICOM_PORTAL', evidenceReference: 'CASE-123458' },
     );
 
     expect(result).toMatchObject({
@@ -322,14 +426,14 @@ describe('PaymentService provider reconciliation', () => {
       'superadmin-id',
       'Safaricom identifiers are incomplete',
       '127.0.0.1',
-      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: '' },
+      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: '', evidenceSource: 'SAFARICOM_PORTAL', evidenceReference: 'CASE-123459' },
     )).rejects.toBeInstanceOf(BadRequestException);
 
     expect(fixture.createAttempt).not.toHaveBeenCalled();
     expect(fixture.queryStkStatus).not.toHaveBeenCalled();
   });
 
-  it('leaves submitted identifiers unbound when Safaricom query is unavailable', async () => {
+  it('leaves submitted identifiers unbound and does not query until independent review', async () => {
     const uncertainPayment = {
       ...payment,
       type: PaymentType.LOAN_PROCESSING_FEE,
@@ -343,18 +447,17 @@ describe('PaymentService provider reconciliation', () => {
       },
     };
     const fixture = createService(0, uncertainPayment);
-    fixture.queryStkStatus.mockRejectedValueOnce(new ServiceUnavailableException('Provider unavailable.'));
-
     const result = await fixture.service.reconcileActivationPayment(
       paymentId,
       'uncertain-initiation-refresh-03',
       'superadmin-id',
       'Safaricom query unavailable for official request IDs',
       '127.0.0.1',
-      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId, evidenceSource: 'SAFARICOM_PORTAL', evidenceReference: 'CASE-123460' },
     );
 
-    expect(result).toMatchObject({ outcome: 'UNRESOLVED_PROVIDER_UNAVAILABLE', reasonCode: 'PROVIDER_UNAVAILABLE' });
+    expect(result).toMatchObject({ outcome: 'EVIDENCE_SUBMITTED_AWAITING_REVIEW', reasonCode: 'INDEPENDENT_EVIDENCE_REVIEW_REQUIRED' });
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
     expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
     expect(fixture.paymentUpdate).not.toHaveBeenCalled();
     expect(fixture.postWithinTransaction).not.toHaveBeenCalled();

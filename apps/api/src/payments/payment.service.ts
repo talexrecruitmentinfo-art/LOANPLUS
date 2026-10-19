@@ -47,6 +47,7 @@ const PROVIDER_REVIEW_OUTCOMES = new Set([
   'UNRESOLVED_PROCESSING',
   'UNRESOLVED_UNKNOWN_RESULT',
   'SUCCESS_AWAITING_VERIFIED_CALLBACK',
+  'EVIDENCE_SUBMITTED_AWAITING_REVIEW',
   'QUERY_ERROR',
 ]);
 
@@ -254,6 +255,7 @@ export class PaymentService {
             type: PaymentType.LOAN_PROCESSING_FEE,
             loanApplicationId: application.id,
             amountKes: LOAN_PROCESSING_FEE_KES,
+            initiationPhase: 'CREATED',
             activationRequest: {
               create: {
                 userId,
@@ -311,17 +313,33 @@ export class PaymentService {
 
     let providerRequest: { checkoutRequestId: string; merchantRequestId: string };
     try {
+      await this.prisma.paymentTransaction.updateMany({
+        where: { id: payment.id, status: PaymentStatus.PENDING },
+        data: { initiationPhase: 'OAUTH_REQUESTED' },
+      });
       providerRequest = await this.mpesa.initiateStkPush({
         amountKes: LOAN_PROCESSING_FEE_KES,
         phoneNumber: phoneNumber.slice(1),
         accountReference: payment.internalReference.slice(-12),
         description: 'Loan processing fee',
         callbackUrl,
+      }, async () => {
+        await this.prisma.paymentTransaction.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: { initiationPhase: 'STK_REQUESTED' },
+        });
       });
     } catch (error) {
+      const initiationPhase = error instanceof StkPushInitiationError
+        ? error.phase === 'OAUTH'
+          ? 'OAUTH_FAILED_BEFORE_STK'
+          : error.phase === 'STK_REQUEST'
+            ? 'STK_REQUEST_OUTCOME_UNCERTAIN'
+            : 'STK_RESPONSE_UNCERTAIN'
+        : 'INITIATION_OUTCOME_UNCERTAIN';
       await this.prisma.paymentTransaction.updateMany({
         where: { id: payment.id, status: PaymentStatus.PENDING },
-        data: { failureCode: 'INITIATION_OUTCOME_UNCERTAIN' },
+        data: { failureCode: 'INITIATION_OUTCOME_UNCERTAIN', initiationPhase },
       });
       const phase = error instanceof StkPushInitiationError ? error.phase : 'PRE_PROVIDER';
       logger.warn(`STK initiation outcome uncertain for payment ${payment.internalReference} (phase=${phase}; errorType=${error instanceof Error ? error.constructor.name : 'Unknown'}).`);
@@ -333,13 +351,31 @@ export class PaymentService {
         message: 'The payment request outcome is being checked. Do not submit another payment while it remains unresolved.',
       };
     }
-    await this.prisma.activationPaymentRequest.update({
-      where: { paymentTransactionId: payment.id },
-      data: {
-        checkoutRequestId: providerRequest.checkoutRequestId,
-        merchantRequestId: providerRequest.merchantRequestId,
-      },
-    });
+    await this.prisma.$transaction(async (tx) => {
+      const requestBinding = await tx.activationPaymentRequest.updateMany({
+        where: {
+          paymentTransactionId: payment.id,
+          OR: [
+            { checkoutRequestId: null, merchantRequestId: null },
+            {
+              checkoutRequestId: providerRequest.checkoutRequestId,
+              merchantRequestId: providerRequest.merchantRequestId,
+            },
+          ],
+        },
+        data: {
+          checkoutRequestId: providerRequest.checkoutRequestId,
+          merchantRequestId: providerRequest.merchantRequestId,
+        },
+      });
+      if (requestBinding.count !== 1) {
+        throw new ConflictException('Provider identifiers could not be safely associated with the payment.');
+      }
+      await tx.paymentTransaction.updateMany({
+        where: { id: payment.id, status: PaymentStatus.PENDING },
+        data: { initiationPhase: 'PROVIDER_ACCEPTED' },
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     return {
       reference: payment.internalReference,
@@ -360,6 +396,7 @@ export class PaymentService {
         currency: true,
         status: true,
         failureCode: true,
+        initiationPhase: true,
         providerReference: true,
         receiptReference: true,
         confirmedAt: true,
@@ -379,12 +416,48 @@ export class PaymentService {
       return {
         ...customerPayment,
         status,
+        unresolved: payment.type === PaymentType.LOAN_PROCESSING_FEE && status === PaymentStatus.PENDING,
         providerResult: {
           code: resultCode,
           message: this.getCustomerPaymentMessage(status, resultCode),
         },
       };
     });
+  }
+
+  async getUnresolvedLoanProcessingFeePayment(userId: string) {
+    const payment = await this.prisma.paymentTransaction.findFirst({
+      where: {
+        userId,
+        type: PaymentType.LOAN_PROCESSING_FEE,
+        OR: [
+          { status: PaymentStatus.PENDING },
+          { status: PaymentStatus.FAILED, failureCode: 'MPESA_RESULT_4999', receiptReference: null },
+        ],
+      },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        internalReference: true,
+        status: true,
+        failureCode: true,
+        initiationPhase: true,
+        amountKes: true,
+        currency: true,
+        createdAt: true,
+      },
+    });
+    if (!payment) return null;
+    return {
+      reference: payment.internalReference,
+      status: payment.status === PaymentStatus.FAILED && payment.failureCode === 'MPESA_RESULT_4999'
+        ? PaymentStatus.PENDING
+        : payment.status,
+      amountKes: payment.amountKes,
+      currency: payment.currency,
+      initiationPhase: payment.initiationPhase,
+      createdAt: payment.createdAt,
+      message: 'A previous processing-fee payment is unresolved. Do not pay again until it has been reconciled.',
+    };
   }
 
   async listReconciliationQueue(
@@ -444,6 +517,7 @@ export class PaymentService {
         currency: true,
         status: true,
         failureCode: true,
+        initiationPhase: true,
         providerReference: true,
         receiptReference: true,
         createdAt: true,
@@ -468,6 +542,8 @@ export class PaymentService {
             submittedAccountReference: true,
             submittedCheckoutRequestId: true,
             submittedMerchantRequestId: true,
+            evidenceSource: true,
+            evidenceReference: true,
             operatorNote: true,
             requestedAt: true,
             completedAt: true,
@@ -501,6 +577,8 @@ export class PaymentService {
         return {
           ...queuePayment,
           needsProviderIdentifiers,
+          accountReference: needsProviderIdentifiers ? payment.internalReference.slice(-12) : null,
+          initiationPhase: payment.initiationPhase,
           reconciliationAttempts: safeAttempts,
           recordedStatus: payment.status,
           status: payment.status === PaymentStatus.FAILED && isLegacyUnresolved
@@ -534,7 +612,13 @@ export class PaymentService {
     superadminId: string,
     operatorNote: string,
     ipAddress?: string,
-    providerIdentifiers?: { accountReference: string; checkoutRequestId: string; merchantRequestId: string },
+    providerIdentifiers?: {
+      accountReference: string;
+      checkoutRequestId: string;
+      merchantRequestId: string;
+      evidenceSource?: string;
+      evidenceReference?: string;
+    },
   ) {
     if (!idempotencyKey || !/^[a-zA-Z0-9._:-]{16,128}$/.test(idempotencyKey)) {
       throw new BadRequestException('A valid Idempotency-Key header is required.');
@@ -546,10 +630,14 @@ export class PaymentService {
     const submittedAccountReference = providerIdentifiers?.accountReference.trim();
     const submittedCheckoutRequestId = providerIdentifiers?.checkoutRequestId.trim();
     const submittedMerchantRequestId = providerIdentifiers?.merchantRequestId.trim();
+    const evidenceSource = providerIdentifiers?.evidenceSource;
+    const evidenceReference = providerIdentifiers?.evidenceReference?.trim();
     if (providerIdentifiers && (
       !submittedAccountReference || !/^[A-Za-z0-9]{12}$/.test(submittedAccountReference) ||
       !submittedCheckoutRequestId || !/^[A-Za-z0-9_-]{1,100}$/.test(submittedCheckoutRequestId) ||
-      !submittedMerchantRequestId || !/^[A-Za-z0-9_-]{1,100}$/.test(submittedMerchantRequestId)
+      !submittedMerchantRequestId || !/^[A-Za-z0-9_-]{1,100}$/.test(submittedMerchantRequestId) ||
+      (evidenceSource !== 'SAFARICOM_PORTAL' && evidenceSource !== 'SAFARICOM_SUPPORT') ||
+      !evidenceReference || !/^[A-Za-z0-9._:/-]{3,100}$/.test(evidenceReference)
     )) {
       throw new BadRequestException('Both valid Safaricom request identifiers are required.');
     }
@@ -558,6 +646,8 @@ export class PaymentService {
           accountReference: submittedAccountReference!,
           checkoutRequestId: submittedCheckoutRequestId!,
           merchantRequestId: submittedMerchantRequestId!,
+          evidenceSource: evidenceSource!,
+          evidenceReference: evidenceReference!,
         }
       : undefined;
 
@@ -622,6 +712,8 @@ export class PaymentService {
             submittedAccountReference: submittedIdentifiers?.accountReference,
             submittedCheckoutRequestId: submittedIdentifiers?.checkoutRequestId,
             submittedMerchantRequestId: submittedIdentifiers?.merchantRequestId,
+            evidenceSource: submittedIdentifiers?.evidenceSource,
+            evidenceReference: submittedIdentifiers?.evidenceReference,
           },
           select: {
             id: true,
@@ -675,6 +767,12 @@ export class PaymentService {
         reasonCode: 'SAFARICOM_ACCOUNT_REFERENCE_MISMATCH',
       });
     }
+    if (submittedIdentifiers) {
+      return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'EVIDENCE_SUBMITTED_AWAITING_REVIEW',
+        reasonCode: 'INDEPENDENT_EVIDENCE_REVIEW_REQUIRED',
+      });
+    }
 
     let activationRequest = payment.activationRequest;
     if (!activationRequest) {
@@ -696,15 +794,6 @@ export class PaymentService {
       return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
         outcome: 'UNRESOLVED_MISSING_IDENTIFIERS',
         reasonCode: 'PROVIDER_IDENTIFIERS_MISSING',
-      });
-    }
-    if (hasStoredCheckoutId && submittedIdentifiers && (
-      activationRequest.checkoutRequestId !== submittedIdentifiers.checkoutRequestId ||
-      activationRequest.merchantRequestId !== submittedIdentifiers.merchantRequestId
-    )) {
-      return this.completeReconciliationAttempt(attempt.id, paymentId, superadminId, ipAddress, {
-        outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH',
-        reasonCode: 'SUPPLIED_IDENTIFIERS_DO_NOT_MATCH_STORED',
       });
     }
     const expectedIdentifiers = hasStoredCheckoutId
@@ -874,6 +963,240 @@ export class PaymentService {
       outcome,
       providerResultCode: String(providerStatus.resultCode),
       reasonCode,
+    });
+  }
+
+  async verifyUncertainProcessingFeeEvidence(
+    paymentId: string,
+    evidenceAttemptId: string,
+    idempotencyKey: string | undefined,
+    superadminId: string,
+    operatorNote: string,
+    evidenceReviewed: boolean,
+    ipAddress?: string,
+  ) {
+    if (!idempotencyKey || !/^[a-zA-Z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+      throw new BadRequestException('A valid Idempotency-Key header is required.');
+    }
+    const sanitizedNote = operatorNote.trim();
+    if (sanitizedNote.length < 10 || sanitizedNote.length > 500) {
+      throw new BadRequestException('An evidence review note between 10 and 500 characters is required.');
+    }
+    if (evidenceReviewed !== true) {
+      throw new BadRequestException('Confirm that the official Safaricom transaction record was reviewed.');
+    }
+
+    let started: Awaited<ReturnType<typeof startEvidenceReview>>;
+    const startEvidenceReview = () => this.prisma.$transaction(async (tx) => {
+      const duplicate = await tx.paymentReconciliationAttempt.findUnique({
+        where: { paymentTransactionId_idempotencyKey: { paymentTransactionId: paymentId, idempotencyKey } },
+        select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, superadminId: true, operatorNote: true },
+      });
+      if (duplicate) {
+        if (duplicate.superadminId !== superadminId) {
+          throw new ConflictException('This idempotency key belongs to another administrator.');
+        }
+        if (!duplicate.operatorNote.startsWith(`Reviewed evidence ${evidenceAttemptId}:`)) {
+          throw new ConflictException('This idempotency key was already used for another reconciliation action.');
+        }
+        return { attempt: duplicate, payment: null, request: null, duplicate: true };
+      }
+
+      const [payment, evidenceAttempt] = await Promise.all([
+        tx.paymentTransaction.findUnique({
+          where: { id: paymentId },
+          include: { activationRequest: true },
+        }),
+        tx.paymentReconciliationAttempt.findUnique({
+          where: { id: evidenceAttemptId },
+          select: {
+            id: true,
+            paymentTransactionId: true,
+            superadminId: true,
+            outcome: true,
+            submittedAccountReference: true,
+            submittedCheckoutRequestId: true,
+            submittedMerchantRequestId: true,
+            evidenceSource: true,
+            evidenceReference: true,
+          },
+        }),
+      ]);
+      if (!payment) throw new NotFoundException('Payment was not found.');
+      this.assertPaymentAssociation(payment, {
+        paymentTransactionId: payment.id,
+        userId: payment.activationRequest?.userId ?? '',
+        loanApplicationId: payment.loanApplicationId,
+      });
+      if (!evidenceAttempt || evidenceAttempt.paymentTransactionId !== paymentId ||
+        evidenceAttempt.outcome !== 'EVIDENCE_SUBMITTED_AWAITING_REVIEW' ||
+        !evidenceAttempt.submittedAccountReference || !evidenceAttempt.submittedCheckoutRequestId ||
+        !evidenceAttempt.submittedMerchantRequestId || !evidenceAttempt.evidenceSource ||
+        !evidenceAttempt.evidenceReference) {
+        throw new ConflictException('This provider evidence is missing, invalid, or already reviewed.');
+      }
+      if (evidenceAttempt.superadminId === superadminId) {
+        throw new ConflictException('A different Superadmin must independently review the provider evidence.');
+      }
+      if (payment.type !== PaymentType.LOAN_PROCESSING_FEE || payment.status !== PaymentStatus.PENDING ||
+        payment.failureCode !== 'INITIATION_OUTCOME_UNCERTAIN' ||
+        evidenceAttempt.submittedAccountReference !== payment.internalReference.slice(-12) ||
+        payment.activationRequest?.checkoutRequestId !== null ||
+        payment.activationRequest?.merchantRequestId !== null) {
+        throw new ConflictException('This payment is no longer eligible for missing-identifier evidence review.');
+      }
+      const request = payment.activationRequest;
+      if (!request) throw new ConflictException('Payment callback request record is unavailable.');
+      const recentAttempt = await tx.paymentReconciliationAttempt.findFirst({
+        where: { paymentTransactionId: paymentId, outcome: 'STARTED', requestedAt: { gt: new Date(Date.now() - 60_000) } },
+        select: { id: true },
+      });
+      if (recentAttempt) throw new ConflictException('A status refresh is already in progress for this payment.');
+
+      const attempt = await tx.paymentReconciliationAttempt.create({
+        data: {
+          paymentTransactionId: paymentId,
+          superadminId,
+          idempotencyKey,
+          operatorNote: `Reviewed evidence ${evidenceAttempt.id}: ${sanitizedNote}`.slice(0, 500),
+          outcome: 'STARTED',
+          reasonCode: 'INDEPENDENT_PROVIDER_EVIDENCE_REVIEW',
+          submittedAccountReference: evidenceAttempt.submittedAccountReference,
+          submittedCheckoutRequestId: evidenceAttempt.submittedCheckoutRequestId,
+          submittedMerchantRequestId: evidenceAttempt.submittedMerchantRequestId,
+          evidenceSource: evidenceAttempt.evidenceSource,
+          evidenceReference: evidenceAttempt.evidenceReference,
+        },
+        select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, operatorNote: true },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId,
+          action: 'PAYMENT_RECONCILIATION_EVIDENCE_REVIEW_STARTED',
+          subjectType: 'PAYMENT_TRANSACTION',
+          subjectId: paymentId,
+          outcome: 'STARTED',
+          reason: `Independent review of provider evidence attempt ${evidenceAttempt.id}: ${sanitizedNote}`.slice(0, 500),
+          ipAddress: ipAddress?.slice(0, 64),
+        },
+      });
+      return { attempt, payment, request, evidenceAttempt, duplicate: false };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    try {
+      started = await startEvidenceReview();
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const duplicate = await this.prisma.paymentReconciliationAttempt.findUnique({
+          where: { paymentTransactionId_idempotencyKey: { paymentTransactionId: paymentId, idempotencyKey } },
+          select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, superadminId: true, operatorNote: true },
+        });
+        if (duplicate) {
+          if (duplicate.superadminId !== superadminId) {
+            throw new ConflictException('This idempotency key belongs to another administrator.');
+          }
+          if (!duplicate.operatorNote.startsWith(`Reviewed evidence ${evidenceAttemptId}:`)) {
+            throw new ConflictException('This idempotency key was already used for another reconciliation action.');
+          }
+          return duplicate;
+        }
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+        throw new ConflictException('Another evidence review request is being processed. Try again shortly.');
+      }
+      throw error;
+    }
+    if (started.duplicate || !started.payment || !started.request) return started.attempt;
+
+    let providerStatus: Awaited<ReturnType<MpesaService['queryStkStatus']>>;
+    try {
+      providerStatus = await this.mpesa.queryStkStatus(started.evidenceAttempt.submittedCheckoutRequestId!);
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException || error instanceof InternalServerErrorException) {
+        return this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+          outcome: 'UNRESOLVED_PROVIDER_UNAVAILABLE',
+          reasonCode: 'PROVIDER_UNAVAILABLE_DURING_EVIDENCE_REVIEW',
+        });
+      }
+      await this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'QUERY_ERROR',
+        reasonCode: 'INTERNAL_EVIDENCE_REVIEW_QUERY_ERROR',
+      });
+      throw error;
+    }
+
+    if (providerStatus.checkoutRequestId !== started.evidenceAttempt.submittedCheckoutRequestId ||
+      providerStatus.merchantRequestId !== started.evidenceAttempt.submittedMerchantRequestId) {
+      return this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH',
+        providerResultCode: String(providerStatus.resultCode),
+        reasonCode: 'PROVIDER_IDENTIFIERS_MISMATCH',
+      });
+    }
+
+    try {
+      const bound = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.activationPaymentRequest.updateMany({
+          where: {
+            id: started.request!.id,
+            paymentTransactionId: paymentId,
+            userId: started.payment!.userId,
+            checkoutRequestId: null,
+            merchantRequestId: null,
+          },
+          data: {
+            checkoutRequestId: providerStatus.checkoutRequestId,
+            merchantRequestId: providerStatus.merchantRequestId,
+          },
+        });
+        if (result.count === 1) return true;
+        const current = await tx.activationPaymentRequest.findUnique({
+          where: { id: started.request!.id },
+          select: { checkoutRequestId: true, merchantRequestId: true },
+        });
+        return current?.checkoutRequestId === providerStatus.checkoutRequestId &&
+          current.merchantRequestId === providerStatus.merchantRequestId;
+      });
+      if (!bound) {
+        return this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+          outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH',
+          providerResultCode: String(providerStatus.resultCode),
+          reasonCode: 'PROVIDER_IDENTIFIERS_CHANGED_DURING_REVIEW',
+        });
+      }
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+          outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH',
+          providerResultCode: String(providerStatus.resultCode),
+          reasonCode: 'PROVIDER_IDENTIFIER_ALREADY_BOUND',
+        });
+      }
+      await this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'QUERY_ERROR',
+        providerResultCode: String(providerStatus.resultCode),
+        reasonCode: 'PROVIDER_IDENTIFIERS_NOT_PERSISTED',
+      });
+      throw error;
+    }
+
+    if (providerStatus.resultCode === 4999) {
+      return this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'UNRESOLVED_4999',
+        providerResultCode: '4999',
+        reasonCode: 'RESULT_4999_REMAINS_UNRESOLVED',
+      });
+    }
+    if (providerStatus.resultCode === 0) {
+      return this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+        outcome: 'SUCCESS_AWAITING_VERIFIED_CALLBACK',
+        providerResultCode: '0',
+        reasonCode: 'QUERY_SUCCESS_CALLBACK_METADATA_REQUIRED',
+      });
+    }
+    return this.completeReconciliationAttempt(started.attempt.id, paymentId, superadminId, ipAddress, {
+      outcome: 'UNRESOLVED_UNKNOWN_RESULT',
+      providerResultCode: String(providerStatus.resultCode),
+      reasonCode: 'UNRECOGNIZED_PROVIDER_RESULT',
     });
   }
 

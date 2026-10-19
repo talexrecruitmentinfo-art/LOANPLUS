@@ -48,6 +48,12 @@ export class PaymentController {
     return { data: await this.payments.listCustomerPayments(request.principal!.id) };
   }
 
+  @Get('loan-processing-fee/unresolved')
+  @UseGuards(CustomerSessionGuard)
+  async getUnresolvedLoanProcessingFee(@Req() request: AuthenticatedRequest) {
+    return { data: await this.payments.getUnresolvedLoanProcessingFeePayment(request.principal!.id) };
+  }
+
   @Post('mpesa/callback/:token')
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   async mpesaCallback(@Param('token') token: string, @Body() payload: unknown) {

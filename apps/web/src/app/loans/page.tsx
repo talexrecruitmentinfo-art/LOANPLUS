@@ -27,6 +27,16 @@ interface ProcessingFeeQuote {
   unavailableReasons: string[];
 }
 
+interface UnresolvedProcessingFee {
+  reference: string;
+  status: string;
+  amountKes: number;
+  currency: string;
+  initiationPhase: string | null;
+  createdAt: string;
+  message: string;
+}
+
 interface LoanApplication {
   id: string;
   requestedPrincipalKes: number;
@@ -138,6 +148,9 @@ export default function LoanProductsPage() {
   const [processingFeeQuoteError, setProcessingFeeQuoteError] = useState('');
   const [processingFeeQuoteLoading, setProcessingFeeQuoteLoading] = useState(true);
   const [applications, setApplications] = useState<LoanApplication[]>([]);
+  const [unresolvedFee, setUnresolvedFee] = useState<UnresolvedProcessingFee | null>(null);
+  const [unresolvedFeeError, setUnresolvedFeeError] = useState('');
+  const [unresolvedFeeLoading, setUnresolvedFeeLoading] = useState(true);
   const [form, setForm] = useState<ApplicationForm>(emptyForm);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [reviewing, setReviewing] = useState(false);
@@ -161,6 +174,16 @@ export default function LoanProductsPage() {
 
   async function refreshApplications() {
     setApplications(await apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }));
+  }
+
+  async function refreshUnresolvedFee() {
+    setUnresolvedFeeLoading(true);
+    try {
+      setUnresolvedFee(await apiRequest<UnresolvedProcessingFee | null>('/payments/loan-processing-fee/unresolved', { cache: 'no-store' }));
+      setUnresolvedFeeError('');
+    } finally {
+      setUnresolvedFeeLoading(false);
+    }
   }
 
   async function refreshProducts() {
@@ -195,7 +218,10 @@ export default function LoanProductsPage() {
     void refreshProcessingFeeQuote();
     void refreshProducts();
     Promise.all([
-      apiRequest('/auth/me', { cache: 'no-store' }).then(() => setSignedIn(true)).catch(() => setSignedIn(false)),
+      apiRequest('/auth/me', { cache: 'no-store' }).then(() => {
+        setSignedIn(true);
+        return refreshUnresolvedFee().catch(() => setUnresolvedFeeError('The existing payment status could not be checked. Do not start another payment until it can be verified.'));
+      }).catch(() => setSignedIn(false)),
       apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }).then(setApplications)
         .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Applications could not be loaded.')),
     ]).finally(() => setLoading(false));
@@ -249,10 +275,12 @@ export default function LoanProductsPage() {
     : processingFeeQuoteError ? 'Unavailable' : 'Loading quote…';
 
   async function payProcessingFee() {
-    if (!product || !signedIn || !termsAccepted || feeUnavailableReason) {
+    if (!product || !signedIn || !termsAccepted || feeUnavailableReason || unresolvedFeeLoading || unresolvedFee || unresolvedFeeError) {
       setError(feeUnavailableReason || (!termsAccepted
         ? 'Accept the reviewed product terms before continuing.'
-        : 'Sign in to continue with this application.'));
+        : unresolvedFee
+          ? 'A previous processing-fee payment is unresolved. Do not pay again.'
+          : unresolvedFeeError || (unresolvedFeeLoading ? 'Checking the status of previous processing-fee payments. Do not pay again until this check completes.' : 'Sign in to continue with this application.')));
       return;
     }
     setBusyId('new-application');
@@ -282,15 +310,21 @@ export default function LoanProductsPage() {
       setForm(emptyForm);
       setTermsAccepted(false);
       await refreshApplications();
+      await refreshUnresolvedFee();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The processing-fee request could not be completed.');
       await refreshApplications().catch(() => undefined);
+      await refreshUnresolvedFee().catch(() => setUnresolvedFeeError('The existing payment status could not be refreshed. Do not pay again.'));
     } finally {
       setBusyId(null);
     }
   }
 
   async function resumeProcessingFee(applicationId: string) {
+    if (unresolvedFeeLoading || unresolvedFee || unresolvedFeeError) {
+      setError(unresolvedFee?.message ?? 'The existing payment status could not be checked. Do not pay again.');
+      return;
+    }
     setBusyId(applicationId);
     setError('');
     setNotice('');
@@ -302,8 +336,10 @@ export default function LoanProductsPage() {
       });
       setNotice(payment.message);
       await refreshApplications();
+      await refreshUnresolvedFee();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The payment status could not be refreshed.');
+      await refreshUnresolvedFee().catch(() => setUnresolvedFeeError('The existing payment status could not be refreshed. Do not pay again.'));
     } finally {
       setBusyId(null);
     }
@@ -340,6 +376,13 @@ export default function LoanProductsPage() {
       </section>
       {notice && <p className="admin-inline-notice" role="status">{notice}</p>}
       {error && <p className="admin-inline-error" role="alert">{error}</p>}
+      {unresolvedFee && <div className="fee-unavailable-notice" role="alert">
+        <p><b>Payment unresolved — do not pay again.</b> The original processing-fee attempt is not confirmed. Reference <code>{unresolvedFee.reference}</code>{unresolvedFee.initiationPhase ? ` · ${unresolvedFee.initiationPhase.replaceAll('_', ' ').toLowerCase()}` : ''}. No second STK request will be started.</p>
+        <p>{unresolvedFee.message} <Link href="/support">Contact support</Link> if Safaricom evidence or assistance is needed.</p>
+        <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => void refreshUnresolvedFee().catch(() => setUnresolvedFeeError('Payment status could not be refreshed. Do not pay again.'))}>Refresh payment status</button>
+      </div>}
+      {!unresolvedFee && unresolvedFeeLoading && signedIn && <p className="fee-unavailable-notice" role="status">Checking previous processing-fee payment status. Payment remains unavailable until this check completes.</p>}
+      {!unresolvedFee && unresolvedFeeError && <p className="fee-unavailable-notice" role="alert">{unresolvedFeeError} Contact <Link href="/support">support</Link>; do not pay again until payment status is verified.</p>}
       {!signedIn && !loading && <p className="product-list"><Link className="button" href="/login">Sign in to apply</Link></p>}
       {signedIn && product && (
         <section className="loan-application-panel" aria-labelledby="apply-heading">
@@ -402,7 +445,7 @@ export default function LoanProductsPage() {
               </label>
               <div className="loan-review-actions">
                 <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => setReviewing(false)}>Edit details</button>
-                <button className="button" type="button" disabled={busyId !== null || !termsAccepted || Boolean(feeUnavailableReason)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : `Pay Loan Processing Fee — ${feeQuoteAmount}`}</button>
+                <button className="button" type="button" disabled={busyId !== null || unresolvedFeeLoading || !termsAccepted || Boolean(feeUnavailableReason) || Boolean(unresolvedFee) || Boolean(unresolvedFeeError)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : unresolvedFee || unresolvedFeeError ? 'Payment unresolved — do not pay again' : unresolvedFeeLoading ? 'Checking payment status…' : `Pay Loan Processing Fee — ${feeQuoteAmount}`}</button>
               </div>
             </div>
           )}
@@ -444,7 +487,7 @@ export default function LoanProductsPage() {
                 <p>Loan Processing Fee — {feeQuoteAmount}. Paying it does not guarantee approval or disbursement and does not add funds to your wallet.</p>
                 {feeUnavailableReason && <p className="fee-unavailable-notice" role="status">{feeUnavailableReason}</p>}
                 {processingFeeQuoteError && <button className="quiet-button" type="button" disabled={processingFeeQuoteLoading} onClick={() => void refreshProcessingFeeQuote()}>Retry fee quote</button>}
-                <button className="quiet-button" type="button" disabled={busyId !== null || Boolean(feeUnavailableReason)} onClick={() => void resumeProcessingFee(application.id)}>Review details and request fee payment</button>
+                <button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading || Boolean(feeUnavailableReason) || Boolean(unresolvedFee) || Boolean(unresolvedFeeError)} onClick={() => void resumeProcessingFee(application.id)}>Review details and request fee payment</button>
               </div>}
               {fee && <dl>
                 <div><dt>Loan Processing Fee — {formatMoney(fee.amountKes)}</dt><dd>{fee.status === 'CONFIRMED' ? 'Paid and verified' : fee.status === 'FAILED' ? 'Failed' : fee.failureCode ? 'Unresolved — do not pay again' : fee.status.replaceAll('_', ' ')}</dd></div>

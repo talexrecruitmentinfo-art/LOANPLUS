@@ -27,5 +27,15 @@ test('loan application requires the five fields and review before the processing
   assert.match(loanPage, /\/payments\/loan-processing-fee/);
   assert.match(loanPage, /reviewConfirmed: true/);
   assert.match(loanPage, /Refresh status/);
+  assert.match(loanPage, /loan-processing-fee\/unresolved/);
+  assert.match(loanPage, /Payment unresolved — do not pay again/);
+  assert.match(loanPage, /Boolean\(unresolvedFee\)/);
+  assert.match(loanPage, /Refresh payment status/);
+  assert.match(loanPage, /href="\/support"/);
+  assert.match(loanPage, /loan-processing-fee\/unresolved/);
+  assert.match(loanPage, /Payment unresolved — do not pay again/);
+  assert.match(loanPage, /Boolean\(unresolvedFee\)/);
+  assert.match(loanPage, /Refresh payment status/);
+  assert.match(loanPage, /href="\/support"/);
   assert.doesNotMatch(loanPage, /activationStatus/);
 });

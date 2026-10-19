@@ -14,6 +14,8 @@ interface Attempt {
   submittedAccountReference: string | null;
   submittedCheckoutRequestId: string | null;
   submittedMerchantRequestId: string | null;
+  evidenceSource: string | null;
+  evidenceReference: string | null;
   operatorNote: string;
   requestedAt: string;
   completedAt: string | null;
@@ -28,6 +30,8 @@ interface ReconciliationPayment {
   currency: string;
   status: string;
   recordedStatus: string;
+  initiationPhase: string | null;
+  accountReference: string | null;
   reasonForInclusion: 'AGED_PENDING' | 'LEGACY_UNRESOLVED_4999' | 'PROVIDER_REVIEW_REQUIRED' | 'ESCALATED';
   providerReference: string | null;
   receiptReference: string | null;
@@ -68,7 +72,7 @@ export default function AdminReconciliationPage() {
   const [category, setCategory] = useState<QueueCategory>('ALL');
   const [activeCategory, setActiveCategory] = useState<QueueCategory>('ALL');
   const [notes, setNotes] = useState<Record<string, string>>({});
-  const [providerIdentifiers, setProviderIdentifiers] = useState<Record<string, { accountReference: string; checkoutRequestId: string; merchantRequestId: string }>>({});
+  const [providerIdentifiers, setProviderIdentifiers] = useState<Record<string, { accountReference: string; checkoutRequestId: string; merchantRequestId: string; evidenceSource: string; evidenceReference: string }>>({});
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [escalatingId, setEscalatingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -115,7 +119,7 @@ export default function AdminReconciliationPage() {
     const note = notes[payment.id]?.trim() ?? '';
     if (note.length < 10) return;
     const identifiers = providerIdentifiers[payment.id];
-    if (payment.needsProviderIdentifiers && (!identifiers?.accountReference.trim() || !identifiers.checkoutRequestId.trim() || !identifiers.merchantRequestId.trim())) return;
+    if (payment.needsProviderIdentifiers && (!identifiers?.accountReference.trim() || !identifiers.checkoutRequestId.trim() || !identifiers.merchantRequestId.trim() || !identifiers.evidenceSource || !identifiers.evidenceReference.trim())) return;
     setRefreshingId(payment.id);
     setError('');
     setNotice('');
@@ -129,6 +133,8 @@ export default function AdminReconciliationPage() {
             accountReference: identifiers?.accountReference.trim(),
             checkoutRequestId: identifiers?.checkoutRequestId.trim(),
             merchantRequestId: identifiers?.merchantRequestId.trim(),
+            evidenceSource: identifiers?.evidenceSource,
+            evidenceReference: identifiers?.evidenceReference.trim(),
           } : {}),
         }),
       });
@@ -139,6 +145,27 @@ export default function AdminReconciliationPage() {
       await loadQueue(pageCursor, activeSearch, activeCategory);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Provider status could not be refreshed.');
+    } finally {
+      setRefreshingId(null);
+    }
+  }
+
+  async function verifyProviderEvidence(payment: ReconciliationPayment, attempt: Attempt) {
+    const note = notes[payment.id]?.trim() ?? '';
+    if (note.length < 10) return;
+    setRefreshingId(payment.id);
+    setError('');
+    setNotice('');
+    try {
+      const result = await apiRequest<Attempt>(`/admin/payment-reconciliation/${payment.id}/verify-evidence`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify({ evidenceAttemptId: attempt.id, note, evidenceReviewed: true }),
+      });
+      setNotice(`Evidence review recorded: ${result.outcome.replaceAll('_', ' ').toLowerCase()}.`);
+      await loadQueue(pageCursor, activeSearch, activeCategory);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Provider evidence could not be reviewed.');
     } finally {
       setRefreshingId(null);
     }
@@ -186,7 +213,7 @@ export default function AdminReconciliationPage() {
       <section className="reconciliation-queue" aria-live="polite">
         {loading ? <p>Loading reconciliation queue…</p> : items.length === 0 ? <p className="empty-copy">No unresolved payments match these filters.</p> : items.map((payment) => (
           <article key={payment.id}>
-            <div className="reconciliation-header"><div><b>{payment.internalReference}</b><small>{payment.type === 'LOAN_PROCESSING_FEE' ? 'Loan Processing Fee' : 'Historical activation payment'} · {payment.reconciliationStatus.replaceAll('_', ' ')}</small></div><span className="status-label status-pending">{payment.reconciliationStatus.replaceAll('_', ' ')}</span></div>
+            <div className="reconciliation-header"><div><b>{payment.internalReference}</b><small>{payment.type === 'LOAN_PROCESSING_FEE' ? 'Loan Processing Fee' : 'Historical activation payment'} · {payment.reconciliationStatus.replaceAll('_', ' ')}{payment.initiationPhase ? ` · ${payment.initiationPhase.replaceAll('_', ' ')}` : ''}</small></div><span className="status-label status-pending">{payment.reconciliationStatus.replaceAll('_', ' ')}</span></div>
             <dl>
               <div><dt>Reason in queue</dt><dd>{payment.reasonForInclusion === 'LEGACY_UNRESOLVED_4999'
                 ? 'Legacy 4999 result remains unresolved regardless of age.'
@@ -202,23 +229,26 @@ export default function AdminReconciliationPage() {
               <div><dt>Last updated</dt><dd>{new Date(payment.updatedAt).toLocaleString('en-KE')}</dd></div>
               <div><dt>Checkout request</dt><dd>{payment.activationRequest?.checkoutRequestId ?? 'Unavailable'}</dd></div>
               <div><dt>Merchant request</dt><dd>{payment.activationRequest?.merchantRequestId ?? 'Unavailable'}</dd></div>
+              {payment.needsProviderIdentifiers && <div><dt>Expected AccountReference</dt><dd>{payment.accountReference ?? 'Unavailable'}</dd></div>}
               <div><dt>Provider reference</dt><dd>{payment.providerReference ?? 'Not confirmed'}</dd></div>
               <div><dt>Verified receipt</dt><dd>{payment.receiptReference ?? 'Not verified'}</dd></div>
               <div><dt>Refresh attempts</dt><dd>{payment._count.reconciliationAttempts}</dd></div>
               {payment.reconciliationAttempts[0] && <div><dt>Last reconciliation action</dt><dd>{payment.reconciliationAttempts[0].outcome.replaceAll('_', ' ')} · {new Date(payment.reconciliationAttempts[0].requestedAt).toLocaleString('en-KE')}</dd></div>}
             </dl>
             <div className="reconciliation-history"><b>Recent callbacks</b>{payment.activationRequest?.callbackEvents.length ? payment.activationRequest.callbackEvents.map((event, index) => <small key={`${event.receivedAt}-${index}`}>Result {event.providerResultCode ?? 'unknown'} · receipt {event.providerReceiptReference ? 'verified' : 'not present'} · {new Date(event.receivedAt).toLocaleString('en-KE')}</small>) : <small>No callback event recorded.</small>}</div>
-            {payment.reconciliationAttempts.length > 0 && <div className="reconciliation-history"><b>Recent investigation notes</b>{payment.reconciliationAttempts.map((attempt) => <small key={attempt.id}>{new Date(attempt.requestedAt).toLocaleString('en-KE')} · {attempt.superadmin.email} · {attempt.operatorNote}{attempt.submittedAccountReference && attempt.submittedCheckoutRequestId && attempt.submittedMerchantRequestId ? ` · Account reference ${attempt.submittedAccountReference} · Safaricom IDs ${attempt.submittedCheckoutRequestId} / ${attempt.submittedMerchantRequestId}` : ''}</small>)}</div>}
+            {payment.reconciliationAttempts.length > 0 && <div className="reconciliation-history"><b>Recent investigation notes</b>{payment.reconciliationAttempts.map((attempt) => <div key={attempt.id}><small>{new Date(attempt.requestedAt).toLocaleString('en-KE')} · {attempt.superadmin.email} · {attempt.operatorNote}{attempt.submittedAccountReference && attempt.submittedCheckoutRequestId && attempt.submittedMerchantRequestId ? ` · ${attempt.evidenceSource ?? 'Evidence source not recorded'} ${attempt.evidenceReference ?? ''} · AccountReference ${attempt.submittedAccountReference} · Safaricom IDs ${attempt.submittedCheckoutRequestId} / ${attempt.submittedMerchantRequestId}` : ''}</small>{payment.needsProviderIdentifiers && attempt.outcome === 'EVIDENCE_SUBMITTED_AWAITING_REVIEW' && <div><p role="status">Compare the cited Safaricom record with this payment. A different Superadmin must complete this review before LoanPlus queries Safaricom or binds the IDs.</p><button className="quiet-button" type="button" disabled={refreshingId !== null || (notes[payment.id]?.trim().length ?? 0) < 10} onClick={() => void verifyProviderEvidence(payment, attempt)}>Verify evidence and query</button></div>}</div>)}</div>}
             <label>Investigation note<textarea value={notes[payment.id] ?? ''} onChange={(event) => setNotes((current) => ({ ...current, [payment.id]: event.target.value }))} minLength={10} maxLength={500} placeholder="Record the reason for refreshing this provider status." /></label>
             {payment.needsProviderIdentifiers && <div className="reconciliation-provider-identifiers">
-              <p>Look up this request in Safaricom’s official records. Enter the exact AccountReference and both IDs; LoanPlus verifies the reference and queries Safaricom before binding IDs.</p>
-              <label>Safaricom AccountReference<input value={providerIdentifiers[payment.id]?.accountReference ?? ''} onChange={(event) => setProviderIdentifiers((current) => ({ ...current, [payment.id]: { accountReference: event.target.value, checkoutRequestId: current[payment.id]?.checkoutRequestId ?? '', merchantRequestId: current[payment.id]?.merchantRequestId ?? '' } }))} maxLength={12} autoComplete="off" /></label>
-              <label>Safaricom checkout request ID<input value={providerIdentifiers[payment.id]?.checkoutRequestId ?? ''} onChange={(event) => setProviderIdentifiers((current) => ({ ...current, [payment.id]: { accountReference: current[payment.id]?.accountReference ?? '', checkoutRequestId: event.target.value, merchantRequestId: current[payment.id]?.merchantRequestId ?? '' } }))} maxLength={100} autoComplete="off" /></label>
-              <label>Safaricom merchant request ID<input value={providerIdentifiers[payment.id]?.merchantRequestId ?? ''} onChange={(event) => setProviderIdentifiers((current) => ({ ...current, [payment.id]: { accountReference: current[payment.id]?.accountReference ?? '', checkoutRequestId: current[payment.id]?.checkoutRequestId ?? '', merchantRequestId: event.target.value } }))} maxLength={100} autoComplete="off" /></label>
+              <p>Record the exact AccountReference and both IDs from official Safaricom records, plus its evidence source and case/reference. This records evidence only; a different Superadmin must verify it before LoanPlus queries Safaricom.</p>
+              <label>Evidence source<select value={providerIdentifiers[payment.id]?.evidenceSource ?? ''} onChange={(event) => setProviderIdentifiers((current) => ({ ...current, [payment.id]: { accountReference: current[payment.id]?.accountReference ?? '', checkoutRequestId: current[payment.id]?.checkoutRequestId ?? '', merchantRequestId: current[payment.id]?.merchantRequestId ?? '', evidenceSource: event.target.value, evidenceReference: current[payment.id]?.evidenceReference ?? '' } }))} required><option value="">Select source</option><option value="SAFARICOM_PORTAL">Safaricom portal</option><option value="SAFARICOM_SUPPORT">Safaricom support</option></select></label>
+              <label>Safaricom case/record reference<input value={providerIdentifiers[payment.id]?.evidenceReference ?? ''} onChange={(event) => setProviderIdentifiers((current) => ({ ...current, [payment.id]: { accountReference: current[payment.id]?.accountReference ?? '', checkoutRequestId: current[payment.id]?.checkoutRequestId ?? '', merchantRequestId: current[payment.id]?.merchantRequestId ?? '', evidenceSource: current[payment.id]?.evidenceSource ?? '', evidenceReference: event.target.value } }))} minLength={3} maxLength={100} autoComplete="off" /></label>
+              <label>Safaricom AccountReference<input value={providerIdentifiers[payment.id]?.accountReference ?? ''} onChange={(event) => setProviderIdentifiers((current) => ({ ...current, [payment.id]: { ...current[payment.id], accountReference: event.target.value } }))} maxLength={12} autoComplete="off" /></label>
+              <label>Safaricom checkout request ID<input value={providerIdentifiers[payment.id]?.checkoutRequestId ?? ''} onChange={(event) => setProviderIdentifiers((current) => ({ ...current, [payment.id]: { ...current[payment.id], checkoutRequestId: event.target.value } }))} maxLength={100} autoComplete="off" /></label>
+              <label>Safaricom merchant request ID<input value={providerIdentifiers[payment.id]?.merchantRequestId ?? ''} onChange={(event) => setProviderIdentifiers((current) => ({ ...current, [payment.id]: { ...current[payment.id], merchantRequestId: event.target.value } }))} maxLength={100} autoComplete="off" /></label>
             </div>}
             {payment.reconciliationStatus === 'ESCALATED' && <p role="status">Escalated for provider investigation; wait for authoritative evidence before taking further action.</p>}
             <div className="reconciliation-actions">
-              <button className="button" type="button" disabled={refreshingId !== null || escalatingId !== null || (notes[payment.id]?.trim().length ?? 0) < 10 || (payment.needsProviderIdentifiers && (!providerIdentifiers[payment.id]?.accountReference.trim() || !providerIdentifiers[payment.id]?.checkoutRequestId.trim() || !providerIdentifiers[payment.id]?.merchantRequestId.trim()))} onClick={() => void refreshPayment(payment)}>{refreshingId === payment.id ? 'Checking Safaricom…' : payment.needsProviderIdentifiers ? 'Verify supplied Safaricom IDs' : 'Refresh provider status'}</button>
+              <button className="button" type="button" disabled={refreshingId !== null || escalatingId !== null || (notes[payment.id]?.trim().length ?? 0) < 10 || (payment.needsProviderIdentifiers && (!providerIdentifiers[payment.id]?.accountReference.trim() || !providerIdentifiers[payment.id]?.checkoutRequestId.trim() || !providerIdentifiers[payment.id]?.merchantRequestId.trim() || !providerIdentifiers[payment.id]?.evidenceSource || !providerIdentifiers[payment.id]?.evidenceReference.trim()))} onClick={() => void refreshPayment(payment)}>{refreshingId === payment.id ? 'Recording evidence…' : payment.needsProviderIdentifiers ? 'Submit evidence for review' : 'Refresh provider status'}</button>
               <button className="quiet-button" type="button" disabled={refreshingId !== null || escalatingId !== null || (notes[payment.id]?.trim().length ?? 0) < 10} onClick={() => void escalatePayment(payment)}>{escalatingId === payment.id ? 'Recording escalation…' : 'Escalate for investigation'}</button>
             </div>
           </article>

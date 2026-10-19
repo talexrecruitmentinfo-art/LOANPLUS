@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { IsOptional, IsString, Length } from 'class-validator';
+import { Equals, IsBoolean, IsIn, IsOptional, IsString, Length, Matches } from 'class-validator';
 import type { AuthenticatedRequest } from '../auth/request.types';
 import { SuperadminSessionGuard } from '../auth/session.guard';
 import { PaymentService, type ReconciliationQueueCategory } from './payment.service';
@@ -24,6 +24,30 @@ class ReconcilePaymentDto {
   @IsString()
   @Length(1, 100)
   merchantRequestId?: string;
+
+  @IsOptional()
+  @IsIn(['SAFARICOM_PORTAL', 'SAFARICOM_SUPPORT'])
+  evidenceSource?: 'SAFARICOM_PORTAL' | 'SAFARICOM_SUPPORT';
+
+  @IsOptional()
+  @IsString()
+  @Length(3, 100)
+  @Matches(/^[A-Za-z0-9._:/-]+$/)
+  evidenceReference?: string;
+}
+
+class VerifyProviderEvidenceDto {
+  @IsString()
+  @Length(1, 40)
+  evidenceAttemptId!: string;
+
+  @IsString()
+  @Length(10, 500)
+  note!: string;
+
+  @IsBoolean()
+  @Equals(true)
+  evidenceReviewed!: boolean;
 }
 
 function assertSameOrigin(request: AuthenticatedRequest): void {
@@ -93,8 +117,32 @@ export class PaymentReconciliationController {
               accountReference: dto.accountReference ?? '',
               checkoutRequestId: dto.checkoutRequestId ?? '',
               merchantRequestId: dto.merchantRequestId ?? '',
+              evidenceSource: dto.evidenceSource,
+              evidenceReference: dto.evidenceReference,
             }
           : undefined,
+      ),
+    };
+  }
+
+  @Post(':paymentId/verify-evidence')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async verifyEvidence(
+    @Param('paymentId') paymentId: string,
+    @Body() dto: VerifyProviderEvidenceDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    assertSameOrigin(request);
+    return {
+      data: await this.payments.verifyUncertainProcessingFeeEvidence(
+        paymentId,
+        dto.evidenceAttemptId,
+        idempotencyKey,
+        request.principal!.id,
+        dto.note,
+        dto.evidenceReviewed,
+        request.ip,
       ),
     };
   }

@@ -86,5 +86,7 @@ test('Admin reconciliation requires supplied Safaricom IDs only for uncertain in
   assert.match(reconciliation, /accountReference: identifiers\?\.accountReference\.trim\(\)/);
   assert.match(reconciliation, /checkoutRequestId: identifiers\?\.checkoutRequestId\.trim\(\)/);
   assert.match(reconciliation, /merchantRequestId: identifiers\?\.merchantRequestId\.trim\(\)/);
-  assert.match(reconciliation, /queries Safaricom before binding IDs/);
+  assert.match(reconciliation, /different Superadmin must verify it before LoanPlus queries Safaricom/);
+  assert.match(reconciliation, /\/verify-evidence/);
+  assert.match(reconciliation, /EVIDENCE_SUBMITTED_AWAITING_REVIEW/);
 });

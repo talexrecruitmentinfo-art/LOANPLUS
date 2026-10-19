@@ -379,6 +379,7 @@ model PaymentTransaction {
   receiptReference       String?                        @unique @db.VarChar(32)
   confirmedAt            DateTime?
   failureCode            String?                        @db.VarChar(40)
+  initiationPhase         String?                        @db.VarChar(40)
   createdAt              DateTime                       @default(now())
   updatedAt              DateTime                       @updatedAt
   user                   User                           @relation(fields: [userId], references: [id], onDelete: Restrict)
@@ -446,6 +447,8 @@ model PaymentReconciliationAttempt {
   submittedAccountReference String?       @db.VarChar(12)
   submittedCheckoutRequestId String?       @db.VarChar(100)
   submittedMerchantRequestId String?       @db.VarChar(100)
+  evidenceSource String?                  @db.VarChar(40)
+  evidenceReference String?               @db.VarChar(100)
   requestedAt          DateTime           @default(now())
   completedAt          DateTime?
   paymentTransaction   PaymentTransaction @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)

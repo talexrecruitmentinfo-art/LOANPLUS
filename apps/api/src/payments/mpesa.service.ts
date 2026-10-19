@@ -47,7 +47,7 @@ export class MpesaService {
     accountReference: string;
     description: string;
     callbackUrl: string;
-  }): Promise<StkInitiationResult> {
+  }, beforeStkRequest?: () => Promise<void>): Promise<StkInitiationResult> {
     const { apiBase, shortCode, partyB, passkey, transactionType } = this.getConfiguration();
     this.requiredSetting('MPESA_CONSUMER_KEY');
     this.requiredSetting('MPESA_CONSUMER_SECRET');
@@ -69,6 +69,7 @@ export class MpesaService {
     }
     const timestamp = this.formatTimestamp(new Date());
     const password = Buffer.from(`${shortCode}${passkey}${timestamp}`).toString('base64');
+    await beforeStkRequest?.();
     let response: Record<string, unknown>;
     try {
       response = await this.requestJson(`${apiBase}/mpesa/stkpush/v1/processrequest`, {

@@ -2,6 +2,9 @@ import { PaymentController } from './payment.controller';
 import { PaymentService } from './payment.service';
 import { LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
 import { getLoanProcessingFeePolicy } from './processing-fee.constants';
+import 'reflect-metadata';
+import { CustomerSessionGuard } from '../auth/session.guard';
+import type { AuthenticatedRequest } from '../auth/request.types';
 
 describe('PaymentController', () => {
   const originalPolicyEnvironment = {
@@ -36,6 +39,35 @@ describe('PaymentController', () => {
     await expect(controller.getLoanProcessingFeeQuote()).resolves.toEqual({
       data: quote,
     });
+  });
+
+  it('returns the authenticated customer unresolved-fee status and guards the endpoint', async () => {
+    const unresolved = {
+      reference: 'LPP_UNRESOLVED_REFERENCE',
+      status: 'PENDING',
+      amountKes: 50,
+      currency: 'KES',
+      initiationPhase: 'STK_REQUEST_OUTCOME_UNCERTAIN',
+      createdAt: new Date(),
+      message: 'A previous processing-fee payment is unresolved. Do not pay again until it has been reconciled.',
+    };
+    const getUnresolvedLoanProcessingFeePayment = jest.fn(async () => unresolved);
+    const controller = new PaymentController({ getUnresolvedLoanProcessingFeePayment } as unknown as PaymentService);
+    const request = { principal: { id: 'customer-id' } } as AuthenticatedRequest;
+    const handler = PaymentController.prototype.getUnresolvedLoanProcessingFee;
+
+    await expect(controller.getUnresolvedLoanProcessingFee(request)).resolves.toEqual({ data: unresolved });
+    expect(getUnresolvedLoanProcessingFeePayment).toHaveBeenCalledWith('customer-id');
+    expect(Reflect.getMetadata('__guards__', handler)).toContain(CustomerSessionGuard);
+  });
+
+  it('returns null when no unresolved processing-fee payment exists', async () => {
+    const getUnresolvedLoanProcessingFeePayment = jest.fn(async () => null);
+    const controller = new PaymentController({ getUnresolvedLoanProcessingFeePayment } as unknown as PaymentService);
+
+    await expect(controller.getUnresolvedLoanProcessingFee({ principal: { id: 'customer-id' } } as never)
+    ).resolves.toEqual({ data: null });
+    expect(getUnresolvedLoanProcessingFeePayment).toHaveBeenCalledWith('customer-id');
   });
 
   it('returns only a valid approved non-draft customer policy', async () => {
