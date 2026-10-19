@@ -650,6 +650,35 @@ export class PaymentService {
           evidenceReference: evidenceReference!,
         }
       : undefined;
+    const assertSameReplay = (existing: {
+      id: string;
+      outcome: string;
+      providerResultCode: string | null;
+      reasonCode: string | null;
+      operatorNote: string;
+      superadminId: string;
+      submittedAccountReference?: string | null;
+      submittedCheckoutRequestId?: string | null;
+      submittedMerchantRequestId?: string | null;
+      evidenceSource?: string | null;
+      evidenceReference?: string | null;
+    }) => {
+      if (existing.superadminId !== superadminId) {
+        throw new ConflictException('This idempotency key belongs to another administrator.');
+      }
+      const isDifferentAction = existing.outcome === 'ESCALATED' ||
+        existing.reasonCode === 'PROVIDER_INVESTIGATION_REQUIRED' ||
+        existing.reasonCode === 'INDEPENDENT_PROVIDER_EVIDENCE_REVIEW' ||
+        (existing.submittedAccountReference ?? null) !== (submittedIdentifiers?.accountReference ?? null) ||
+        (existing.submittedCheckoutRequestId ?? null) !== (submittedIdentifiers?.checkoutRequestId ?? null) ||
+        (existing.submittedMerchantRequestId ?? null) !== (submittedIdentifiers?.merchantRequestId ?? null) ||
+        (existing.evidenceSource ?? null) !== (submittedIdentifiers?.evidenceSource ?? null) ||
+        (existing.evidenceReference ?? null) !== (submittedIdentifiers?.evidenceReference ?? null);
+      if (isDifferentAction) {
+        throw new ConflictException('This idempotency key was already used for a different reconciliation action.');
+      }
+      return existing;
+    };
 
     const now = new Date();
     let attempt: { id: string; outcome: string; providerResultCode: string | null; reasonCode: string | null };
@@ -658,13 +687,22 @@ export class PaymentService {
       const started = await this.prisma.$transaction(async (tx) => {
         const existing = await tx.paymentReconciliationAttempt.findUnique({
           where: { paymentTransactionId_idempotencyKey: { paymentTransactionId: paymentId, idempotencyKey } },
-          select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, superadminId: true },
+          select: {
+            id: true,
+            outcome: true,
+            providerResultCode: true,
+            reasonCode: true,
+            operatorNote: true,
+            superadminId: true,
+            submittedAccountReference: true,
+            submittedCheckoutRequestId: true,
+            submittedMerchantRequestId: true,
+            evidenceSource: true,
+            evidenceReference: true,
+          },
         });
         if (existing) {
-          if (existing.superadminId !== superadminId) {
-            throw new ConflictException('This idempotency key belongs to another administrator.');
-          }
-          return { attempt: existing, payment: null, duplicate: true };
+          return { attempt: assertSameReplay(existing), payment: null, duplicate: true };
         }
 
         const currentPayment = await tx.paymentTransaction.findUnique({
@@ -743,19 +781,28 @@ export class PaymentService {
       payment = started.payment;
       if (started.duplicate || !payment) return attempt;
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2002' || error.code === 'P2034')) {
         const duplicate = await this.prisma.paymentReconciliationAttempt.findUnique({
           where: { paymentTransactionId_idempotencyKey: { paymentTransactionId: paymentId, idempotencyKey } },
-          select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, operatorNote: true, superadminId: true },
+          select: {
+            id: true,
+            outcome: true,
+            providerResultCode: true,
+            reasonCode: true,
+            operatorNote: true,
+            superadminId: true,
+            submittedAccountReference: true,
+            submittedCheckoutRequestId: true,
+            submittedMerchantRequestId: true,
+            evidenceSource: true,
+            evidenceReference: true,
+          },
         });
-        if (duplicate) {
-          if (duplicate.superadminId !== superadminId) {
-            throw new ConflictException('This idempotency key belongs to another administrator.');
-          }
-          return duplicate;
+        if (duplicate) return assertSameReplay(duplicate);
+        if (error.code === 'P2034') {
+          throw new ConflictException('Another reconciliation request is being processed. Try again shortly.');
         }
-      }
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+      } else if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
         throw new ConflictException('Another reconciliation request is being processed. Try again shortly.');
       }
       throw error;
@@ -1085,7 +1132,7 @@ export class PaymentService {
     try {
       started = await startEvidenceReview();
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2002' || error.code === 'P2034')) {
         const duplicate = await this.prisma.paymentReconciliationAttempt.findUnique({
           where: { paymentTransactionId_idempotencyKey: { paymentTransactionId: paymentId, idempotencyKey } },
           select: { id: true, outcome: true, providerResultCode: true, reasonCode: true, superadminId: true, operatorNote: true },
@@ -1099,9 +1146,9 @@ export class PaymentService {
           }
           return duplicate;
         }
-      }
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
-        throw new ConflictException('Another evidence review request is being processed. Try again shortly.');
+        if (error.code === 'P2034') {
+          throw new ConflictException('Another evidence review request is being processed. Try again shortly.');
+        }
       }
       throw error;
     }
@@ -1279,7 +1326,7 @@ export class PaymentService {
         return escalation;
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2002' || error.code === 'P2034')) {
         const duplicate = await findDuplicate();
         if (duplicate) {
           if (duplicate.superadminId !== superadminId) {
@@ -1290,9 +1337,9 @@ export class PaymentService {
           }
           return duplicate;
         }
-      }
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
-        throw new ConflictException('Another reconciliation request is being processed. Try again shortly.');
+        if (error.code === 'P2034') {
+          throw new ConflictException('Another reconciliation request is being processed. Try again shortly.');
+        }
       }
       throw error;
     }

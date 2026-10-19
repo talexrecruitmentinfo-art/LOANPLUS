@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ServiceUnavailableException } from '@nestjs/common';
-import { PaymentType, type PaymentStatus } from '@prisma/client';
+import { PaymentType, Prisma, type PaymentStatus } from '@prisma/client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { LedgerService } from '../ledger/ledger.service';
 import type { MpesaService } from './mpesa.service';
@@ -153,7 +153,7 @@ describe('PaymentService provider reconciliation', () => {
       { queryStkStatus } as unknown as MpesaService,
       { postWithinTransaction } as unknown as LedgerService,
     );
-    return { service, prisma, queryStkStatus, createAttempt, updateAttempt, paymentUpdate, postWithinTransaction, transactionClient, findPriorAttempt, findRecentAttempt };
+    return { service, prisma, queryStkStatus, createAttempt, updateAttempt, paymentUpdate, postWithinTransaction, transactionClient, findPriorAttempt, findRecentAttempt, transaction };
   }
 
   it('records 4999 as unresolved without changing payment or ledger state', async () => {
@@ -249,6 +249,43 @@ describe('PaymentService provider reconciliation', () => {
     expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
   });
 
+  it('returns the original evidence submission for an exact idempotent replay', async () => {
+    const fixture = createService();
+    const evidenceAttempt = {
+      id: 'evidence-attempt-id',
+      outcome: 'EVIDENCE_SUBMITTED_AWAITING_REVIEW',
+      providerResultCode: null,
+      reasonCode: 'INDEPENDENT_EVIDENCE_REVIEW_REQUIRED',
+      operatorNote: 'Original evidence submission',
+      superadminId: 'superadmin-id',
+      submittedAccountReference: '123456789012',
+      submittedCheckoutRequestId: request.checkoutRequestId,
+      submittedMerchantRequestId: request.merchantRequestId,
+      evidenceSource: 'SAFARICOM_PORTAL',
+      evidenceReference: 'CASE-123456',
+    };
+    fixture.findPriorAttempt.mockResolvedValueOnce(evidenceAttempt);
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'evidence-submission-replay-01',
+      'superadmin-id',
+      'Retried evidence submission with the same IDs',
+      '127.0.0.1',
+      {
+        accountReference: '123456789012',
+        checkoutRequestId: request.checkoutRequestId,
+        merchantRequestId: request.merchantRequestId,
+        evidenceSource: 'SAFARICOM_PORTAL',
+        evidenceReference: 'CASE-123456',
+      },
+    );
+
+    expect(result).toEqual(evidenceAttempt);
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.createAttempt).not.toHaveBeenCalled();
+  });
+
   it('requires a different Superadmin and matching provider IDs before binding, without settling from query success', async () => {
     const uncertainPayment = {
       ...payment,
@@ -293,6 +330,85 @@ describe('PaymentService provider reconciliation', () => {
     });
     expect(fixture.paymentUpdate).not.toHaveBeenCalled();
     expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('returns the original evidence-review outcome for a same-reviewer replay', async () => {
+    const fixture = createService();
+    const reviewedAttempt = {
+      id: 'review-attempt-id',
+      outcome: 'SUCCESS_AWAITING_VERIFIED_CALLBACK',
+      providerResultCode: '0',
+      reasonCode: 'QUERY_SUCCESS_CALLBACK_METADATA_REQUIRED',
+      operatorNote: 'Reviewed evidence attempt-id: Independent provider review complete',
+      superadminId: 'reviewing-superadmin-id',
+    };
+    fixture.findPriorAttempt.mockResolvedValueOnce(reviewedAttempt);
+
+    const result = await fixture.service.verifyUncertainProcessingFeeEvidence(
+      paymentId,
+      'attempt-id',
+      'evidence-review-replay-0001',
+      'reviewing-superadmin-id',
+      'Independent provider review complete',
+      true,
+      '127.0.0.1',
+    );
+
+    expect(result).toEqual(reviewedAttempt);
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+  });
+
+  it('conflicts when an evidence-review key is reused for a different evidence attempt', async () => {
+    const fixture = createService();
+    fixture.findPriorAttempt.mockResolvedValueOnce({
+      id: 'review-attempt-id',
+      outcome: 'SUCCESS_AWAITING_VERIFIED_CALLBACK',
+      providerResultCode: '0',
+      reasonCode: 'QUERY_SUCCESS_CALLBACK_METADATA_REQUIRED',
+      operatorNote: 'Reviewed evidence another-attempt: Original review',
+      superadminId: 'reviewing-superadmin-id',
+    });
+
+    await expect(fixture.service.verifyUncertainProcessingFeeEvidence(
+      paymentId,
+      'attempt-id',
+      'evidence-review-replay-0002',
+      'reviewing-superadmin-id',
+      'Review a different submission',
+      true,
+      '127.0.0.1',
+    )).rejects.toBeInstanceOf(ConflictException);
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns a committed evidence-review attempt after a concurrent serialization race', async () => {
+    const fixture = createService();
+    const reviewedAttempt = {
+      id: 'review-attempt-id',
+      outcome: 'SUCCESS_AWAITING_VERIFIED_CALLBACK',
+      providerResultCode: '0',
+      reasonCode: 'QUERY_SUCCESS_CALLBACK_METADATA_REQUIRED',
+      operatorNote: 'Reviewed evidence attempt-id: Same review',
+      superadminId: 'reviewing-superadmin-id',
+    };
+    fixture.transaction.mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError(
+      'Concurrent evidence-review transaction',
+      { code: 'P2034', clientVersion: '6.19.3' },
+    ));
+    fixture.findPriorAttempt.mockResolvedValueOnce(reviewedAttempt);
+
+    const result = await fixture.service.verifyUncertainProcessingFeeEvidence(
+      paymentId,
+      'attempt-id',
+      'evidence-review-race-0001',
+      'reviewing-superadmin-id',
+      'Same review',
+      true,
+      '127.0.0.1',
+    );
+
+    expect(result).toEqual(reviewedAttempt);
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
   });
 
   it('does not bind evidence IDs when the independent review query returns mismatched identifiers', async () => {
@@ -728,6 +844,67 @@ describe('PaymentService provider reconciliation', () => {
     );
 
     expect(result.outcome).toBe('UNRESOLVED_PROCESSING');
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.createAttempt).not.toHaveBeenCalled();
+  });
+
+  it('conflicts when a replay key is reused for a different reconciliation action', async () => {
+    const fixture = createService();
+    fixture.findPriorAttempt.mockResolvedValueOnce({
+      id: 'existing-attempt',
+      outcome: 'EVIDENCE_SUBMITTED_AWAITING_REVIEW',
+      providerResultCode: null,
+      reasonCode: 'INDEPENDENT_EVIDENCE_REVIEW_REQUIRED',
+      operatorNote: 'Safaricom record supplied for independent review',
+      superadminId: 'superadmin-id',
+      submittedAccountReference: '123456789012',
+      submittedCheckoutRequestId: request.checkoutRequestId,
+      submittedMerchantRequestId: request.merchantRequestId,
+      evidenceSource: 'SAFARICOM_PORTAL',
+      evidenceReference: 'CASE-123456',
+    });
+
+    await expect(fixture.service.reconcileActivationPayment(
+      paymentId,
+      'reconciliation-request-0007',
+      'superadmin-id',
+      'Refresh provider status instead of submitting evidence',
+      '127.0.0.1',
+    )).rejects.toBeInstanceOf(ConflictException);
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.createAttempt).not.toHaveBeenCalled();
+  });
+
+  it.each(['P2002', 'P2034'])('returns the stored attempt after a concurrent %s insert race', async (code) => {
+    const fixture = createService();
+    const existingAttempt = {
+      id: 'existing-attempt',
+      outcome: 'UNRESOLVED_PROCESSING',
+      providerResultCode: '4999',
+      reasonCode: 'PROVIDER_STILL_PROCESSING',
+      operatorNote: 'Same reconciliation action and note',
+      superadminId: 'superadmin-id',
+      submittedAccountReference: null,
+      submittedCheckoutRequestId: null,
+      submittedMerchantRequestId: null,
+      evidenceSource: null,
+      evidenceReference: null,
+    };
+    fixture.transaction.mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError(
+      'Concurrent reconciliation insert',
+      { code, clientVersion: '6.19.3' },
+    ));
+    fixture.findPriorAttempt.mockResolvedValueOnce(existingAttempt);
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'reconciliation-race-request-01',
+      'superadmin-id',
+      'Same reconciliation action and note',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({ id: 'existing-attempt', outcome: 'UNRESOLVED_PROCESSING' });
     expect(fixture.queryStkStatus).not.toHaveBeenCalled();
     expect(fixture.createAttempt).not.toHaveBeenCalled();
   });
