@@ -1,8 +1,10 @@
 import { BadRequestException } from '@nestjs/common';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { AdminController } from './admin.controller';
 import type { AdminService } from './admin.service';
 import type { AuthenticatedRequest } from '../auth/request.types';
 import type { AuthService } from '../auth/auth.service';
+import { SuperadminSessionGuard } from '../auth/session.guard';
 
 describe('AdminController listing filters', () => {
   const admin = {
@@ -10,13 +12,19 @@ describe('AdminController listing filters', () => {
     listPayments: jest.fn(),
     getCustomerDetails: jest.fn(),
     updateCustomerStatus: jest.fn(),
-  updateCustomerProfile: jest.fn(),
-  getAuditEvents: jest.fn(),
+    updateCustomerIdentityStatus: jest.fn(),
+    updateCustomerProfile: jest.fn(),
+    getAuditEvents: jest.fn(),
   };
   const auth = { requestCustomerPasswordReset: jest.fn() };
   const controller = new AdminController(admin as unknown as AdminService, auth as unknown as AuthService);
 
   beforeEach(() => jest.clearAllMocks());
+
+  it('protects customer identity decisions with the verified Superadmin session role', () => {
+    const guards = Reflect.getMetadata(GUARDS_METADATA, AdminController) as unknown[];
+    expect(guards).toContain(SuperadminSessionGuard);
+  });
 
   it('validates and forwards customer filters and pagination', async () => {
     admin.listCustomers.mockResolvedValue({ items: [], total: 0 });
@@ -73,6 +81,30 @@ describe('AdminController listing filters', () => {
       false,
       'Confirmed support request',
       'admin-id',
+      '127.0.0.1',
+    );
+  });
+
+  it('forwards identity decisions only with the authenticated Admin actor and review confirmation', async () => {
+    admin.updateCustomerIdentityStatus.mockResolvedValue({
+      id: 'customer-id',
+      identityStatus: 'VERIFIED',
+      changed: true,
+    });
+    const request = { principal: { id: 'superadmin-id', role: 'SUPERADMIN' }, ip: '127.0.0.1' } as unknown as AuthenticatedRequest;
+
+    await controller.updateCustomerIdentityStatus('customer-id', {
+      status: 'VERIFIED',
+      reason: 'Reviewed approved identity evidence',
+      reviewConfirmed: true,
+    }, request);
+
+    expect(admin.updateCustomerIdentityStatus).toHaveBeenCalledWith(
+      'customer-id',
+      'VERIFIED',
+      'Reviewed approved identity evidence',
+      true,
+      'superadmin-id',
       '127.0.0.1',
     );
   });

@@ -1,4 +1,4 @@
-import { PaymentStatus, PaymentType } from '@prisma/client';
+import { IdentityStatus, PaymentStatus, PaymentType } from '@prisma/client';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import type { PrismaService } from '../prisma/prisma.service';
 import { AdminService } from './admin.service';
@@ -101,9 +101,16 @@ describe('AdminService financial and account views', () => {
   it('returns bounded customer activity while excluding credentials and raw identity/payment payloads', async () => {
     const customer = { id: 'customer-id', fullName: 'Amina' };
     const findUnique = jest.fn(async (_query: Record<string, unknown>) => customer);
-    const service = new AdminService({ user: { findUnique } } as unknown as PrismaService);
+    const identityReviewLookup = jest.fn().mockResolvedValue(null);
+    const service = new AdminService({
+      user: { findUnique },
+      adminAuditLog: { findFirst: identityReviewLookup },
+    } as unknown as PrismaService);
 
-    await expect(service.getCustomerDetails('customer-id')).resolves.toBe(customer);
+    await expect(service.getCustomerDetails('customer-id')).resolves.toMatchObject({
+      ...customer,
+      identityReview: null,
+    });
 
     const query = findUnique.mock.calls[0][0] as { select: Record<string, unknown> };
     expect(query.select).toHaveProperty('loanApplications');
@@ -116,13 +123,56 @@ describe('AdminService financial and account views', () => {
     expect(query.select).not.toHaveProperty('nationalIdHash');
     expect(query.select).not.toHaveProperty('passwordHash');
     expect(query.select).not.toHaveProperty('sessions');
+    expect(identityReviewLookup).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        subjectType: 'CUSTOMER',
+        subjectId: 'customer-id',
+        action: { in: ['CUSTOMER_IDENTITY_VERIFIED', 'CUSTOMER_IDENTITY_REJECTED'] },
+      }),
+      select: expect.objectContaining({
+        superadmin: { select: { email: true } },
+      }),
+    }));
   });
 
   it('returns an explicit not-found result for a missing customer', async () => {
     const findUnique = jest.fn(async (_query: Record<string, unknown>) => null);
-    const service = new AdminService({ user: { findUnique } } as unknown as PrismaService);
+    const service = new AdminService({
+      user: { findUnique },
+      adminAuditLog: { findFirst: jest.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService);
 
     await expect(service.getCustomerDetails('missing')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('returns the latest identity decision actor and time without exposing the review note', async () => {
+    const customer = {
+      id: 'customer-id',
+      role: 'NORMAL_USER',
+      identityStatus: IdentityStatus.VERIFIED,
+    };
+    const reviewAt = new Date('2026-10-19T20:00:00.000Z');
+    const service = new AdminService({
+      user: { findUnique: jest.fn().mockResolvedValue(customer) },
+      adminAuditLog: {
+        findFirst: jest.fn().mockResolvedValue({
+          action: 'CUSTOMER_IDENTITY_VERIFIED',
+          createdAt: reviewAt,
+          superadmin: { email: 'reviewer@example.invalid' },
+          reason: 'Review note must not be returned',
+        }),
+      },
+    } as unknown as PrismaService);
+
+    const details = await service.getCustomerDetails('customer-id');
+
+    expect(details.identityReview).toEqual({
+      status: IdentityStatus.VERIFIED,
+      reviewerEmail: 'reviewer@example.invalid',
+      reviewedAt: reviewAt,
+    });
+    expect(details).not.toHaveProperty('nationalIdCiphertext');
+    expect(details).not.toHaveProperty('reason');
   });
 
   it('suspends only customer accounts, revokes their sessions, and audits the reason atomically', async () => {
@@ -165,6 +215,215 @@ describe('AdminService financial and account views', () => {
       .rejects.toBeInstanceOf(NotFoundException);
     await expect(service.updateCustomerStatus('customer-id', false, 'short', 'admin-id'))
       .rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  describe('customer identity decisions', () => {
+    const reason = 'Reviewed approved identity evidence';
+
+    it('marks an identity verified atomically and audits actor, previous status, new status, timestamp, and reason', async () => {
+      const customer = { id: 'customer-id', role: 'NORMAL_USER', identityStatus: IdentityStatus.PENDING };
+      const tx = {
+        user: {
+          findUnique: jest.fn().mockResolvedValue(customer),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        adminAuditLog: { create: jest.fn().mockResolvedValue({ id: 'audit-id' }) },
+      };
+      const transaction = jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx));
+      const service = new AdminService({ $transaction: transaction } as unknown as PrismaService);
+
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id',
+        IdentityStatus.VERIFIED,
+        reason,
+        true,
+        'superadmin-id',
+        '127.0.0.1',
+      )).resolves.toEqual({
+        id: 'customer-id',
+        identityStatus: IdentityStatus.VERIFIED,
+        changed: true,
+      });
+      expect(tx.user.updateMany).toHaveBeenCalledWith({
+        where: { id: 'customer-id', role: 'NORMAL_USER', identityStatus: IdentityStatus.PENDING },
+        data: { identityStatus: IdentityStatus.VERIFIED },
+      });
+      expect(tx.adminAuditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          superadminId: 'superadmin-id',
+          action: 'CUSTOMER_IDENTITY_VERIFIED',
+          subjectType: 'CUSTOMER',
+          subjectId: 'customer-id',
+          outcome: 'SUCCESS',
+          reason,
+          createdAt: expect.any(Date),
+          details: {
+            before: { identityStatus: IdentityStatus.PENDING },
+            after: { identityStatus: IdentityStatus.VERIFIED },
+          },
+          ipAddress: '127.0.0.1',
+        }),
+      });
+    });
+
+    it('allows rejection with a required note and writes a rejected decision audit', async () => {
+      const tx = {
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'customer-id',
+            role: 'NORMAL_USER',
+            identityStatus: IdentityStatus.NEEDS_REVIEW,
+          }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        adminAuditLog: { create: jest.fn().mockResolvedValue({ id: 'audit-id' }) },
+      };
+      const service = new AdminService({
+        $transaction: jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+      } as unknown as PrismaService);
+
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.REJECTED, 'Required identity details do not match', true, 'superadmin-id',
+      )).resolves.toMatchObject({ identityStatus: IdentityStatus.REJECTED, changed: true });
+      expect(tx.adminAuditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'CUSTOMER_IDENTITY_REJECTED',
+          reason: 'Required identity details do not match',
+          details: {
+            before: { identityStatus: IdentityStatus.NEEDS_REVIEW },
+            after: { identityStatus: IdentityStatus.REJECTED },
+          },
+        }),
+      });
+    });
+
+    it('rejects missing review confirmation, invalid decision states, short notes, and National ID-like numbers', async () => {
+      const service = new AdminService({} as PrismaService);
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.VERIFIED, reason, false, 'superadmin-id',
+      )).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.PENDING, reason, true, 'superadmin-id',
+      )).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.REJECTED, 'Too short', true, 'superadmin-id',
+      )).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.REJECTED, 'National ID 1234 5678 was checked', true, 'superadmin-id',
+      )).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('does not permit reversing a verified identity to rejected', async () => {
+      const tx = {
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'customer-id',
+            role: 'NORMAL_USER',
+            identityStatus: IdentityStatus.VERIFIED,
+          }),
+          updateMany: jest.fn(),
+        },
+        adminAuditLog: { create: jest.fn() },
+      };
+      const service = new AdminService({
+        $transaction: jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+      } as unknown as PrismaService);
+
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.REJECTED, reason, true, 'superadmin-id',
+      )).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.user.updateMany).not.toHaveBeenCalled();
+      expect(tx.adminAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('does not reject an identity that has not entered review', async () => {
+      const tx = {
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'customer-id',
+            role: 'NORMAL_USER',
+            identityStatus: IdentityStatus.NOT_STARTED,
+          }),
+          updateMany: jest.fn(),
+        },
+        adminAuditLog: { create: jest.fn() },
+      };
+      const service = new AdminService({
+        $transaction: jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+      } as unknown as PrismaService);
+
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.REJECTED, reason, true, 'superadmin-id',
+      )).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.user.updateMany).not.toHaveBeenCalled();
+      expect(tx.adminAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('does not change identity status on privileged or missing accounts', async () => {
+      const tx = {
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'superadmin-customer-id',
+            role: 'SUPERADMIN',
+            identityStatus: IdentityStatus.NOT_STARTED,
+          }),
+          updateMany: jest.fn(),
+        },
+        adminAuditLog: { create: jest.fn() },
+      };
+      const service = new AdminService({
+        $transaction: jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+      } as unknown as PrismaService);
+
+      await expect(service.updateCustomerIdentityStatus(
+        'superadmin-customer-id', IdentityStatus.VERIFIED, reason, true, 'superadmin-id',
+      )).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.user.updateMany).not.toHaveBeenCalled();
+      expect(tx.adminAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('treats a repeated decision as idempotent and avoids duplicate audit events', async () => {
+      const tx = {
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'customer-id',
+            role: 'NORMAL_USER',
+            identityStatus: IdentityStatus.VERIFIED,
+          }),
+          updateMany: jest.fn(),
+        },
+        adminAuditLog: { create: jest.fn() },
+      };
+      const service = new AdminService({
+        $transaction: jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+      } as unknown as PrismaService);
+
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.VERIFIED, reason, true, 'superadmin-id',
+      )).resolves.toEqual({ id: 'customer-id', identityStatus: IdentityStatus.VERIFIED, changed: false });
+      expect(tx.user.updateMany).not.toHaveBeenCalled();
+      expect(tx.adminAuditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('returns unchanged when a concurrent request already applied the same decision', async () => {
+      const tx = {
+        user: {
+          findUnique: jest.fn()
+            .mockResolvedValueOnce({ id: 'customer-id', role: 'NORMAL_USER', identityStatus: IdentityStatus.PENDING })
+            .mockResolvedValueOnce({ id: 'customer-id', role: 'NORMAL_USER', identityStatus: IdentityStatus.VERIFIED }),
+          updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        },
+        adminAuditLog: { create: jest.fn() },
+      };
+      const service = new AdminService({
+        $transaction: jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+      } as unknown as PrismaService);
+
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.VERIFIED, reason, true, 'superadmin-id',
+      )).resolves.toEqual({ id: 'customer-id', identityStatus: IdentityStatus.VERIFIED, changed: false });
+      expect(tx.adminAuditLog.create).not.toHaveBeenCalled();
+    });
   });
 
   it('updates only the customer display name with optimistic concurrency and before/after audit details', async () => {
@@ -264,6 +523,36 @@ describe('AdminService financial and account views', () => {
       take: 25,
     }));
     expect(result).toEqual({ items: [], total: 1, page: 2, pageSize: 25, pageCount: 1 });
+  });
+
+  it('withholds free-form identity review notes from audit API responses', async () => {
+    const service = new AdminService({
+      adminAuditLog: {
+        count: jest.fn().mockResolvedValue(1),
+        findMany: jest.fn().mockResolvedValue([{
+          id: 'audit-id',
+          action: 'CUSTOMER_IDENTITY_VERIFIED',
+          subjectType: 'CUSTOMER',
+          subjectId: 'customer-id',
+          outcome: 'SUCCESS',
+          reason: 'Private review note',
+          details: {
+            before: { identityStatus: IdentityStatus.PENDING },
+            after: { identityStatus: IdentityStatus.VERIFIED },
+          },
+          createdAt: new Date('2026-10-19T20:00:00.000Z'),
+          superadmin: { id: 'admin-id', email: 'admin@example.invalid' },
+        }]),
+      },
+    } as unknown as PrismaService);
+
+    const result = await service.getAuditEvents({ page: 1, pageSize: 25 });
+
+    expect(result.items[0]).toMatchObject({
+      action: 'CUSTOMER_IDENTITY_VERIFIED',
+      reason: null,
+    });
+    expect(result.items[0].reason).not.toBe('Private review note');
   });
 
   it('distinguishes settled payment totals from posted-ledger wallet liabilities', async () => {

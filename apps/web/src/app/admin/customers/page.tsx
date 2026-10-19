@@ -28,6 +28,11 @@ interface CustomerPage {
 interface CustomerDetail extends CustomerRecord {
   activationStatus: string;
   updatedAt: string;
+  identityReview: null | {
+    status: string;
+    reviewerEmail: string | null;
+    reviewedAt: string;
+  };
   loanApplications: Array<{
     id: string;
     status: string;
@@ -96,6 +101,7 @@ export default function AdminCustomersPage() {
   const [detailError, setDetailError] = useState('');
   const [detailNotice, setDetailNotice] = useState('');
   const [statusBusy, setStatusBusy] = useState(false);
+  const [identityBusy, setIdentityBusy] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
   const [passwordResetBusy, setPasswordResetBusy] = useState(false);
   const listRequest = useRef(0);
@@ -192,6 +198,59 @@ export default function AdminCustomersPage() {
       setDetailError(reason instanceof Error ? reason.message : 'Customer account status could not be changed.');
     } finally {
       setStatusBusy(false);
+    }
+  }
+
+  async function updateIdentityStatus(
+    status: 'VERIFIED' | 'REJECTED',
+    form: HTMLFormElement,
+    customer: CustomerDetail,
+  ) {
+    if (!form.reportValidity()) return;
+    if (status === 'VERIFIED' &&
+      !window.confirm(`Confirm that you completed the required identity review for ${customer.fullName} and want to mark the identity as verified?`)) {
+      return;
+    }
+    const values = new FormData(form);
+    setIdentityBusy(true);
+    setDetailError('');
+    setDetailNotice('');
+    try {
+      const result = await apiRequest<{ id: string; identityStatus: string; changed: boolean }>(
+        `/admin/customers/${encodeURIComponent(customer.id)}/identity-status`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            status,
+            reason: values.get('identityReason'),
+            reviewConfirmed: values.get('identityReviewConfirmed') === 'on',
+          }),
+        },
+      );
+      setCustomerDetail((current) => current?.id === result.id
+        ? { ...current, identityStatus: result.identityStatus }
+        : current);
+      setDetailNotice(result.changed
+        ? `Identity status updated to ${result.identityStatus.replaceAll('_', ' ')} and audited.`
+        : `Identity status is already ${result.identityStatus.replaceAll('_', ' ')}.`);
+      const requestId = ++detailRequest.current;
+      try {
+        const refreshed = await apiRequest<CustomerDetail>(
+          `/admin/customers/${encodeURIComponent(customer.id)}`,
+          { cache: 'no-store' },
+        );
+        if (requestId === detailRequest.current && selectedCustomerId === customer.id) {
+          setCustomerDetail(refreshed);
+        }
+      } catch (reason) {
+        setDetailError(`Identity decision was saved, but reviewer details could not be refreshed. Close and reopen this customer record. ${reason instanceof Error ? reason.message : ''}`.trim());
+      }
+      form.reset();
+      await refresh();
+    } catch (reason) {
+      setDetailError(reason instanceof Error ? reason.message : 'Identity status could not be updated.');
+    } finally {
+      setIdentityBusy(false);
     }
   }
 
@@ -295,7 +354,24 @@ export default function AdminCustomersPage() {
                 {detailError && <p className="admin-inline-error" role="alert">{detailError}</p>}
                 {detailNotice && <p className="admin-inline-notice" role="status">{detailNotice}</p>}
                 {customerDetail?.id === customer.id && <div className="admin-customer-detail">
-                  <section><h2>Account overview</h2><dl className="admin-customer-detail-grid"><div><dt>Customer ID</dt><dd>{customerDetail.id}</dd></div><div><dt>Email</dt><dd>{customerDetail.email} · read-only (no verified-change workflow)</dd></div><div><dt>Account status</dt><dd>{customerDetail.isActive ? 'Enabled' : 'Disabled'} · {customerDetail.activationStatus}</dd></div><div><dt>Identity review</dt><dd>{customerDetail.identityStatus.replaceAll('_', ' ')}</dd></div><div><dt>Role</dt><dd>{customerDetail.role}</dd></div><div><dt>Registered</dt><dd>{new Date(customerDetail.createdAt).toLocaleString('en-KE')}</dd></div><div><dt>Updated</dt><dd>{new Date(customerDetail.updatedAt).toLocaleString('en-KE')}</dd></div><div><dt>Recent record limits</dt><dd>Up to 20 per section</dd></div></dl>
+                  <section><h2>Account overview</h2><dl className="admin-customer-detail-grid"><div><dt>Customer ID</dt><dd>{customerDetail.id}</dd></div><div><dt>Email</dt><dd>{customerDetail.email}</dd></div><div><dt>Account status</dt><dd>{customerDetail.isActive ? 'Enabled' : 'Disabled'} · {customerDetail.activationStatus}</dd></div><div><dt>Identity status</dt><dd>{customerDetail.identityStatus.replaceAll('_', ' ')}</dd></div><div><dt>Role</dt><dd>{customerDetail.role}</dd></div><div><dt>Registered</dt><dd>{new Date(customerDetail.createdAt).toLocaleString('en-KE')}</dd></div><div><dt>Updated</dt><dd>{new Date(customerDetail.updatedAt).toLocaleString('en-KE')}</dd></div><div><dt>Recent record limits</dt><dd>Up to 20 per section</dd></div></dl>
+                    <section aria-labelledby="customer-identity-status-heading">
+                      <h3 id="customer-identity-status-heading">Identity status</h3>
+                      <p>Identity decisions are recorded for audit and do not approve a loan or trigger disbursement. Never enter National ID numbers, phone numbers, or document details in the review note.</p>
+                      <dl className="admin-customer-detail-grid">
+                        <div><dt>Current status</dt><dd>{customerDetail.identityStatus.replaceAll('_', ' ')}</dd></div>
+                        <div><dt>Reviewed by</dt><dd>{customerDetail.identityReview?.reviewerEmail ?? 'No recorded decision'}</dd></div>
+                        <div><dt>Decision time</dt><dd>{customerDetail.identityReview ? new Date(customerDetail.identityReview.reviewedAt).toLocaleString('en-KE') : '—'}</dd></div>
+                      </dl>
+                      <form className="admin-status-action">
+                        <label>Decision reason or review note<textarea name="identityReason" minLength={10} maxLength={500} rows={2} required /></label>
+                        <label><input name="identityReviewConfirmed" type="checkbox" required /> I confirm I completed the required identity review using approved evidence.</label>
+                        <div className="admin-filter-actions">
+                          <button className="button button-small" type="button" disabled={identityBusy || customerDetail.identityStatus === 'VERIFIED'} onClick={(event) => void updateIdentityStatus('VERIFIED', event.currentTarget.form!, customerDetail)}>{identityBusy ? 'Saving…' : 'Mark as Verified'}</button>
+                          <button className="quiet-button" type="button" disabled={identityBusy || customerDetail.identityStatus === 'VERIFIED' || customerDetail.identityStatus === 'REJECTED'} onClick={(event) => void updateIdentityStatus('REJECTED', event.currentTarget.form!, customerDetail)}>{identityBusy ? 'Saving…' : 'Reject verification'}</button>
+                        </div>
+                      </form>
+                    </section>
                     <form className="admin-status-action" onSubmit={(event) => void updateCustomerProfile(event, customerDetail)}><h3>Edit permitted profile field</h3><label>Customer display name<input name="fullName" defaultValue={customerDetail.fullName} minLength={2} maxLength={160} required /></label><label>Reason<textarea name="profileReason" minLength={10} maxLength={500} rows={2} required /></label><button className="quiet-button" type="submit" disabled={profileBusy}>{profileBusy ? 'Saving…' : 'Save display name'}</button></form>
                     <form className="admin-status-action" onSubmit={(event) => void updateCustomerStatus(event, customerDetail)}><label>Reason for {customerDetail.isActive ? 'suspension' : 'reactivation'}<textarea name="reason" minLength={10} maxLength={500} rows={2} required /></label><button className="button button-small" type="submit" disabled={statusBusy}>{statusBusy ? 'Saving…' : customerDetail.isActive ? 'Suspend account' : 'Reactivate account'}</button></form>
                     <form className="admin-status-action" onSubmit={(event) => void requestPasswordReset(event, customerDetail)}><h3>Secure password reset</h3><p>A one-time link is sent to the registered address and is never shown to Admins.</p><label>Reason<textarea name="resetReason" minLength={10} maxLength={500} rows={2} required /></label><button className="quiet-button" type="submit" disabled={passwordResetBusy || !customerDetail.isActive}>{passwordResetBusy ? 'Requesting…' : 'Send reset instructions'}</button>{!customerDetail.isActive && <small>Reactivate the account before requesting a password reset.</small>}</form>

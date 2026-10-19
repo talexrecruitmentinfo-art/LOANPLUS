@@ -362,7 +362,107 @@ export class AdminService {
       },
     });
     if (!customer) throw new NotFoundException('Customer account was not found.');
-    return customer;
+    const identityReview = await this.prisma.adminAuditLog.findFirst({
+      where: {
+        subjectType: 'CUSTOMER',
+        subjectId: id,
+        action: { in: ['CUSTOMER_IDENTITY_VERIFIED', 'CUSTOMER_IDENTITY_REJECTED'] },
+        outcome: 'SUCCESS',
+      },
+      select: {
+        action: true,
+        createdAt: true,
+        superadmin: { select: { email: true } },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    return {
+      ...customer,
+      identityReview: identityReview
+        ? {
+          status: identityReview.action === 'CUSTOMER_IDENTITY_VERIFIED' ? IdentityStatus.VERIFIED : IdentityStatus.REJECTED,
+          reviewerEmail: identityReview.superadmin?.email ?? null,
+          reviewedAt: identityReview.createdAt,
+        }
+        : null,
+    };
+  }
+
+  async updateCustomerIdentityStatus(
+    id: string,
+    status: IdentityStatus,
+    reason: string,
+    reviewConfirmed: boolean,
+    adminId: string,
+    ip?: string,
+  ) {
+    const normalizedReason = reason.trim().replace(/\s+/g, ' ');
+    if (status !== IdentityStatus.VERIFIED && status !== IdentityStatus.REJECTED) {
+      throw new BadRequestException('Identity status decisions must be VERIFIED or REJECTED.');
+    }
+    if (normalizedReason.length < 10 || normalizedReason.length > 500) {
+      throw new BadRequestException('A decision reason between 10 and 500 characters is required.');
+    }
+    if (/\b\d(?:[\s-]*\d){6,11}\b/.test(normalizedReason)) {
+      throw new BadRequestException('Do not include identity or contact numbers in the review note.');
+    }
+    if (reviewConfirmed !== true) {
+      throw new BadRequestException('Confirm that the required identity review has been completed.');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const customer = await tx.user.findUnique({
+        where: { id },
+        select: { id: true, role: true, identityStatus: true },
+      });
+      if (!customer || customer.role !== 'NORMAL_USER') {
+        throw new NotFoundException('Customer account was not found.');
+      }
+      if (customer.identityStatus === status) {
+        return { id, identityStatus: status, changed: false };
+      }
+      if (customer.identityStatus === IdentityStatus.VERIFIED) {
+        throw new ConflictException('A verified identity cannot be changed through this decision workflow.');
+      }
+      if (status === IdentityStatus.REJECTED &&
+        customer.identityStatus !== IdentityStatus.PENDING &&
+        customer.identityStatus !== IdentityStatus.NEEDS_REVIEW) {
+        throw new ConflictException('Only an identity review awaiting a decision can be rejected.');
+      }
+
+      const updated = await tx.user.updateMany({
+        where: { id, role: 'NORMAL_USER', identityStatus: customer.identityStatus },
+        data: { identityStatus: status },
+      });
+      if (updated.count !== 1) {
+        const current = await tx.user.findUnique({
+          where: { id },
+          select: { id: true, role: true, identityStatus: true },
+        });
+        if (current?.role === 'NORMAL_USER' && current.identityStatus === status) {
+          return { id, identityStatus: status, changed: false };
+        }
+        throw new ConflictException('Identity status changed during review. Reload the customer and try again.');
+      }
+
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId: adminId,
+          action: status === IdentityStatus.VERIFIED ? 'CUSTOMER_IDENTITY_VERIFIED' : 'CUSTOMER_IDENTITY_REJECTED',
+          subjectType: 'CUSTOMER',
+          subjectId: id,
+          outcome: 'SUCCESS',
+          reason: normalizedReason,
+          createdAt: new Date(),
+          details: {
+            before: { identityStatus: customer.identityStatus },
+            after: { identityStatus: status },
+          },
+          ipAddress: ip,
+        },
+      });
+      return { id, identityStatus: status, changed: true };
+    });
   }
 
   async updateCustomerStatus(id: string, isActive: boolean, reason: string, adminId: string, ip?: string) {
@@ -521,7 +621,9 @@ export class AdminService {
       }),
     ]);
     return {
-      items,
+      items: items.map((item) => item.action === 'CUSTOMER_IDENTITY_VERIFIED' || item.action === 'CUSTOMER_IDENTITY_REJECTED'
+        ? { ...item, reason: null }
+        : item),
       total,
       page: options.page,
       pageSize: options.pageSize,

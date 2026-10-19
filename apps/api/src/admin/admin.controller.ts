@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { IdentityStatus, PaymentStatus, PaymentType } from '@prisma/client';
-import { IsBoolean, IsDateString, IsString, Length, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsDateString, IsIn, IsString, Length, MaxLength, MinLength } from 'class-validator';
 import { Throttle } from '@nestjs/throttler';
 import type { AuthenticatedRequest } from '../auth/request.types';
 import { AuthService } from '../auth/auth.service';
@@ -28,6 +28,18 @@ class UpdateCustomerProfileDto {
   @IsString()
   @Length(10, 500)
   reason!: string;
+}
+
+class UpdateCustomerIdentityStatusDto {
+  @IsIn([IdentityStatus.VERIFIED, IdentityStatus.REJECTED])
+  status!: IdentityStatus;
+
+  @IsString()
+  @Length(10, 500)
+  reason!: string;
+
+  @IsBoolean()
+  reviewConfirmed!: boolean;
 }
 
 class CustomerPasswordResetDto {
@@ -149,6 +161,24 @@ export class AdminController {
         id,
         dto.isActive,
         dto.reason,
+        request.principal!.id,
+        request.ip,
+      ),
+    };
+  }
+
+  @Patch('customers/:id/identity-status')
+  async updateCustomerIdentityStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateCustomerIdentityStatusDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return {
+      data: await this.admin.updateCustomerIdentityStatus(
+        id,
+        dto.status,
+        dto.reason,
+        dto.reviewConfirmed,
         request.principal!.id,
         request.ip,
       ),
