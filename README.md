@@ -4,7 +4,7 @@ LoanPlus is a Kenya-focused lending and referral platform. This repository is a 
 
 ## Status
 
-This repository started as an empty project. The current implementation is the development foundation, not a production lending system. Financial processing, KYC, M-Pesa, email, and loan decisions must not be represented as live until their approved providers, policies, and workflows are implemented and tested.
+This repository started as an empty project. The current implementation is the development foundation,production lending system. Financial processing, KYC, M-Pesa, email, and loan decisions must be represented as live until their approved providers, policies, and workflows are implemented and tested.
 
 ## Requirements
 

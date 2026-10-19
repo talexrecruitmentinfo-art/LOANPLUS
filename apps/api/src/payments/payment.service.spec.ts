@@ -152,7 +152,10 @@ describe('M-Pesa payment callback reconciliation', () => {
           if (where.code === 'MPESA_CLEARING') {
             return { id: 'clearing-account', isActive: true, currency: 'KES', accountType: 'ASSET' };
           }
-          return null;
+          if (where.code === 'LOAN_PROCESSING_FEES') {
+            return { id: 'revenue-account', isActive: true, currency: 'KES', accountType: 'REVENUE' };
+          }
+          return { id: 'wallet-account', userId: 'user-id', isActive: true, currency: 'KES', accountType: 'LIABILITY' };
         }),
         create: jest.fn(async () => ({
           id: 'wallet-account',
@@ -162,6 +165,11 @@ describe('M-Pesa payment callback reconciliation', () => {
           accountType: 'LIABILITY',
         })),
       },
+      loanApplication: {
+        findFirst: jest.fn(async () => ({ id: 'loan-application-id' })),
+        updateMany: jest.fn(async () => ({ count: 1 })),
+      },
+      systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
       user: { update: userUpdate },
       referral: { updateMany: jest.fn(async () => ({ count: 0 })) },
       authAuditLog: { create: jest.fn(async () => ({})) },
@@ -945,6 +953,35 @@ describe('M-Pesa payment callback reconciliation', () => {
     expect(userUpdate).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: 'user-id' },
       data: { activationStatus: 'ACTIVE' },
+    }));
+  });
+
+  it('recovers an uncertain processing-fee initiation only once through a verified callback', async () => {
+    activationRequestRecord.checkoutRequestId = null;
+    activationRequestRecord.merchantRequestId = null;
+    const linkedPayment = activationRequestRecord.paymentTransaction as Record<string, unknown>;
+    linkedPayment.type = PaymentType.LOAN_PROCESSING_FEE;
+    linkedPayment.loanApplicationId = 'loan-application-id';
+
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(paymentUpdateData).toMatchObject({
+      status: 'CONFIRMED',
+      providerReference: checkoutRequestId,
+      receiptReference: 'TESTRECEIPT1',
+    });
+    expect(queryStkStatus).toHaveBeenCalledTimes(1);
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(postLedger).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      idempotencyKey: 'loan-processing-fee:payment-id',
+      transactionType: 'LOAN_PROCESSING_FEE',
+      paymentId: 'payment-id',
+    }));
+    expect(transactionClient.loanApplication.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'loan-application-id', userId: 'user-id', status: 'PROCESSING_PAYMENT_PENDING' },
+      data: { status: 'SUBMITTED', submittedAt: expect.any(Date) },
     }));
   });
 

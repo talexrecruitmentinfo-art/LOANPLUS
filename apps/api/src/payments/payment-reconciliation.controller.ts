@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { IsString, Length } from 'class-validator';
+import { IsOptional, IsString, Length } from 'class-validator';
 import type { AuthenticatedRequest } from '../auth/request.types';
 import { SuperadminSessionGuard } from '../auth/session.guard';
 import { PaymentService, type ReconciliationQueueCategory } from './payment.service';
@@ -9,6 +9,21 @@ class ReconcilePaymentDto {
   @IsString()
   @Length(10, 500)
   note!: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(12, 12)
+  accountReference?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 100)
+  checkoutRequestId?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 100)
+  merchantRequestId?: string;
 }
 
 function assertSameOrigin(request: AuthenticatedRequest): void {
@@ -73,6 +88,13 @@ export class PaymentReconciliationController {
         request.principal!.id,
         dto.note,
         request.ip,
+        dto.checkoutRequestId !== undefined || dto.merchantRequestId !== undefined
+          ? {
+              accountReference: dto.accountReference ?? '',
+              checkoutRequestId: dto.checkoutRequestId ?? '',
+              merchantRequestId: dto.merchantRequestId ?? '',
+            }
+          : undefined,
       ),
     };
   }

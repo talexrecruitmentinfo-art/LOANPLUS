@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { PaymentType, type PaymentStatus } from '@prisma/client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { LedgerService } from '../ledger/ledger.service';
@@ -21,6 +21,7 @@ describe('PaymentService provider reconciliation', () => {
   };
   const payment = {
     id: paymentId,
+    internalReference: 'LPP123456789012',
     userId: 'customer-id',
     type: PaymentType.ACTIVATION,
     loanApplicationId: null,
@@ -39,7 +40,11 @@ describe('PaymentService provider reconciliation', () => {
     operatorNote: 'Investigating missing callback',
   };
 
-  function createService(resultCode = 4999) {
+  function createService(
+    resultCode = 4999,
+    paymentRecord: unknown = payment,
+    verifiedReceiptReference: string | null = null,
+  ) {
     const createAttempt = jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
       ...startedAttempt,
       ...data,
@@ -71,14 +76,32 @@ describe('PaymentService provider reconciliation', () => {
         update: updateAttempt,
       },
       paymentTransaction: {
-        findUnique: jest.fn(async () => payment),
+        findUnique: jest.fn(async () => paymentRecord),
         updateMany: paymentUpdate,
         findUniqueOrThrow: jest.fn(async () => ({ id: paymentId, status: 'PENDING' })),
       },
-      activationPaymentRequest: { updateMany: jest.fn(async () => ({ count: 1 })) },
-      paymentCallbackEvent: { create: jest.fn(async () => ({})) },
+      activationPaymentRequest: {
+        updateMany: jest.fn(async () => ({ count: 1 })),
+        findUnique: jest.fn(async () => null),
+      },
+      paymentCallbackEvent: {
+        create: jest.fn(async () => ({})),
+        findFirst: jest.fn(async () => verifiedReceiptReference
+          ? { id: 'verified-callback-event' }
+          : null),
+      },
+      loanApplication: {
+        findFirst: jest.fn(async () => ({ id: 'loan-application-id' })),
+        updateMany: jest.fn(async () => ({ count: 1 })),
+      },
       adminAuditLog: { create: jest.fn(async () => ({})) },
-      ledgerAccount: { findUnique: jest.fn(async () => null), create: jest.fn(async () => ({})) },
+      ledgerAccount: {
+        findUnique: jest.fn(async ({ where }: { where: { code: string } }) => where.code === 'MPESA_CLEARING'
+          ? { id: 'clearing-account', isActive: true, currency: 'KES', accountType: 'ASSET' }
+          : { id: 'revenue-account', isActive: true, currency: 'KES', accountType: 'REVENUE' }),
+        create: jest.fn(async () => ({})),
+      },
+      systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
       referral: { updateMany: jest.fn(async () => ({ count: 0 })) },
       user: { update: jest.fn(async () => ({})) },
       authAuditLog: { create: jest.fn(async () => ({})) },
@@ -87,8 +110,13 @@ describe('PaymentService provider reconciliation', () => {
     const prisma = {
       systemSetting: { findUnique: jest.fn(async () => null) },
       paymentTransaction: {
-        findUnique: jest.fn(async () => payment),
+        findUnique: jest.fn(async () => paymentRecord),
         findMany: jest.fn(async () => []),
+      },
+      paymentCallbackEvent: {
+        findFirst: jest.fn(async () => verifiedReceiptReference
+          ? { providerReceiptReference: verifiedReceiptReference }
+          : null),
       },
       paymentReconciliationAttempt: { findUnique: findPriorAttempt },
       adminAuditLog: { findMany: jest.fn(async () => []) },
@@ -100,12 +128,13 @@ describe('PaymentService provider reconciliation', () => {
       resultCode,
       resultDescription: 'sanitized fixture description',
     }));
+    const postWithinTransaction = jest.fn(async () => undefined);
     const service = new PaymentService(
       prisma,
       { queryStkStatus } as unknown as MpesaService,
-      { postWithinTransaction: jest.fn() } as unknown as LedgerService,
+      { postWithinTransaction } as unknown as LedgerService,
     );
-    return { service, prisma, queryStkStatus, createAttempt, updateAttempt, paymentUpdate, findPriorAttempt, findRecentAttempt };
+    return { service, prisma, queryStkStatus, createAttempt, updateAttempt, paymentUpdate, postWithinTransaction, transactionClient, findPriorAttempt, findRecentAttempt };
   }
 
   it('records 4999 as unresolved without changing payment or ledger state', async () => {
@@ -125,6 +154,282 @@ describe('PaymentService provider reconciliation', () => {
     }));
     expect(fixture.queryStkStatus).toHaveBeenCalledWith(request.checkoutRequestId);
     expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+  });
+
+  it('records missing identifiers without querying Safaricom or changing the payment', async () => {
+    const paymentWithoutProviderIds = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      activationRequest: {
+        ...request,
+        loanApplicationId: 'loan-application-id',
+        checkoutRequestId: null,
+        merchantRequestId: null,
+      },
+    };
+    const fixture = createService(0, paymentWithoutProviderIds);
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'missing-provider-ids-0001',
+      'superadmin-id',
+      'No provider request identifiers are stored',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'UNRESOLVED_MISSING_IDENTIFIERS',
+      reasonCode: 'PROVIDER_IDENTIFIERS_MISSING',
+    });
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('records submitted identifiers and binds them only after a matching Safaricom query', async () => {
+    const uncertainPayment = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      activationRequest: {
+        ...request,
+        loanApplicationId: 'loan-application-id',
+        checkoutRequestId: null,
+        merchantRequestId: null,
+      },
+    };
+    const fixture = createService(0, uncertainPayment);
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'uncertain-initiation-refresh-01',
+      'superadmin-id',
+      'Safaricom identifiers supplied from official records',
+      '127.0.0.1',
+      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+    );
+
+    expect(fixture.queryStkStatus).toHaveBeenCalledWith(request.checkoutRequestId);
+    expect(fixture.queryStkStatus.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.transactionClient.activationPaymentRequest.updateMany.mock.invocationCallOrder[0],
+    );
+    expect(fixture.createAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        submittedCheckoutRequestId: request.checkoutRequestId,
+        submittedMerchantRequestId: request.merchantRequestId,
+        submittedAccountReference: '123456789012',
+      }),
+    }));
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: request.id,
+        paymentTransactionId: paymentId,
+        userId: payment.userId,
+        checkoutRequestId: null,
+        merchantRequestId: null,
+      },
+      data: {
+        checkoutRequestId: request.checkoutRequestId,
+        merchantRequestId: request.merchantRequestId,
+      },
+    });
+    expect(result).toMatchObject({
+      outcome: 'SUCCESS_AWAITING_VERIFIED_CALLBACK',
+      providerResultCode: '0',
+      reasonCode: 'QUERY_SUCCESS_CALLBACK_METADATA_REQUIRED',
+    });
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('does not bind supplied identifiers when Safaricom returns mismatched identifiers', async () => {
+    const uncertainPayment = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      activationRequest: {
+        ...request,
+        loanApplicationId: 'loan-application-id',
+        checkoutRequestId: null,
+        merchantRequestId: null,
+      },
+    };
+    const fixture = createService(0, uncertainPayment);
+    fixture.queryStkStatus.mockResolvedValueOnce({
+      checkoutRequestId: request.checkoutRequestId,
+      merchantRequestId: 'different-merchant-id',
+      resultCode: 0,
+      resultDescription: 'Sanitized test result',
+    });
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'uncertain-initiation-refresh-02',
+      'superadmin-id',
+      'Safaricom response does not match supplied request identifiers',
+      '127.0.0.1',
+      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+    );
+
+    expect(result).toMatchObject({ outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH', reasonCode: 'PROVIDER_IDENTIFIERS_MISMATCH' });
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects an AccountReference that does not match the payment before querying Safaricom', async () => {
+    const uncertainPayment = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      activationRequest: {
+        ...request,
+        loanApplicationId: 'loan-application-id',
+        checkoutRequestId: null,
+        merchantRequestId: null,
+      },
+    };
+    const fixture = createService(0, uncertainPayment);
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'uncertain-initiation-refresh-04',
+      'superadmin-id',
+      'Safaricom AccountReference does not match payment',
+      '127.0.0.1',
+      { accountReference: 'OTHERREF0001', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'UNRESOLVED_IDENTIFIER_MISMATCH',
+      reasonCode: 'SAFARICOM_ACCOUNT_REFERENCE_MISMATCH',
+    });
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+  });
+
+  it('rejects incomplete operator-supplied Safaricom identifiers', async () => {
+    const fixture = createService();
+
+    await expect(fixture.service.reconcileActivationPayment(
+      paymentId,
+      'invalid-provider-identifiers-01',
+      'superadmin-id',
+      'Safaricom identifiers are incomplete',
+      '127.0.0.1',
+      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: '' },
+    )).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(fixture.createAttempt).not.toHaveBeenCalled();
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+  });
+
+  it('leaves submitted identifiers unbound when Safaricom query is unavailable', async () => {
+    const uncertainPayment = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      activationRequest: {
+        ...request,
+        loanApplicationId: 'loan-application-id',
+        checkoutRequestId: null,
+        merchantRequestId: null,
+      },
+    };
+    const fixture = createService(0, uncertainPayment);
+    fixture.queryStkStatus.mockRejectedValueOnce(new ServiceUnavailableException('Provider unavailable.'));
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'uncertain-initiation-refresh-03',
+      'superadmin-id',
+      'Safaricom query unavailable for official request IDs',
+      '127.0.0.1',
+      { accountReference: '123456789012', checkoutRequestId: request.checkoutRequestId, merchantRequestId: request.merchantRequestId },
+    );
+
+    expect(result).toMatchObject({ outcome: 'UNRESOLVED_PROVIDER_UNAVAILABLE', reasonCode: 'PROVIDER_UNAVAILABLE' });
+    expect(fixture.transactionClient.activationPaymentRequest.updateMany).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('recovers a legacy processing fee only with matching Safaricom success and verified callback receipt evidence', async () => {
+    const legacyProcessingFee = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      status: 'FAILED' as PaymentStatus,
+      failureCode: 'MPESA_RESULT_4999',
+      activationRequest: { ...request, loanApplicationId: 'loan-application-id' },
+    };
+    const fixture = createService(0, legacyProcessingFee, 'TESTRECEIPT1');
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'processing-fee-recovery-0001',
+      'superadmin-id',
+      'Verified callback and Safaricom success evidence',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'RESOLVED_CONFIRMED',
+      providerResultCode: '0',
+      reasonCode: 'VERIFIED_CALLBACK_AND_SUCCESS_QUERY',
+    });
+    expect(fixture.queryStkStatus).toHaveBeenCalledWith(request.checkoutRequestId);
+    expect(fixture.paymentUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        id: paymentId,
+        status: 'FAILED',
+        failureCode: 'MPESA_RESULT_4999',
+        receiptReference: null,
+      },
+      data: expect.objectContaining({
+        status: 'CONFIRMED',
+        receiptReference: 'TESTRECEIPT1',
+        providerReference: request.checkoutRequestId,
+      }),
+    }));
+    expect(fixture.postWithinTransaction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      idempotencyKey: `loan-processing-fee:${paymentId}`,
+      transactionType: 'LOAN_PROCESSING_FEE',
+      paymentId,
+    }));
+  });
+
+  it('keeps a legacy processing fee unresolved when a successful query has no verified callback receipt', async () => {
+    const legacyProcessingFee = {
+      ...payment,
+      type: PaymentType.LOAN_PROCESSING_FEE,
+      loanApplicationId: 'loan-application-id',
+      status: 'FAILED' as PaymentStatus,
+      failureCode: 'MPESA_RESULT_4999',
+      activationRequest: { ...request, loanApplicationId: 'loan-application-id' },
+    };
+    const fixture = createService(0, legacyProcessingFee);
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'processing-fee-recovery-0002',
+      'superadmin-id',
+      'Successful query lacks verified callback receipt',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'SUCCESS_AWAITING_VERIFIED_CALLBACK',
+      reasonCode: 'QUERY_SUCCESS_CALLBACK_METADATA_REQUIRED',
+    });
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
   });
 
   it('lists legacy 4999 records as pending while preserving their stored database status', async () => {

@@ -443,6 +443,9 @@ model PaymentReconciliationAttempt {
   outcome              String             @default("STARTED") @db.VarChar(40)
   providerResultCode   String?            @db.VarChar(40)
   reasonCode           String?            @db.VarChar(80)
+  submittedAccountReference String?       @db.VarChar(12)
+  submittedCheckoutRequestId String?       @db.VarChar(100)
+  submittedMerchantRequestId String?       @db.VarChar(100)
   requestedAt          DateTime           @default(now())
   completedAt          DateTime?
   paymentTransaction   PaymentTransaction @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)

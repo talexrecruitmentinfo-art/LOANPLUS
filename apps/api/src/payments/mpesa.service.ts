@@ -5,6 +5,12 @@ interface StkInitiationResult {
   merchantRequestId: string;
 }
 
+export class StkPushInitiationError extends ServiceUnavailableException {
+  constructor(readonly phase: 'OAUTH' | 'STK_REQUEST' | 'STK_RESPONSE') {
+    super('M-Pesa payment initiation is unavailable.');
+  }
+}
+
 export interface StkStatusResult {
   checkoutRequestId: string;
   merchantRequestId: string;
@@ -55,26 +61,36 @@ export class MpesaService {
     ) {
       throw new ServiceUnavailableException('M-Pesa payment initiation is unavailable.');
     }
-    const accessToken = await this.getAccessToken(apiBase);
+    let accessToken: string;
+    try {
+      accessToken = await this.getAccessToken(apiBase);
+    } catch {
+      throw new StkPushInitiationError('OAUTH');
+    }
     const timestamp = this.formatTimestamp(new Date());
     const password = Buffer.from(`${shortCode}${passkey}${timestamp}`).toString('base64');
-    const response = await this.requestJson(`${apiBase}/mpesa/stkpush/v1/processrequest`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        BusinessShortCode: shortCode,
-        Password: password,
-        Timestamp: timestamp,
-        TransactionType: transactionType,
-        Amount: input.amountKes,
-        PartyA: input.phoneNumber,
-        PartyB: partyB,
-        PhoneNumber: input.phoneNumber,
-        CallBackURL: input.callbackUrl,
-        AccountReference: input.accountReference,
-        TransactionDesc: input.description,
-      }),
-    });
+    let response: Record<string, unknown>;
+    try {
+      response = await this.requestJson(`${apiBase}/mpesa/stkpush/v1/processrequest`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          BusinessShortCode: shortCode,
+          Password: password,
+          Timestamp: timestamp,
+          TransactionType: transactionType,
+          Amount: input.amountKes,
+          PartyA: input.phoneNumber,
+          PartyB: partyB,
+          PhoneNumber: input.phoneNumber,
+          CallBackURL: input.callbackUrl,
+          AccountReference: input.accountReference,
+          TransactionDesc: input.description,
+        }),
+      });
+    } catch {
+      throw new StkPushInitiationError('STK_REQUEST');
+    }
     if (
       response.ResponseCode !== '0' ||
       typeof response.CheckoutRequestID !== 'string' ||
@@ -84,7 +100,7 @@ export class MpesaService {
       response.MerchantRequestID.length === 0 ||
       response.MerchantRequestID.length > 100
     ) {
-      throw new ServiceUnavailableException('M-Pesa did not accept the payment request.');
+      throw new StkPushInitiationError('STK_RESPONSE');
     }
     return {
       checkoutRequestId: response.CheckoutRequestID,

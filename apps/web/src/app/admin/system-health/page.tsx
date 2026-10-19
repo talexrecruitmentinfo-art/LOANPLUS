@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
+import { startPolling } from '@/lib/polling.mjs';
 
 interface AffectedModule {
   name: string;
@@ -85,6 +86,8 @@ export default function AdminSystemHealthPage() {
   const router = useRouter();
   const [dashboard, setDashboard] = useState<HealthDashboard | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastSuccessfulRefresh, setLastSuccessfulRefresh] = useState<string | null>(null);
+  const [staleData, setStaleData] = useState(false);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -94,23 +97,62 @@ export default function AdminSystemHealthPage() {
   const [appliedFilters, setAppliedFilters] = useState({ severity: '', status: '', search: '' });
   const [incidentPage, setIncidentPage] = useState(1);
   const [busyIncident, setBusyIncident] = useState('');
+  const requestInFlight = useRef(false);
+  const activeRequest = useRef<AbortController | null>(null);
+  const hasLoadedDashboard = useRef(false);
+  const refreshQueued = useRef(false);
 
   const refresh = useCallback(async () => {
+    if (requestInFlight.current) {
+      refreshQueued.current = true;
+      return;
+    }
+    requestInFlight.current = true;
+    const controller = new AbortController();
+    activeRequest.current = controller;
     setLoading(true);
     setError('');
     try {
       const params = new URLSearchParams({ page: String(incidentPage), pageSize: '20' });
       for (const [key, value] of Object.entries(appliedFilters)) if (value) params.set(key, value);
-      setDashboard(await apiRequest<HealthDashboard>(`/admin/system-health?${params.toString()}`, { cache: 'no-store' }));
+      const result = await apiRequest<HealthDashboard>(`/admin/system-health?${params.toString()}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      setDashboard(result);
+      hasLoadedDashboard.current = true;
+      setLastSuccessfulRefresh(new Date().toISOString());
+      setStaleData(false);
     } catch (reason) {
+      if (controller.signal.aborted) return;
       if (reason instanceof Error && reason.message.includes('Authentication required')) router.replace('/admin/login');
       setError(reason instanceof Error ? reason.message : 'System health data could not be loaded.');
+      setStaleData(hasLoadedDashboard.current);
     } finally {
-      setLoading(false);
+      if (activeRequest.current === controller) {
+        activeRequest.current = null;
+        requestInFlight.current = false;
+        if (refreshQueued.current) {
+          refreshQueued.current = false;
+          void refresh();
+        } else {
+          setLoading(false);
+        }
+      }
     }
   }, [appliedFilters, incidentPage, router]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    const polling = startPolling(refresh, 300_000);
+    return () => {
+      polling.stop();
+      activeRequest.current?.abort();
+      activeRequest.current = null;
+      requestInFlight.current = false;
+      refreshQueued.current = false;
+    };
+  }, [refresh]);
 
   async function runChecks() {
     setChecking(true);
@@ -121,9 +163,9 @@ export default function AdminSystemHealthPage() {
         method: 'POST',
         body: '{}',
       });
-      if (!result.persisted) setError(result.persistenceMessage);
-      else setNotice(result.persistenceMessage);
+      if (result.persisted) setNotice(result.persistenceMessage);
       await refresh();
+      if (!result.persisted) setError(result.persistenceMessage);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Health checks could not be completed.');
     } finally {
@@ -200,20 +242,24 @@ export default function AdminSystemHealthPage() {
       <section className="dashboard-welcome">
         <p className="eyebrow">OPERATIONS · SYSTEM HEALTH</p>
         <div className="admin-dashboard-title">
-          <div><h1>System health.</h1><p>On-demand observations, incident history, and safe diagnostics. Unknown means the component was not verified.</p></div>
-          <button className="button button-small" type="button" disabled={checking} onClick={() => void runChecks()}>{checking ? 'Checking…' : 'Run health checks'}</button>
+          <div><h1>System health.</h1><p>Saved observations refresh every five minutes while this page is open. Run health checks to record new observations. Unknown means the component was not verified.</p></div>
+          <div className="system-health-actions">
+            <button className="quiet-button" type="button" disabled={loading} onClick={() => void refresh()}>{loading ? 'Refreshing…' : 'Refresh now'}</button>
+            <button className="button button-small" type="button" disabled={checking} onClick={() => void runChecks()}>{checking ? 'Checking…' : 'Run health checks'}</button>
+          </div>
         </div>
       </section>
       {error && <p className="admin-inline-error" role="alert">{error}</p>}
       {notice && <p className="admin-inline-notice" role="status">{notice}</p>}
-      {dashboard?.checkedAt && <p className="admin-health-stale-note">Latest recorded check: {formatTimestamp(dashboard.checkedAt)} · observations become stale after {Math.round(dashboard.staleAfterSeconds / 60)} minutes. Checks are manual; no scheduler is configured.</p>}
+      {lastSuccessfulRefresh && <p className="admin-health-stale-note">Last successful page refresh: {formatTimestamp(lastSuccessfulRefresh)}. Recorded component observations become stale after {Math.round((dashboard?.staleAfterSeconds ?? 300) / 60)} minutes.</p>}
+      {staleData && <p className="admin-inline-error" role="alert">Health refresh failed. Showing the last successful data from {formatTimestamp(lastSuccessfulRefresh)}; values may be stale.</p>}
       <section className="admin-health-metrics" aria-label="System health metrics">
         {cards.map((card) => <article key={card.label}><span>{card.label}</span><b className={`health-${String(card.value).toLowerCase().replaceAll(' ', '-')}`}>{card.value}</b><small>{card.detail}</small></article>)}
       </section>
       <section className="admin-workspace admin-health-workspace">
         <div className="admin-workspace-heading"><div><p className="eyebrow">OBSERVED COMPONENTS</p><h2>Component checks</h2></div><button className="quiet-button" type="button" disabled={loading} onClick={() => void refresh()}>{loading ? 'Refreshing…' : 'Refresh history'}</button></div>
         {!dashboard?.components.length && !loading && <p className="empty-copy">No health observations yet. Run checks to record the first result.</p>}
-        {loading && <p>Loading health observations…</p>}
+        {loading && !dashboard && <p>Loading health observations…</p>}
         {dashboard?.components.map((check) => (
           <article className="admin-health-component" key={check.component}>
             <div className="health-component-title"><div><b>{componentLabels[check.component] ?? check.component}</b><small>{check.durationMs === null ? 'No measurable check duration' : `${check.durationMs} ms`}{check.stale ? ' · STALE' : ''}</small></div><span className={`health-status health-${check.stale ? 'stale' : check.status.toLowerCase()}`}>{check.stale ? 'STALE' : check.status}</span></div>

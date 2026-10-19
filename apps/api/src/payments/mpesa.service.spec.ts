@@ -189,15 +189,18 @@ describe('M-Pesa Daraja HTTP integration', () => {
       description: 'Activation',
       callbackUrl: 'https://api.example.invalid/callback/token',
     };
-    await expect(mpesa.initiateStkPush(input)).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(mpesa.initiateStkPush(input)).rejects.toMatchObject({ phase: 'OAUTH' });
 
     fetchMock.mockResolvedValueOnce(mockJson({ access_token: 'short' }));
-    await expect(mpesa.initiateStkPush(input)).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(mpesa.initiateStkPush(input)).rejects.toMatchObject({ phase: 'OAUTH' });
 
     fetchMock
       .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
       .mockResolvedValueOnce(mockJson({ ResponseCode: '1', errorMessage: 'private provider detail' }));
-    await expect(mpesa.initiateStkPush(input)).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(mpesa.initiateStkPush(input)).rejects.toMatchObject({
+      phase: 'STK_RESPONSE',
+      message: 'M-Pesa payment initiation is unavailable.',
+    });
 
     fetchMock.mockRejectedValueOnce(new Error('test network timeout'));
     await expect(mpesa.queryStkStatus('ws_CO_test')).rejects.toBeInstanceOf(ServiceUnavailableException);

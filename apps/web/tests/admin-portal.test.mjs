@@ -7,6 +7,7 @@ const systemHealth = await readFile(new URL('../src/app/admin/system-health/page
 const customers = await readFile(new URL('../src/app/admin/customers/page.tsx', import.meta.url), 'utf8');
 const audit = await readFile(new URL('../src/app/admin/audit/page.tsx', import.meta.url), 'utf8');
 const payments = await readFile(new URL('../src/app/admin/payments/page.tsx', import.meta.url), 'utf8');
+const reconciliation = await readFile(new URL('../src/app/admin/reconciliation/page.tsx', import.meta.url), 'utf8');
 const styles = await readFile(new URL('../src/app/admin.css', import.meta.url), 'utf8');
 const adminController = await readFile(new URL('../../api/src/admin/admin.controller.ts', import.meta.url), 'utf8');
 const adminService = await readFile(new URL('../../api/src/admin/admin.service.ts', import.meta.url), 'utf8');
@@ -75,4 +76,15 @@ test('payment monitoring filters and paginates server-side while preserving unre
   assert.match(payments, /payment\.failureCode === 'MPESA_RESULT_4999'/);
   assert.match(payments, /UNRESOLVED · 4999/);
   assert.match(adminService, /failureCode: 'MPESA_RESULT_4999'/);
+});
+
+test('Admin reconciliation requires supplied Safaricom IDs only for uncertain initiations', () => {
+  assert.match(reconciliation, /needsProviderIdentifiers/);
+  assert.match(reconciliation, /Safaricom AccountReference/);
+  assert.match(reconciliation, /Safaricom checkout request ID/);
+  assert.match(reconciliation, /Safaricom merchant request ID/);
+  assert.match(reconciliation, /accountReference: identifiers\?\.accountReference\.trim\(\)/);
+  assert.match(reconciliation, /checkoutRequestId: identifiers\?\.checkoutRequestId\.trim\(\)/);
+  assert.match(reconciliation, /merchantRequestId: identifiers\?\.merchantRequestId\.trim\(\)/);
+  assert.match(reconciliation, /queries Safaricom before binding IDs/);
 });
