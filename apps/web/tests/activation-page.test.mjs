@@ -23,7 +23,11 @@ test('loan application requires the five fields and review before the processing
   assert.match(loanPage, /termsAccepted,/);
   assert.match(loanPage, /flat, full term/);
   assert.match(loanPage, /feeUnavailableReason/);
-  assert.match(loanPage, /Pay Loan Processing Fee — \$\{feeQuoteAmount\}/);
+  assert.match(loanPage, /Pay \$\{feeQuoteAmount\}/);
+  assert.match(loanPage, /Fee required:<\/b> A \{feeQuoteAmount\} loan processing fee is required before this application can be submitted/);
+  assert.match(loanPage, /processingFeeQuote\.refundPolicyDisclosure/);
+  assert.match(loanPage, /paymentActionInFlight\.current = true/);
+  assert.match(loanPage, /resumingApplicationId \? 'Back to applications' : 'Edit details'/);
   assert.match(loanPage, /refundPolicyStatus/);
   assert.match(loanPage, /\/payments\/loan-processing-fee/);
   assert.match(loanPage, /reviewConfirmed: true/);
@@ -32,11 +36,23 @@ test('loan application requires the five fields and review before the processing
   assert.match(loanPage, /Payment unresolved — do not pay again/);
   assert.match(loanPage, /Boolean\(unresolvedFee\)/);
   assert.match(loanPage, /Refresh payment status/);
+  assert.match(loanPage, /Payment pending — confirmation in progress/);
+  assert.match(loanPage, /Confirmed — paid; application submitted for review/);
   assert.match(loanPage, /href="\/support"/);
   assert.match(paymentStatus, /loan-processing-fee\/unresolved/);
   assert.match(loanPage, /Payment unresolved — do not pay again/);
   assert.match(loanPage, /Boolean\(unresolvedFee\)/);
   assert.match(loanPage, /Refresh payment status/);
   assert.match(loanPage, /href="\/support"/);
+  assert.match(loanPage, /Review fee requirement/);
   assert.doesNotMatch(loanPage, /activationStatus/);
+});
+
+test('opening and resuming loan applications never initiates a fee payment', () => {
+  const initialLoad = loanPage.match(/useEffect\(\(\) => \{([\s\S]*?)\n  \}, \[\]\);/)?.[1] ?? '';
+  const resumeFlow = loanPage.match(/function resumeProcessingFee\(application: LoanApplication\) \{([\s\S]*?)\n  \}/)?.[1] ?? '';
+
+  assert.doesNotMatch(initialLoad, /method:\s*'POST'|\/payments\/loan-processing-fee['"]/);
+  assert.doesNotMatch(resumeFlow, /apiRequest|payments\/loan-processing-fee/);
+  assert.match(loanPage, /onClick=\{\(\) => void payProcessingFee\(\)\}/);
 });

@@ -224,6 +224,7 @@ export class LoanService {
       where: { userId },
       select: {
         id: true,
+        productId: true,
         createdAt: true,
         requestedPrincipalKes: true,
         approvedPrincipalKes: true,

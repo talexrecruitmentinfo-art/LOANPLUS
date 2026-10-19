@@ -121,6 +121,24 @@ describe('M-Pesa Daraja HTTP integration', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('does not submit STK when pre-STK persistence fails after OAuth succeeds', async () => {
+    fetchMock.mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }));
+    const beforeStkRequest = jest.fn().mockRejectedValue(new ServiceUnavailableException('database unavailable'));
+
+    await expect(mpesa.initiateStkPush({
+      amountKes: 50,
+      phoneNumber: '254712345678',
+      accountReference: 'LPATEST12345',
+      description: 'Loan fee',
+      callbackUrl: 'https://api.example.invalid/api/v1/payments/mpesa/callback/token',
+    }, beforeStkRequest)).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    expect(beforeStkRequest).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0])
+      .toBe('https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials');
+  });
+
   it('reports disabled production live payments in payment destination validation', () => {
     process.env.MPESA_ENVIRONMENT = 'production';
     process.env.MPESA_LIVE_ENABLED = 'false';

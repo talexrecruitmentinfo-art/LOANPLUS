@@ -5,7 +5,7 @@ import { checkPaymentStatus } from '../src/lib/payment-status.mjs';
 
 const loanPage = await readFile(new URL('../src/app/loans/page.tsx', import.meta.url), 'utf8');
 const unresolvedFee = {
-  reference: 'LPP_UNRESOLVED_FIXTURE',
+  reference: 'LPP2A26FAA44E67AFED44C9E13F79547C4E',
   status: 'PENDING',
   amountKes: 50,
   currency: 'KES',
@@ -65,6 +65,14 @@ test('a failed unresolved-payment lookup is not interpreted as no unresolved pay
   assert.equal('unresolvedFee' in result, false);
 });
 
+test('a malformed successful status response fails closed instead of being treated as no unresolved payment', async () => {
+  const result = await checkPaymentStatus(async (path) => path === '/auth/me' ? { id: 'customer' } : undefined);
+
+  assert.equal(result.authenticated, true);
+  assert.match(result.error, /do not pay again until it can be verified/);
+  assert.equal('unresolvedFee' in result, false);
+});
+
 test('payment status can be retried successfully after a lookup error', async () => {
   let lookupCount = 0;
   const apiRequest = async (path) => {
@@ -88,10 +96,27 @@ test('an existing unresolved payment remains reported and the page keeps payment
   assert.deepEqual(result, { authenticated: true, unresolvedFee, error: '' });
   assert.match(loanPage, /Boolean\(unresolvedFee\)/);
   assert.match(loanPage, /unresolvedFee \|\| unresolvedFeeError \? 'Payment unresolved — do not pay again'/);
+  assert.match(loanPage, /unresolvedFee\.reference/);
+  assert.match(loanPage, /Payment unresolved — do not pay again/);
+});
+
+test('status check failure keeps existing unresolved payment state intact until a successful check', async () => {
+  const initial = await checkPaymentStatus(async (path) => path === '/auth/me'
+    ? { id: 'customer' }
+    : unresolvedFee);
+  const result = await checkPaymentStatus(async (path) => {
+    if (path === '/auth/me') return { id: 'customer' };
+    throw new Error('temporary read failure');
+  });
+
+  assert.equal(initial.unresolvedFee.reference, unresolvedFee.reference);
+  assert.match(result.error, /do not pay again until it can be verified/);
+  assert.match(loanPage, /else if \('unresolvedFee' in result\) \{\s*setUnresolvedFee\(result\.unresolvedFee\);/);
 });
 
 test('authentication and payment-status failures expose a retry control and always terminate loading', async () => {
   assert.match(loanPage, /finally \{\s*setUnresolvedFeeLoading\(false\);\s*\}/);
   assert.match(loanPage, /Retry payment status/);
   assert.match(loanPage, /disabled=\{busyId !== null \|\| unresolvedFeeLoading\} onClick=\{\(\) => void refreshPaymentStatus\(\)\}/);
+  assert.match(loanPage, /paymentActionInFlight\.current/);
 });

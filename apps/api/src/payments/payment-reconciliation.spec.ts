@@ -175,6 +175,27 @@ describe('PaymentService provider reconciliation', () => {
     expect(fixture.paymentUpdate).not.toHaveBeenCalled();
   });
 
+  it('keeps nonzero provider results unresolved when no authoritative terminal mapping is configured', async () => {
+    const fixture = createService(1032);
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'unverified-terminal-result-01',
+      'superadmin-id',
+      'Provider result mapping requires verification',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'UNRESOLVED_UNKNOWN_RESULT',
+      providerResultCode: '1032',
+      reasonCode: 'UNRECOGNIZED_PROVIDER_RESULT',
+    });
+    expect(fixture.queryStkStatus).toHaveBeenCalledWith(request.checkoutRequestId);
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
   it('records missing identifiers without querying Safaricom or changing the payment', async () => {
     const paymentWithoutProviderIds = {
       ...payment,

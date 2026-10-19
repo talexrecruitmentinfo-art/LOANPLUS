@@ -222,6 +222,27 @@ describe('loan processing-fee payment database integration', () => {
     expect(entries.find((entry) => entry.account.id === accountIds[0])).toMatchObject({ debitKes: 50, creditKes: 0 });
     expect(entries.find((entry) => entry.account.id === accountIds[1])).toMatchObject({ debitKes: 0, creditKes: 50 });
     expect(wallet).toHaveLength(0);
-    expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(1);
+
+    const secondDraft = await loans.createApplication(userId, applicationDto, 'loan-application-idempotency-02');
+    const secondPayment = await payments.initiateLoanProcessingFee(
+      userId,
+      Object.assign(new InitiateLoanProcessingFeeDto(), {
+        applicationId: secondDraft.id,
+        reviewConfirmed: true,
+      }),
+      'loan-processing-fee-idempotency-02',
+    );
+    const secondTransaction = await prisma.paymentTransaction.findUniqueOrThrow({
+      where: { internalReference: secondPayment.reference },
+    });
+    expect(secondDraft.id).not.toBe(applicationId);
+    expect(secondPayment.reference).not.toBe(started.reference);
+    expect(secondTransaction).toMatchObject({
+      type: 'LOAN_PROCESSING_FEE',
+      loanApplicationId: secondDraft.id,
+      status: 'PENDING',
+      amountKes: 50,
+    });
+    expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(2);
   });
 });

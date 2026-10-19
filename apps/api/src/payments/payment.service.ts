@@ -311,12 +311,14 @@ export class PaymentService {
       throw error;
     }
 
+    let initiationStep = 'PERSIST_OAUTH_REQUESTED';
     let providerRequest: { checkoutRequestId: string; merchantRequestId: string };
     try {
       await this.prisma.paymentTransaction.updateMany({
         where: { id: payment.id, status: PaymentStatus.PENDING },
         data: { initiationPhase: 'OAUTH_REQUESTED' },
       });
+      initiationStep = 'MPESA_PREFLIGHT';
       providerRequest = await this.mpesa.initiateStkPush({
         amountKes: LOAN_PROCESSING_FEE_KES,
         phoneNumber: phoneNumber.slice(1),
@@ -324,10 +326,12 @@ export class PaymentService {
         description: 'Loan processing fee',
         callbackUrl,
       }, async () => {
+        initiationStep = 'PERSIST_STK_REQUESTED';
         await this.prisma.paymentTransaction.updateMany({
           where: { id: payment.id, status: PaymentStatus.PENDING },
           data: { initiationPhase: 'STK_REQUESTED' },
         });
+        initiationStep = 'STK_REQUEST';
       });
     } catch (error) {
       const initiationPhase = error instanceof StkPushInitiationError
@@ -337,12 +341,16 @@ export class PaymentService {
             ? 'STK_REQUEST_OUTCOME_UNCERTAIN'
             : 'STK_RESPONSE_UNCERTAIN'
         : 'INITIATION_OUTCOME_UNCERTAIN';
+      const phase = error instanceof StkPushInitiationError
+        ? error.phase
+        : initiationStep === 'PERSIST_STK_REQUESTED'
+          ? 'OAUTH_SUCCEEDED_BEFORE_STK'
+          : 'PRE_PROVIDER';
       await this.prisma.paymentTransaction.updateMany({
         where: { id: payment.id, status: PaymentStatus.PENDING },
         data: { failureCode: 'INITIATION_OUTCOME_UNCERTAIN', initiationPhase },
       });
-      const phase = error instanceof StkPushInitiationError ? error.phase : 'PRE_PROVIDER';
-      logger.warn(`STK initiation outcome uncertain for payment ${payment.internalReference} (phase=${phase}; errorType=${error instanceof Error ? error.constructor.name : 'Unknown'}).`);
+      logger.warn(`STK initiation outcome uncertain for payment ${payment.internalReference} (phase=${phase}; step=${initiationStep}; errorType=${error instanceof Error ? error.constructor.name : 'Unknown'}).`);
       return {
         reference: payment.internalReference,
         status: PaymentStatus.PENDING,
