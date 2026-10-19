@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiRequest } from '@/lib/api';
 import { formatMoney } from '@/lib/currency';
+import { checkPaymentStatus } from '@/lib/payment-status.mjs';
 
 interface Product {
   id: string;
@@ -176,11 +177,17 @@ export default function LoanProductsPage() {
     setApplications(await apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }));
   }
 
-  async function refreshUnresolvedFee() {
+  async function refreshPaymentStatus() {
     setUnresolvedFeeLoading(true);
+    setUnresolvedFeeError('');
     try {
-      setUnresolvedFee(await apiRequest<UnresolvedProcessingFee | null>('/payments/loan-processing-fee/unresolved', { cache: 'no-store' }));
-      setUnresolvedFeeError('');
+      const result = await checkPaymentStatus(apiRequest);
+      setSignedIn(result.authenticated);
+      if (result.error) {
+        setUnresolvedFeeError(result.error);
+      } else if ('unresolvedFee' in result) {
+        setUnresolvedFee(result.unresolvedFee);
+      }
     } finally {
       setUnresolvedFeeLoading(false);
     }
@@ -218,10 +225,7 @@ export default function LoanProductsPage() {
     void refreshProcessingFeeQuote();
     void refreshProducts();
     Promise.all([
-      apiRequest('/auth/me', { cache: 'no-store' }).then(() => {
-        setSignedIn(true);
-        return refreshUnresolvedFee().catch(() => setUnresolvedFeeError('The existing payment status could not be checked. Do not start another payment until it can be verified.'));
-      }).catch(() => setSignedIn(false)),
+      refreshPaymentStatus(),
       apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }).then(setApplications)
         .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Applications could not be loaded.')),
     ]).finally(() => setLoading(false));
@@ -310,11 +314,11 @@ export default function LoanProductsPage() {
       setForm(emptyForm);
       setTermsAccepted(false);
       await refreshApplications();
-      await refreshUnresolvedFee();
+      await refreshPaymentStatus();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The processing-fee request could not be completed.');
       await refreshApplications().catch(() => undefined);
-      await refreshUnresolvedFee().catch(() => setUnresolvedFeeError('The existing payment status could not be refreshed. Do not pay again.'));
+      await refreshPaymentStatus();
     } finally {
       setBusyId(null);
     }
@@ -336,10 +340,10 @@ export default function LoanProductsPage() {
       });
       setNotice(payment.message);
       await refreshApplications();
-      await refreshUnresolvedFee();
+      await refreshPaymentStatus();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The payment status could not be refreshed.');
-      await refreshUnresolvedFee().catch(() => setUnresolvedFeeError('The existing payment status could not be refreshed. Do not pay again.'));
+      await refreshPaymentStatus();
     } finally {
       setBusyId(null);
     }
@@ -379,10 +383,13 @@ export default function LoanProductsPage() {
       {unresolvedFee && <div className="fee-unavailable-notice" role="alert">
         <p><b>Payment unresolved — do not pay again.</b> The original processing-fee attempt is not confirmed. Reference <code>{unresolvedFee.reference}</code>{unresolvedFee.initiationPhase ? ` · ${unresolvedFee.initiationPhase.replaceAll('_', ' ').toLowerCase()}` : ''}. No second STK request will be started.</p>
         <p>{unresolvedFee.message} <Link href="/support">Contact support</Link> if Safaricom evidence or assistance is needed.</p>
-        <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => void refreshUnresolvedFee().catch(() => setUnresolvedFeeError('Payment status could not be refreshed. Do not pay again.'))}>Refresh payment status</button>
+        <button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading} onClick={() => void refreshPaymentStatus()}>Refresh payment status</button>
       </div>}
       {!unresolvedFee && unresolvedFeeLoading && signedIn && <p className="fee-unavailable-notice" role="status">Checking previous processing-fee payment status. Payment remains unavailable until this check completes.</p>}
-      {!unresolvedFee && unresolvedFeeError && <p className="fee-unavailable-notice" role="alert">{unresolvedFeeError} Contact <Link href="/support">support</Link>; do not pay again until payment status is verified.</p>}
+      {unresolvedFeeError && <div className="fee-unavailable-notice" role="alert">
+        <p>{unresolvedFeeError} <Link href="/login">Sign in</Link> or retry; do not pay again until payment status is verified.</p>
+        <button className="quiet-button" type="button" disabled={busyId !== null || unresolvedFeeLoading} onClick={() => void refreshPaymentStatus()}>Retry payment status</button>
+      </div>}
       {!signedIn && !loading && <p className="product-list"><Link className="button" href="/login">Sign in to apply</Link></p>}
       {signedIn && product && (
         <section className="loan-application-panel" aria-labelledby="apply-heading">

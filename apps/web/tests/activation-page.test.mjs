@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const activationPage = await readFile(new URL('../src/app/activation/page.tsx', import.meta.url), 'utf8');
 const loanPage = await readFile(new URL('../src/app/loans/page.tsx', import.meta.url), 'utf8');
+const paymentStatus = await readFile(new URL('../src/lib/payment-status.mjs', import.meta.url), 'utf8');
 
 test('obsolete account activation route redirects to the loan application journey', () => {
   assert.match(activationPage, /redirect\('\/loans'\)/);
@@ -27,12 +28,12 @@ test('loan application requires the five fields and review before the processing
   assert.match(loanPage, /\/payments\/loan-processing-fee/);
   assert.match(loanPage, /reviewConfirmed: true/);
   assert.match(loanPage, /Refresh status/);
-  assert.match(loanPage, /loan-processing-fee\/unresolved/);
+  assert.match(paymentStatus, /loan-processing-fee\/unresolved/);
   assert.match(loanPage, /Payment unresolved — do not pay again/);
   assert.match(loanPage, /Boolean\(unresolvedFee\)/);
   assert.match(loanPage, /Refresh payment status/);
   assert.match(loanPage, /href="\/support"/);
-  assert.match(loanPage, /loan-processing-fee\/unresolved/);
+  assert.match(paymentStatus, /loan-processing-fee\/unresolved/);
   assert.match(loanPage, /Payment unresolved — do not pay again/);
   assert.match(loanPage, /Boolean\(unresolvedFee\)/);
   assert.match(loanPage, /Refresh payment status/);
