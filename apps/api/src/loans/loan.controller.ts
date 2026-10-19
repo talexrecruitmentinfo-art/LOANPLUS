@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Headers, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
 import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard, SuperadminSessionGuard } from '../auth/session.guard';
-import { AcceptLoanOfferDto, ConfigureLoanProcessingFeeDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
+import { ConfigureLoanProcessingFeeDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
 import { LoanService } from './loan.service';
 
 @Controller('loans')
@@ -27,16 +27,6 @@ export class CustomerLoanController {
   @UseGuards(CustomerSessionGuard)
   async listOwnApplications(@Req() request: AuthenticatedRequest) {
     return { data: await this.loans.listMyApplications(request.principal!.id) };
-  }
-
-  @Post('applications/:id/accept')
-  @UseGuards(CustomerSessionGuard)
-  async acceptOffer(
-    @Param('id') id: string,
-    @Body() dto: AcceptLoanOfferDto,
-    @Req() request: AuthenticatedRequest,
-  ) {
-    return { data: await this.loans.acceptOffer(request.principal!.id, id, dto) };
   }
 }
 

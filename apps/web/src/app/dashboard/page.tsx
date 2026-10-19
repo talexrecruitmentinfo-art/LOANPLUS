@@ -56,7 +56,8 @@ export default function DashboardPage() {
     }
     if (application.status === 'SUBMITTED') return 'Submitted — Awaiting Admin Review';
     if (application.status === 'UNDER_REVIEW') return 'Under Review';
-    if (application.status === 'APPROVED') return 'Approved — Awaiting Offer Acceptance';
+    if (application.status === 'WAITING_FOR_DISBURSEMENT') return 'Approved — Waiting for Disbursement';
+    if (application.status === 'APPROVED') return application.loan ? 'Approved — Waiting for Disbursement' : 'Approved — Status Review Required';
     if (application.status === 'ACCEPTED') {
       return application.loan?.status === 'DISBURSED' ? 'Disbursed' : 'Approved — Awaiting Disbursement';
     }

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { apiRequest } from '@/lib/api';
+import { ApiRequestError, apiRequest } from '@/lib/api';
 import { formatMoney } from '@/lib/currency';
 import {
   loadLoanApplicationStatus,
@@ -120,7 +120,10 @@ function statusLabel(application: LoanApplication): string {
   if (!feeConfirmed || !application.submittedAt) return 'Application status requires verification';
   if (application.status === 'SUBMITTED') return 'Submitted — Awaiting Admin Review';
   if (application.status === 'UNDER_REVIEW') return 'Under Review';
-  if (application.status === 'APPROVED') return 'Approved — Awaiting Offer Acceptance';
+  if (application.status === 'WAITING_FOR_DISBURSEMENT') return 'Approved — Waiting for Disbursement';
+  if (application.status === 'APPROVED') {
+    return application.loan ? 'Approved — Waiting for Disbursement' : 'Approved — Status Review Required';
+  }
   if (application.status === 'ACCEPTED') {
     if (application.loan?.status === 'DISBURSED' || application.loan?.disbursement?.status === 'CONFIRMED') return 'Disbursed';
     return 'Approved — Awaiting Disbursement';
@@ -147,6 +150,26 @@ function canPayApplicationFee(application: LoanApplication): boolean {
     isRetryableFeeFailure(application.processingFeePayments[0]);
 }
 
+function hasOutstandingLoan(applications: LoanApplication[]): boolean {
+  return applications.some((application) =>
+    application.loan !== null &&
+    ['DISBURSED', 'REPAYMENT_IN_PROGRESS', 'OVERDUE'].includes(application.loan.status),
+  );
+}
+
+function matchesApplicationForm(application: LoanApplication, form: ApplicationForm): boolean {
+  const normalizeText = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+  const normalizePhone = (value: string) => value.replace(/\D/g, '').slice(-9);
+  const data = application.applicationData;
+  const storedText = (key: string) => typeof data[key] === 'string' ? data[key] as string : '';
+  return application.productId === form.productId &&
+    application.requestedPrincipalKes === Number(form.requestedPrincipalKes) &&
+    normalizeText(storedText('guarantorOneName')) === normalizeText(form.guarantorOneName) &&
+    normalizePhone(storedText('guarantorOnePhone')) === normalizePhone(form.guarantorOnePhone) &&
+    normalizeText(storedText('guarantorTwoName')) === normalizeText(form.guarantorTwoName) &&
+    normalizePhone(storedText('guarantorTwoPhone')) === normalizePhone(form.guarantorTwoPhone);
+}
+
 function fieldError(name: string, value: string, product?: Product): string {
   if (!value.trim()) return 'This field is required.';
   if (name.endsWith('Name') && value.trim().replace(/\s+/g, ' ').length < 2) return 'Enter the full name.';
@@ -170,6 +193,7 @@ export default function LoanProductsPage() {
   const [processingFeeQuoteLoading, setProcessingFeeQuoteLoading] = useState(true);
   const [applications, setApplications] = useState<LoanApplication[]>([]);
   const [applicationStatusError, setApplicationStatusError] = useState('');
+  const [eligibilityBlocked, setEligibilityBlocked] = useState(false);
   const [applicationStatusLoading, setApplicationStatusLoading] = useState(true);
   const [form, setForm] = useState<ApplicationForm>(emptyForm);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -179,7 +203,6 @@ export default function LoanProductsPage() {
   const [mpesaPhoneNumber, setMpesaPhoneNumber] = useState('');
   const [mpesaPhoneConfirmed, setMpesaPhoneConfirmed] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
-  const [acceptedOffers, setAcceptedOffers] = useState<Record<string, boolean>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [productsLoading, setProductsLoading] = useState(true);
@@ -219,7 +242,10 @@ export default function LoanProductsPage() {
         setApplications(result.applications ?? []);
       }
       setApplicationStatusError(result.error);
-      if (!result.error) setError('');
+      if (!result.error) {
+        setError('');
+        setEligibilityBlocked(false);
+      }
     } finally {
       if (requestId === statusRequestSequence.current) setApplicationStatusLoading(false);
     }
@@ -335,12 +361,14 @@ export default function LoanProductsPage() {
       setError(phoneError || 'Confirm the M-Pesa number that should receive the payment prompt.');
       return;
     }
-    if (!product || !signedIn || !termsAccepted || feeUnavailableReason || applicationStatusLoading || applicationStatusError) {
+    if (!product || !signedIn || !termsAccepted || feeUnavailableReason || applicationStatusLoading || applicationStatusError || eligibilityBlocked || hasOutstandingLoan(applications)) {
       setError(feeUnavailableReason || (!termsAccepted
         ? 'Accept the reviewed product terms before continuing.'
         : applicationStatusError || (applicationStatusLoading
           ? 'Checking saved applications and payment statuses. Wait for the check to complete before paying.'
-          : 'Sign in to continue with this application.')));
+          : eligibilityBlocked || hasOutstandingLoan(applications)
+            ? 'An outstanding disbursed loan prevents a new application or processing-fee payment. Review My Account or contact support.'
+            : 'Sign in to continue with this application.')));
       return;
     }
     paymentActionInFlight.current = true;
@@ -350,17 +378,39 @@ export default function LoanProductsPage() {
     try {
       let applicationId = resumingApplicationId;
       if (!applicationId) {
-        if (!creationKey.current) creationKey.current = crypto.randomUUID();
-        const application = await apiRequest<{ id: string }>('/loans/applications', {
-          method: 'POST',
-          headers: { 'Idempotency-Key': creationKey.current },
-          body: JSON.stringify({
-            ...form,
-            requestedPrincipalKes: Number(form.requestedPrincipalKes),
-            termsAccepted,
-          }),
-        });
-        applicationId = application.id;
+        const matchingApplication = applications.find((candidate) =>
+          ['DRAFT', 'PROCESSING_PAYMENT_PENDING'].includes(candidate.status) &&
+          matchesApplicationForm(candidate, form),
+        );
+        if (matchingApplication) {
+          const unresolvedPayment = matchingApplication.processingFeePayments.some((attempt) =>
+            attempt.status === 'PENDING' ||
+            (attempt.status === 'FAILED' && attempt.failureCode === 'MPESA_RESULT_4999'),
+          );
+          if (unresolvedPayment || matchingApplication.processingFeePayments.some((attempt) => attempt.status === 'CONFIRMED')) {
+            setNotice('This application already has a payment record. Refresh its saved status; do not pay again.');
+            void refreshPaymentStatus(true).catch(() => undefined);
+            return;
+          }
+          if (!canPayApplicationFee(matchingApplication)) {
+            setError('This application is not currently eligible for a processing-fee payment. Refresh its status or contact support.');
+            void refreshPaymentStatus(true).catch(() => undefined);
+            return;
+          }
+          applicationId = matchingApplication.id;
+        } else {
+          if (!creationKey.current) creationKey.current = crypto.randomUUID();
+          const application = await apiRequest<{ id: string }>('/loans/applications', {
+            method: 'POST',
+            headers: { 'Idempotency-Key': creationKey.current },
+            body: JSON.stringify({
+              ...form,
+              requestedPrincipalKes: Number(form.requestedPrincipalKes),
+              termsAccepted,
+            }),
+          });
+          applicationId = application.id;
+        }
       }
       if (!feeKey.current) feeKey.current = crypto.randomUUID();
       const payment = await apiRequest<{ reference: string; status: string; message: string }>('/payments/loan-processing-fee', {
@@ -377,12 +427,15 @@ export default function LoanProductsPage() {
       setMpesaPhoneNumber('');
       setMpesaPhoneConfirmed(false);
       setResumingApplicationId(null);
-      await refreshApplications();
-      await refreshPaymentStatus(true);
+      void refreshApplications().catch(() => undefined);
+      void refreshPaymentStatus(true).catch(() => undefined);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The processing-fee request could not be completed.');
-      await refreshApplications().catch(() => undefined);
-      await refreshPaymentStatus(true);
+      setEligibilityBlocked(reason instanceof ApiRequestError &&
+        reason.status === 409 &&
+        /loan/i.test(reason.message));
+      void refreshApplications().catch(() => undefined);
+      void refreshPaymentStatus(true).catch(() => undefined);
     } finally {
       paymentActionInFlight.current = false;
       setBusyId(null);
@@ -412,24 +465,6 @@ export default function LoanProductsPage() {
     setNotice('');
   }
 
-  async function acceptOffer(application: LoanApplication) {
-    setBusyId(application.id);
-    setError('');
-    setNotice('');
-    try {
-      await apiRequest(`/loans/applications/${application.id}/accept`, {
-        method: 'POST',
-        body: JSON.stringify({ termsAccepted: true }),
-      });
-      setNotice('Loan offer accepted. Disbursement remains a separate authorized step.');
-      await refreshApplications();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'This offer could not be accepted.');
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   return (
     <main className="dashboard-page">
       <header className="dashboard-top">
@@ -443,6 +478,7 @@ export default function LoanProductsPage() {
       </section>
       {notice && <p className="admin-inline-notice" role="status">{notice}</p>}
       {error && <p className="admin-inline-error" role="alert">{error}</p>}
+      {eligibilityBlocked && <p className="fee-unavailable-notice" role="status">An existing loan record is preventing a new application or fee payment. Review its status in <Link href="/dashboard">My Account</Link>; if it is awaiting disbursement or you believe it has been repaid, <Link href="/support">contact support</Link>.</p>}
       {applicationStatusLoading && <p className="fee-unavailable-notice" role="status">Checking your saved applications and payment statuses.</p>}
       {applicationStatusError && <div className="fee-unavailable-notice" role="alert">
         <p>{applicationStatusError} <Link href="/login">Sign in</Link> or retry. Payment initiation remains disabled until this check succeeds.</p>
@@ -530,7 +566,7 @@ export default function LoanProductsPage() {
                   }
                   setReviewing(false);
                 }}>{resumingApplicationId ? 'Back to applications' : 'Edit details'}</button>
-                <button className="button" type="button" disabled={busyId !== null || applicationStatusLoading || Boolean(applicationStatusError) || !termsAccepted || !mpesaPhoneConfirmed || Boolean(fieldError('mpesaPhoneNumber', mpesaPhoneNumber)) || Boolean(feeUnavailableReason)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : applicationStatusError ? 'Retry status check before payment' : applicationStatusLoading ? 'Checking payment status…' : `Pay ${feeQuoteAmount}`}</button>
+                <button className="button" type="button" disabled={busyId !== null || applicationStatusLoading || Boolean(applicationStatusError) || eligibilityBlocked || hasOutstandingLoan(applications) || !termsAccepted || !mpesaPhoneConfirmed || Boolean(fieldError('mpesaPhoneNumber', mpesaPhoneNumber)) || Boolean(feeUnavailableReason)} onClick={() => void payProcessingFee()}>{busyId === 'new-application' ? 'Requesting payment…' : applicationStatusError ? 'Retry status check before payment' : applicationStatusLoading ? 'Checking payment status…' : hasOutstandingLoan(applications) ? 'Outstanding loan — payment unavailable' : `Pay ${feeQuoteAmount}`}</button>
               </div>
             </div>
           )}
@@ -556,6 +592,7 @@ export default function LoanProductsPage() {
         ))}
       </section>
       {signedIn && <section className="customer-ledger-list">
+        {hasOutstandingLoan(applications) && <p className="fee-unavailable-notice" role="status">An outstanding disbursed loan must be repaid before another application can proceed. <Link href="/dashboard">Review My Account</Link> or <Link href="/support">contact support</Link>.</p>}
         <div className="customer-ledger-heading"><h2>My loan applications</h2><div><span>{applications.length}</span><button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading} onClick={() => void refreshPaymentStatus(true)}>Refresh status</button></div></div>
         {applications.length === 0 ? <p>No applications yet. Select a loan product and complete the application above.</p> : applications.map((application) => {
           const terms = application.approvedTermsSnapshot;
@@ -574,7 +611,7 @@ export default function LoanProductsPage() {
                 <p>Loan Processing Fee — {feeQuoteAmount}. Paying it does not guarantee approval or disbursement and does not add funds to your wallet.</p>
                 {feeUnavailableReason && <p className="fee-unavailable-notice" role="status">{feeUnavailableReason}</p>}
                 {processingFeeQuoteError && <button className="quiet-button" type="button" disabled={processingFeeQuoteLoading} onClick={() => void refreshProcessingFeeQuote()}>Retry fee quote</button>}
-                <button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading || Boolean(applicationStatusError)} onClick={() => resumeProcessingFee(application)}>{feeAttempts.length > 0 ? 'Review fee retry' : 'Review fee requirement'}</button>
+                <button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading || Boolean(applicationStatusError) || hasOutstandingLoan(applications)} onClick={() => resumeProcessingFee(application)}>{feeAttempts.length > 0 ? 'Review fee retry' : `Review and pay ${feeQuoteAmount}`}</button>
               </div>}
               {feeAttempts.length > 0 && <dl>
                 {feeAttempts.map((fee) => <div key={fee.id}>
@@ -608,12 +645,9 @@ export default function LoanProductsPage() {
                 <div><dt>Approved terms</dt><dd>{terms ? `${terms.termsVersion} · ${terms.durationDays} days` : 'Needs staff review'}</dd></div>
               </dl>}
               {application.loan?.disbursement?.status === 'CONFIRMED' && <p>Disbursed amount: {formatMoney(application.loan.disbursement.amountKes)} · {application.loan.disbursement.paymentReference}</p>}
-              {application.offerExpiresAt && <small>Offer expires {new Date(application.offerExpiresAt).toLocaleString('en-KE')}</small>}
-              {application.status === 'APPROVED' && terms && <>
-                <label className="check-row"><input type="checkbox" checked={acceptedOffers[application.id] === true} onChange={(event) => setAcceptedOffers((current) => ({ ...current, [application.id]: event.target.checked }))} /><span>I accept the approved offer and displayed terms version {terms.termsVersion}.</span></label>
-                <button className="button" type="button" disabled={busyId !== null || acceptedOffers[application.id] !== true} onClick={() => void acceptOffer(application)}>{busyId === application.id ? 'Accepting…' : 'Accept approved offer'}</button>
-              </>}
-              {application.status === 'APPROVED' && !terms && <p role="status">This offer needs staff review before it can be accepted safely. Contact support for assistance.</p>}
+              {application.status === 'WAITING_FOR_DISBURSEMENT' && <p role="status">Approved — Waiting for Disbursement. The transfer is a separate authorized operation.</p>}
+              {application.status === 'APPROVED' && application.loan && <p role="status">Approved — Waiting for Disbursement. The transfer is a separate authorized operation.</p>}
+              {application.status === 'APPROVED' && !application.loan && <p role="status">This previously approved application needs a status review before disbursement. <Link href="/support">Contact support</Link>.</p>}
             </article>
           );
         })}

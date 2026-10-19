@@ -161,7 +161,7 @@ export default function AdminLoansPage() {
             {['SUBMITTED', 'UNDER_REVIEW'].includes(application.status) && <form className="review-form" onSubmit={(event) => reviewApplication(event, application)}>
               <label>Decision reason or material amount change note<textarea name="reason" minLength={10} maxLength={1000} rows={2} required /></label>
               <label>Approved principal (KSh)<input name="approvedPrincipalKes" type="number" min="1" max={application.requestedPrincipalKes} defaultValue={application.requestedPrincipalKes} required /></label>
-              <div><button className="button" disabled={busy}>Approve offer</button><button className="quiet-button" type="button" disabled={busy} onClick={(event) => { const form = event.currentTarget.form; if (form?.reportValidity()) void saveDecision(form, application, 'REJECT'); }}>Reject</button></div>
+              <div><button className="button" disabled={busy}>Approve Loan</button><button className="quiet-button" type="button" disabled={busy} onClick={(event) => { const form = event.currentTarget.form; if (form?.reportValidity()) void saveDecision(form, application, 'REJECT'); }}>Reject</button></div>
             </form>}
           </article>;
         })}{applications.length === 0 && <p className="empty-copy">No paid applications have been submitted for review.</p>}</div>

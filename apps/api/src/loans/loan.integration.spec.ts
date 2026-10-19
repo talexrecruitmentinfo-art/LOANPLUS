@@ -2,7 +2,7 @@ import { ConflictException, UnprocessableEntityException } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { LoanService } from './loan.service';
-import { AcceptLoanOfferDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto } from './loan.dto';
+import { ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto } from './loan.dto';
 import { randomInt, randomBytes } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 
@@ -45,6 +45,7 @@ describe('loan workflow database integration', () => {
           nationalIdCiphertext: 'test-fixture-only',
           nationalIdHash: randomBytes(32).toString('hex'),
           passwordHash: await bcrypt.hash('loan-customer-test-password', 4),
+          identityStatus: 'VERIFIED',
           termsVersion: 'test-v1',
           privacyVersion: 'test-v1',
         },
@@ -85,6 +86,7 @@ describe('loan workflow database integration', () => {
         }
       }
       await prisma.loan.deleteMany({ where: { userId } });
+      await prisma.paymentTransaction.deleteMany({ where: { userId, type: 'LOAN_PROCESSING_FEE' } });
       await prisma.loanApplication.deleteMany({ where: { userId } });
     }
     if (disbursementAccountIds.length) {
@@ -99,7 +101,7 @@ describe('loan workflow database integration', () => {
     await prisma.$disconnect();
   });
 
-  databaseTest('validates draft applications, manual review, terms acceptance, and one-time offer conversion', async () => {
+  databaseTest('validates draft applications, direct Admin approval, and one-time disbursement confirmation', async () => {
     const productDto = Object.assign(new CreateLoanProductDto(), {
       name: 'Integration Test Product',
       description: 'Test-only product configuration for automated checks.',
@@ -129,13 +131,31 @@ describe('loan workflow database integration', () => {
       guarantorTwoPhone: '254712345678',
     }, 'loan-invalid-guarantor-key-01')).rejects.toBeInstanceOf(UnprocessableEntityException);
 
-    const draft = await loans.createApplication(userId, applicationDto, 'loan-application-test-key-01');
+    const [draft, repeatedDraft] = await Promise.all([
+      loans.createApplication(userId, applicationDto, 'loan-application-test-key-01'),
+      loans.createApplication(userId, applicationDto, 'loan-application-test-key-02'),
+    ]);
+    expect(repeatedDraft.id).toBe(draft.id);
     expect(draft.status).toBe('DRAFT');
     expect((await loans.createApplication(userId, applicationDto, 'loan-application-test-key-01')).id).toBe(draft.id);
     expect(await loans.listMyApplications(adminId)).toHaveLength(0);
     const application = await prisma.loanApplication.update({
       where: { id: draft.id },
       data: { status: 'SUBMITTED' },
+    });
+    await prisma.paymentTransaction.create({
+      data: {
+        internalReference: `TEST-FEE-${randomBytes(6).toString('hex')}`,
+        idempotencyKey: `test-fee-${randomBytes(12).toString('hex')}`,
+        userId,
+        type: 'LOAN_PROCESSING_FEE',
+        loanApplicationId: application.id,
+        amountKes: 50,
+        currency: 'KES',
+        status: 'CONFIRMED',
+        receiptReference: `TEST${randomBytes(6).toString('hex').toUpperCase()}`,
+        confirmedAt: new Date(),
+      },
     });
     await loans.updateProduct(product.id, {
       durationDays: 90,
@@ -150,7 +170,7 @@ describe('loan workflow database integration', () => {
       approvedPrincipalKes: 3000,
     });
     const reviewed = await loans.reviewApplication(application.id, reviewDto, adminId);
-    expect(reviewed.status).toBe('APPROVED');
+    expect(reviewed.status).toBe('WAITING_FOR_DISBURSEMENT');
     expect(reviewed.approvedChargesKes).toBe(310);
     expect(reviewed.approvedTermsSnapshot).toMatchObject({
       termsVersion: 'test-product-v1',
@@ -160,13 +180,13 @@ describe('loan workflow database integration', () => {
     });
     await expect(loans.reviewApplication(application.id, reviewDto, adminId)).rejects.toBeInstanceOf(ConflictException);
 
-    const acceptance = Object.assign(new AcceptLoanOfferDto(), { termsAccepted: true });
-    const loan = await loans.acceptOffer(userId, application.id, acceptance);
+    const loan = await prisma.loan.findUniqueOrThrow({ where: { applicationId: application.id } });
     expect(loan.principalKes).toBe(3000);
     expect(loan.totalRepayableKes).toBe(3310);
     expect(loan.acceptedTermsVersion).toBe('test-product-v1');
     expect(loan.status).toBe('DISBURSEMENT_PENDING');
-    await expect(loans.acceptOffer(userId, application.id, acceptance)).rejects.toBeInstanceOf(ConflictException);
+    expect(await prisma.loan.count({ where: { applicationId: application.id } })).toBe(1);
+    expect(await prisma.loanDisbursement.count({ where: { loanId: loan.id } })).toBe(0);
 
     const manualDisbursement = Object.assign(new ConfirmManualDisbursementDto(), {
       paymentReference: `TEST-DISBURSE-${randomBytes(6).toString('hex')}`,

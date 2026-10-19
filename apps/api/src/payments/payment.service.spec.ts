@@ -372,6 +372,77 @@ describe('M-Pesa payment callback reconciliation', () => {
       });
     });
 
+    it('does not start an application fee payment while a disbursed loan is outstanding', async () => {
+      process.env.LOAN_PROCESSING_FEE_POLICY_APPROVED = 'true';
+      process.env.LOAN_PROCESSING_FEE_POLICY_VERSION = 'approved-v1';
+      process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE = 'Approved fee policy disclosure.';
+      process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
+      process.env.MPESA_CALLBACK_URL = 'https://api.example.com/api/v1/payments/mpesa/callback';
+      const initiateStkPush = jest.fn();
+      const paymentCreate = jest.fn();
+      const transactionLoanLookup = jest.fn(async () => ({ id: 'outstanding-loan-id' }));
+      const prisma = {
+        paymentTransaction: { findUnique: jest.fn(async () => null) },
+        user: { findUnique: jest.fn(async () => ({ isActive: true })) },
+        loanApplication: {
+          findFirst: jest.fn(async () => ({
+            id: 'application-id',
+            productId: 'product-id',
+            requestedPrincipalKes: 3000,
+            applicationData: {
+              termsAccepted: true,
+              termsAcceptedAt: '2026-10-18T20:00:00.000Z',
+              productTermsSnapshot: {
+                productId: 'product-id',
+                termsVersion: 'product-v1',
+                requestedPrincipalKes: 3000,
+              },
+            },
+            status: 'DRAFT',
+            processingFeePayments: [],
+          })),
+        },
+        loan: { findFirst: jest.fn(async () => null) },
+        systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
+        ledgerAccount: { findUnique: jest.fn(async ({ where }: { where: { code: string } }) => ({
+          id: where.code,
+          isActive: true,
+          currency: 'KES',
+          accountType: where.code === 'MPESA_CLEARING' ? 'ASSET' : 'REVENUE',
+        })) },
+        $transaction: jest.fn(async (callback: (tx: never) => Promise<unknown>) => callback({
+          loan: { findFirst: transactionLoanLookup },
+          loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
+          paymentTransaction: {
+            findMany: jest.fn(async () => []),
+            create: paymentCreate,
+          },
+          idempotencyRecord: { create: jest.fn(async () => ({})) },
+        } as never)),
+      } as unknown as PrismaService;
+      const service = new PaymentService(
+        prisma,
+        { assertConfiguredForPayments: jest.fn(), initiateStkPush } as unknown as MpesaService,
+        {} as LedgerService,
+      );
+
+      await expect(service.initiateLoanProcessingFee(
+        'user-id',
+        Object.assign(new InitiateLoanProcessingFeeDto(), {
+          applicationId: 'application-id',
+          reviewConfirmed: true,
+          mpesaPhoneNumber: '+254712345678',
+        }),
+        'loan-fee-active-loan-check-01',
+      )).rejects.toThrow(/outstanding disbursed loan/i);
+      expect(transactionLoanLookup).toHaveBeenCalledWith({
+        where: { userId: 'user-id', status: { in: ['DISBURSED', 'REPAYMENT_IN_PROGRESS', 'OVERDUE'] } },
+        select: { id: true },
+      });
+      expect(paymentCreate).not.toHaveBeenCalled();
+      expect(initiateStkPush).not.toHaveBeenCalled();
+    });
+
     it('allows independent application fees while preserving unresolved attempts, preventing duplicates, and keeping fees out of the wallet', async () => {
       process.env.NODE_ENV = 'test';
       process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
@@ -438,6 +509,7 @@ describe('M-Pesa payment callback reconciliation', () => {
           updateMany: updatePayment,
         },
         user: { findUnique: jest.fn(async () => ({ phone: '+254712345678', isActive: true })) },
+        loan: { findFirst: jest.fn(async () => null) },
         loanApplication: {
           findFirst: jest.fn(async ({ where }: { where: { id: string } }) => ({
             id: where.id,
@@ -477,6 +549,7 @@ describe('M-Pesa payment callback reconciliation', () => {
           accountType: where.code === 'MPESA_CLEARING' ? 'ASSET' : 'REVENUE',
         })) },
         $transaction: jest.fn(async (callback: (tx: never) => Promise<unknown>) => callback({
+          loan: { findFirst: jest.fn(async () => null) },
           loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
           paymentTransaction: {
             findMany: jest.fn(async ({ where }: { where: { loanApplicationId: string } }) =>
@@ -732,6 +805,7 @@ describe('M-Pesa payment callback reconciliation', () => {
           updateMany: updatePayment,
         },
         user: { findUnique: jest.fn(async () => ({ phone: '+254712345678', isActive: true })) },
+        loan: { findFirst: jest.fn(async () => null) },
         loanApplication: {
           findFirst: jest.fn(async () => ({
             id: 'application-id',
@@ -754,6 +828,7 @@ describe('M-Pesa payment callback reconciliation', () => {
           accountType: where.code === 'MPESA_CLEARING' ? 'ASSET' : 'REVENUE',
         })) },
         $transaction: jest.fn(async (callback: (tx: never) => Promise<unknown>) => callback({
+          loan: { findFirst: jest.fn(async () => null) },
           loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
           paymentTransaction: { findMany: jest.fn(async () => []), create: paymentCreate, updateMany: updatePayment },
           activationPaymentRequest: { updateMany: bindProviderIds },
@@ -810,6 +885,7 @@ describe('M-Pesa payment callback reconciliation', () => {
         .mockResolvedValueOnce({ count: 1 })
         .mockRejectedValueOnce(new ServiceUnavailableException('sensitive marker failure detail'));
       const transactionClient = {
+        loan: { findFirst: jest.fn(async () => null) },
         loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
         paymentTransaction: { findMany: jest.fn(async () => []), create: paymentCreate },
         activationPaymentRequest: { updateMany: jest.fn(async () => ({ count: 1 })) },
@@ -823,6 +899,7 @@ describe('M-Pesa payment callback reconciliation', () => {
           updateMany: updatePayment,
         },
         user: { findUnique: jest.fn(async () => ({ phone: '+254712345678', isActive: true })) },
+        loan: { findFirst: jest.fn(async () => null) },
         loanApplication: {
           findFirst: jest.fn(async () => ({
             id: 'application-id',
@@ -920,6 +997,7 @@ describe('M-Pesa payment callback reconciliation', () => {
           updateMany: updatePayment,
         },
         user: { findUnique: jest.fn(async () => ({ phone: '+254712345678', isActive: true })) },
+        loan: { findFirst: jest.fn(async () => null) },
         loanApplication: {
           findFirst: jest.fn(async () => ({
             id: 'application-id',
@@ -942,6 +1020,7 @@ describe('M-Pesa payment callback reconciliation', () => {
           accountType: where.code === 'MPESA_CLEARING' ? 'ASSET' : 'REVENUE',
         })) },
         $transaction: jest.fn(async (callback: (tx: never) => Promise<unknown>) => callback({
+          loan: { findFirst: jest.fn(async () => null) },
           loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
           paymentTransaction: { findMany: jest.fn(async () => []), create: paymentCreate },
           idempotencyRecord: { create: jest.fn(async () => ({})) },

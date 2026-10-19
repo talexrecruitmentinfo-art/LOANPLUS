@@ -23,6 +23,7 @@ import { MpesaService, StkPushInitiationError, StkPushPreflightError } from './m
 import { InitiateLoanProcessingFeeDto } from './payment.dto';
 import { buildMpesaCallbackUrl } from './mpesa-callback-url';
 import { getLoanProcessingFeePolicy, LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
+import { OUTSTANDING_LOAN_STATUSES } from '../loans/loan-eligibility.constants';
 
 interface ActivationPolicy {
   approved: boolean;
@@ -215,6 +216,15 @@ export class PaymentService {
     ]);
     if (!user || !user.isActive) throw new ForbiddenException('This account cannot apply for a loan.');
     if (!application) throw new NotFoundException('Loan application was not found.');
+    const outstandingLoan = await this.prisma.loan.findFirst({
+      where: { userId, status: { in: OUTSTANDING_LOAN_STATUSES } },
+      select: { id: true },
+    });
+    if (outstandingLoan) {
+      throw new ConflictException(
+        'An outstanding disbursed loan is recorded for this account. Review your loan status in My Account or contact support before paying a new application fee.',
+      );
+    }
     if (!hasAcceptedProductTerms(application.applicationData, application.productId, application.requestedPrincipalKes)) {
       throw new ConflictException('This application has no recorded acceptance of its product terms. Review and submit a new application before paying.');
     }
@@ -278,6 +288,15 @@ export class PaymentService {
             receiptReference: true,
           },
         });
+        const transactionOutstandingLoan = await tx.loan.findFirst({
+          where: { userId, status: { in: OUTSTANDING_LOAN_STATUSES } },
+          select: { id: true },
+        });
+        if (transactionOutstandingLoan) {
+          throw new ConflictException(
+            'An outstanding disbursed loan is recorded for this account. Review your loan status in My Account or contact support before paying a new application fee.',
+          );
+        }
         if (currentAttempts.some((attempt) => attempt.userId !== userId)) {
           throw new ConflictException('This application has a fee-payment record with an invalid customer association. Contact support.');
         }

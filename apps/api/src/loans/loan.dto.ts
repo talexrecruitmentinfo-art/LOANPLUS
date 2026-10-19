@@ -1,5 +1,5 @@
 import { PartialType } from '@nestjs/swagger';
-import { Equals, IsBoolean, IsIn, IsInt, IsObject, IsOptional, IsString, Length, Matches, Max, Min } from 'class-validator';
+import { Equals, IsBoolean, IsIn, IsInt, IsObject, IsOptional, IsString, Length, Matches, Max, Min, ValidateIf } from 'class-validator';
 
 export class CreateLoanProductDto {
   @IsString()
@@ -58,16 +58,11 @@ export class ReviewLoanApplicationDto {
   @Length(10, 1000)
   reason!: string;
 
-  @IsOptional()
+  @ValidateIf((dto: ReviewLoanApplicationDto) => dto.decision === 'APPROVE')
   @IsInt()
   @Min(1)
   @Max(1_000_000_000)
   approvedPrincipalKes?: number;
-}
-
-export class AcceptLoanOfferDto {
-  @Equals(true)
-  termsAccepted!: boolean;
 }
 
 export class CreateLoanApplicationDto {

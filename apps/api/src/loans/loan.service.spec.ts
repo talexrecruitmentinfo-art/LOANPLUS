@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Unprocessab
 import { LoanService } from './loan.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { LedgerService } from '../ledger/ledger.service';
-import type { AcceptLoanOfferDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto } from './loan.dto';
+import type { ConfirmManualDisbursementDto, CreateLoanApplicationDto } from './loan.dto';
 
 const approvedTermsSnapshot = {
   productName: 'Snapshot product',
@@ -15,50 +15,151 @@ const approvedTermsSnapshot = {
   totalRepayableKes: 3310,
 };
 
-describe('LoanService approved terms snapshot', () => {
-  it('accepts the reviewed version even if product terms changed before customer acceptance', async () => {
-    const loanCreate = jest.fn(async ({ data }: { data: Record<string, unknown> }) => data);
+describe('LoanService Admin approval', () => {
+  const application = {
+    id: 'application-id',
+    userId: 'customer-id',
+    status: 'SUBMITTED',
+    requestedPrincipalKes: 3000,
+    applicationData: {
+      productTermsSnapshot: {
+        productName: 'Snapshot product',
+        termsVersion: 'terms-v1',
+        minimumPrincipalKes: 500,
+        maximumPrincipalKes: 5000,
+        durationDays: 30,
+        interestRateBps: 1000,
+        flatFeeKes: 10,
+      },
+    },
+    user: { isActive: true, identityStatus: 'VERIFIED' },
+    processingFeePayments: [{ status: 'CONFIRMED', amountKes: 50, currency: 'KES', receiptReference: 'TESTRECEIPT1' }],
+  };
+
+  function setup(options: {
+    updateCount?: number;
+    identityStatus?: string;
+    isActive?: boolean;
+    fee?: typeof application.processingFeePayments[number] | null;
+    existingLoan?: { id: string } | null;
+  } = {}) {
+    const updateMany = jest.fn(async () => ({ count: options.updateCount ?? 1 }));
+    const loanCreate = jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'loan-id', ...data }));
+    const auditCreate = jest.fn(async () => ({}));
     const transactionClient = {
-      loanApplication: { updateMany: jest.fn(async () => ({ count: 1 })) },
-      loan: { create: loanCreate },
-      authAuditLog: { create: jest.fn(async () => ({})) },
+      loanApplication: {
+        findUnique: jest.fn(async () => ({
+          ...application,
+          user: {
+            ...application.user,
+            identityStatus: options.identityStatus ?? 'VERIFIED',
+            isActive: options.isActive ?? true,
+          },
+          processingFeePayments: options.fee === null ? [] : [options.fee ?? application.processingFeePayments[0]],
+        })),
+        updateMany,
+      },
+      loan: {
+        findFirst: jest.fn(async () => options.existingLoan ?? null),
+        create: loanCreate,
+      },
+      adminAuditLog: { create: auditCreate },
     };
     const prisma = {
-      loanApplication: {
-        findFirst: jest.fn(async () => ({
-          id: 'application-id',
-          userId: 'customer-id',
-          status: 'APPROVED',
-          offerExpiresAt: null,
-          approvedPrincipalKes: 3000,
-          approvedChargesKes: 310,
-          approvedTermsSnapshot,
-          product: { termsVersion: 'terms-v2', durationDays: 90 },
-        })),
-      },
       $transaction: jest.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) => callback(transactionClient)),
     } as unknown as PrismaService;
-    const service = new LoanService(prisma, {} as LedgerService);
+    return { service: new LoanService(prisma, {} as LedgerService), updateMany, loanCreate, auditCreate };
+  }
 
-    await service.acceptOffer(
-      'customer-id',
-      'application-id',
-      { termsAccepted: true } as AcceptLoanOfferDto,
-    );
+  const approve = {
+    decision: 'APPROVE',
+    reason: 'Verified identity and eligibility.',
+    approvedPrincipalKes: 3000,
+  } as const;
 
+  it('moves Admin approval directly to disbursement pending and audits the approved amount', async () => {
+    const { service, loanCreate, auditCreate, updateMany } = setup();
+    const result = await service.reviewApplication('application-id', approve, 'admin-id');
+    expect(result.status).toBe('WAITING_FOR_DISBURSEMENT');
     expect(loanCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
+        applicationId: 'application-id',
+        userId: 'customer-id',
         principalKes: 3000,
-        chargesKes: 310,
         totalRepayableKes: 3310,
         acceptedTermsVersion: 'terms-v1',
+        status: 'DISBURSEMENT_PENDING',
       }),
     }));
+    expect(auditCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        superadminId: 'admin-id',
+        reason: approve.reason,
+        details: expect.objectContaining({ approvedPrincipalKes: 3000 }),
+      }),
+    }));
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        reviewerId: 'admin-id',
+        reviewedAt: expect.any(Date),
+        status: 'WAITING_FOR_DISBURSEMENT',
+      }),
+    }));
+    expect(loanCreate.mock.calls[0]?.[0].data).not.toHaveProperty('disbursedAt');
+  });
+
+  it('prevents duplicate loan creation after a repeated approval request', async () => {
+    const state = setup();
+    state.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    await state.service.reviewApplication('application-id', approve, 'admin-id');
+    await expect(state.service.reviewApplication('application-id', approve, 'admin-id'))
+      .rejects.toBeInstanceOf(ConflictException);
+    expect(state.loanCreate).toHaveBeenCalledTimes(1);
+    expect(state.auditCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['unverified identity', { identityStatus: 'PENDING' }],
+    ['inactive customer account', { isActive: false }],
+    ['missing fee', { fee: null }],
+    ['existing active loan', { existingLoan: { id: 'existing-loan' } }],
+  ])('refuses approval with %s', async (_label, options) => {
+    const state = setup(options);
+    await expect(state.service.reviewApplication('application-id', approve, 'admin-id'))
+      .rejects.toBeInstanceOf(ConflictException);
+    expect(state.updateMany).not.toHaveBeenCalled();
+    expect(state.loanCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([499, 3001, 5001])('refuses invalid approved principal %i without changing application state', async (approvedPrincipalKes) => {
+    const state = setup();
+    await expect(state.service.reviewApplication('application-id', {
+      ...approve,
+      approvedPrincipalKes,
+    }, 'admin-id')).rejects.toBeInstanceOf(UnprocessableEntityException);
+    await expect(state.service.reviewApplication('application-id', {
+      decision: 'APPROVE',
+      reason: approve.reason,
+    }, 'admin-id')).rejects.toBeInstanceOf(UnprocessableEntityException);
+    expect(state.updateMany).not.toHaveBeenCalled();
+    expect(state.loanCreate).not.toHaveBeenCalled();
+  });
+
+  it('preserves rejection and does not create a loan', async () => {
+    const state = setup({ identityStatus: 'PENDING', fee: null });
+    const result = await state.service.reviewApplication('application-id', {
+      decision: 'REJECT',
+      reason: 'Eligibility criteria were not met.',
+    }, 'admin-id');
+    expect(result.status).toBe('REJECTED');
+    expect(state.loanCreate).not.toHaveBeenCalled();
   });
 
   describe('LoanService application validation', () => {
     const create = jest.fn(async ({ data }: { data: Record<string, unknown> }) => data);
     let unresolvedPaymentLookup: jest.Mock;
+    let activeLoanLookup: jest.Mock;
+    let matchingDraftLookup: jest.Mock;
     let service: LoanService;
 
     beforeEach(() => {
@@ -67,6 +168,16 @@ describe('LoanService approved terms snapshot', () => {
         internalReference: 'LPP2A26FAA44E67AFED44C9E13F79547C4E',
         status: 'PENDING',
       }));
+      activeLoanLookup = jest.fn(async () => null);
+      matchingDraftLookup = jest.fn(async () => null);
+      const transactionClient = {
+        loan: { findFirst: activeLoanLookup },
+        loanApplication: {
+          findUnique: jest.fn(async () => null),
+          findFirst: matchingDraftLookup,
+          create,
+        },
+      };
       const prisma = {
         user: { findUnique: jest.fn(async () => ({ isActive: true })) },
         loanProduct: { findFirst: jest.fn(async () => ({
@@ -79,12 +190,14 @@ describe('LoanService approved terms snapshot', () => {
           interestRateBps: 1000,
           flatFeeKes: 10,
         })) },
-        loan: { findFirst: jest.fn(async () => null) },
+        loan: { findFirst: activeLoanLookup },
         paymentTransaction: { findFirst: unresolvedPaymentLookup },
         loanApplication: {
           findUnique: jest.fn(async () => null),
+          findFirst: matchingDraftLookup,
           create,
         },
+        $transaction: jest.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) => callback(transactionClient)),
       } as unknown as PrismaService;
       service = new LoanService(prisma, {} as LedgerService);
     });
@@ -142,6 +255,59 @@ describe('LoanService approved terms snapshot', () => {
       expect(create.mock.calls.map(([{ data }]) => data.requestedPrincipalKes)).toEqual([3000, 3500]);
     });
 
+    it('returns an existing exact-match draft and its payment status instead of creating a duplicate', async () => {
+      matchingDraftLookup.mockResolvedValue({
+        id: 'existing-application-id',
+        status: 'PROCESSING_PAYMENT_PENDING',
+        requestedPrincipalKes: 3000,
+        createdAt: new Date('2026-10-19T20:00:00Z'),
+        product: { name: 'Configured product' },
+        processingFeePayments: [{
+          id: 'payment-id',
+          internalReference: 'LPP123456789012',
+          status: 'PENDING',
+          amountKes: 50,
+          currency: 'KES',
+          failureCode: null,
+          receiptReference: null,
+          confirmedAt: null,
+        }],
+      });
+
+      const result = await service.createApplication('customer-id', application(), 'loan-application-key-0001');
+
+      expect(result).toMatchObject({
+        id: 'existing-application-id',
+        status: 'PROCESSING_PAYMENT_PENDING',
+        processingFeePayments: [{ internalReference: 'LPP123456789012', status: 'PENDING' }],
+      });
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('keeps the outstanding disbursed-loan restriction without misclassifying a pending disbursement', async () => {
+      activeLoanLookup.mockResolvedValue({ id: 'active-loan-id' });
+      await expect(service.createApplication(
+        'customer-id',
+        application(),
+        'loan-application-key-0001',
+      )).rejects.toThrow(/outstanding disbursed loan.*My Account.*support/i);
+      expect(create).not.toHaveBeenCalled();
+      expect(activeLoanLookup).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          status: { in: ['DISBURSED', 'REPAYMENT_IN_PROGRESS', 'OVERDUE'] },
+        }),
+      }));
+    });
+
+    it('allows an application when the only existing loan is awaiting disbursement', async () => {
+      await service.createApplication('customer-id', application(), 'loan-application-key-0001');
+      expect(activeLoanLookup).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({
+          status: { in: ['DISBURSED', 'REPAYMENT_IN_PROGRESS', 'OVERDUE'] },
+        }),
+      }));
+    });
+
     it.each([
       ['unaccepted terms', { termsAccepted: false }, BadRequestException],
       ['first guarantor name', { guarantorOneName: ' ' }, UnprocessableEntityException],
@@ -181,53 +347,23 @@ describe('LoanService approved terms snapshot', () => {
     });
   });
 
-  it('rejects acceptance of a legacy offer without a recorded terms snapshot', async () => {
-    const transaction = jest.fn();
-    const prisma = {
-      loanApplication: {
-        findFirst: jest.fn(async () => ({
-          id: 'application-id',
-          userId: 'customer-id',
-          status: 'APPROVED',
-          offerExpiresAt: null,
-          approvedPrincipalKes: 3000,
-          approvedChargesKes: 310,
-          approvedTermsSnapshot: null,
-          product: { termsVersion: 'mutable-current-version' },
-        })),
-      },
-      $transaction: transaction,
-    } as unknown as PrismaService;
-    const service = new LoanService(prisma, {} as LedgerService);
-
-    await expect(service.acceptOffer(
-      'customer-id',
-      'application-id',
-      { termsAccepted: true } as AcceptLoanOfferDto,
-    )).rejects.toBeInstanceOf(ConflictException);
-    expect(transaction).not.toHaveBeenCalled();
-  });
-
   it('does not approve a legacy application against mutable current product terms', async () => {
-    const transaction = jest.fn();
-    const prisma = {
+    const transactionClient = {
       loanApplication: {
         findUnique: jest.fn(async () => ({
           id: 'application-id',
+          userId: 'customer-id',
           status: 'SUBMITTED',
           requestedPrincipalKes: 3000,
           applicationData: {},
-          product: {
-            name: 'Current product',
-            termsVersion: 'current-v2',
-            minimumPrincipalKes: 500,
-            maximumPrincipalKes: 5000,
-            durationDays: 90,
-            interestRateBps: 5000,
-            flatFeeKes: 100,
-          },
+          user: { isActive: true, identityStatus: 'VERIFIED' },
+          processingFeePayments: [{ status: 'CONFIRMED', amountKes: 50, currency: 'KES', receiptReference: 'TESTRECEIPT1' }],
         })),
       },
+      loan: { findFirst: jest.fn(async () => null) },
+    };
+    const transaction = jest.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) => callback(transactionClient));
+    const prisma = {
       $transaction: transaction,
     } as unknown as PrismaService;
     const service = new LoanService(prisma, {} as LedgerService);
@@ -236,7 +372,7 @@ describe('LoanService approved terms snapshot', () => {
       decision: 'APPROVE',
       reason: 'Legacy application approval test.',
     }, 'reviewer-id')).rejects.toThrow('no accepted product-terms snapshot');
-    expect(transaction).not.toHaveBeenCalled();
+    expect(transaction).toHaveBeenCalledTimes(1);
   });
 
   it('creates the repayment due date from approved terms, not the mutable product', async () => {

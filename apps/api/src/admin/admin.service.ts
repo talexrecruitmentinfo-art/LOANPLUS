@@ -55,7 +55,7 @@ export class AdminService {
       this.prisma.paymentTransaction.count({ where: { status: PaymentStatus.PENDING } }),
       this.prisma.paymentTransaction.count({ where: { status: PaymentStatus.FAILED } }),
       this.prisma.loanApplication.count({ where: { status: { in: [LoanApplicationStatus.SUBMITTED, LoanApplicationStatus.UNDER_REVIEW] } } }),
-      this.prisma.loanApplication.count({ where: { status: LoanApplicationStatus.APPROVED } }),
+      this.prisma.loanApplication.count({ where: { status: { in: [LoanApplicationStatus.APPROVED, LoanApplicationStatus.WAITING_FOR_DISBURSEMENT] } } }),
       this.prisma.loanApplication.count({ where: { status: LoanApplicationStatus.REJECTED } }),
       this.prisma.loan.count({ where: { status: { in: [LoanStatus.DISBURSED, LoanStatus.REPAYMENT_IN_PROGRESS] } } }),
       this.prisma.loan.count({ where: { status: LoanStatus.OVERDUE } }),
