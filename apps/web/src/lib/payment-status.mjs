@@ -3,6 +3,20 @@ const AUTHENTICATION_ERROR =
 const APPLICATION_STATUS_ERROR =
   'Saved applications and their payment statuses could not be checked. Retry before starting a payment.';
 
+export const PAYMENT_STATUS_POLL_DELAYS_MS = [2_000, 4_000, 8_000, 15_000, 30_000, 30_000];
+
+export function shouldPollLoanApplicationStatus(applications) {
+  return Array.isArray(applications) && applications.some((application) => {
+    const awaitingSubmission = application.status === 'DRAFT' ||
+      application.status === 'PROCESSING_PAYMENT_PENDING';
+    return Array.isArray(application.processingFeePayments) &&
+      (application.processingFeePayments.some((payment) =>
+        payment.status === 'PENDING' ||
+        (payment.status === 'FAILED' && payment.failureCode === 'MPESA_RESULT_4999')) ||
+        (awaitingSubmission && application.processingFeePayments.some((payment) => payment.status === 'CONFIRMED')));
+  });
+}
+
 function hasPaymentHistory(application) {
   return application !== null &&
     typeof application === 'object' &&

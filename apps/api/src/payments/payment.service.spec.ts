@@ -202,7 +202,25 @@ describe('M-Pesa payment callback reconciliation', () => {
           failNextTransaction = false;
           throw new Error('test database unavailable');
         }
-        return callback(transactionClient as never);
+        const transactionSnapshot = {
+          paymentStatus,
+          paymentFailureCode,
+          transactionCount,
+          paymentUpdateData,
+          callbackEventData,
+          events: new Set(events),
+        };
+        try {
+          return await callback(transactionClient as never);
+        } catch (error) {
+          paymentStatus = transactionSnapshot.paymentStatus;
+          paymentFailureCode = transactionSnapshot.paymentFailureCode;
+          transactionCount = transactionSnapshot.transactionCount;
+          paymentUpdateData = transactionSnapshot.paymentUpdateData;
+          callbackEventData = transactionSnapshot.callbackEventData;
+          events = transactionSnapshot.events;
+          throw error;
+        }
       }),
     } as unknown as PrismaService;
     prisma = prismaMock;
@@ -259,7 +277,7 @@ describe('M-Pesa payment callback reconciliation', () => {
       expect(errorLog).toHaveBeenCalledWith(JSON.stringify({
         event: 'mpesa_callback_processing_failed',
         paymentId: 'payment-id',
-        paymentReference: 'LPP_TEST_CALLBACK',
+        applicationId: null,
         step: 'PROVIDER_STATUS_QUERY',
         errorType: 'ServiceUnavailableException',
         errorCode: 'HTTP_503',
@@ -1509,8 +1527,46 @@ describe('M-Pesa payment callback reconciliation', () => {
     linkedPayment.type = PaymentType.LOAN_PROCESSING_FEE;
     linkedPayment.loanApplicationId = 'loan-application-id';
 
-    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
-    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+    const infoLog = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+      await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+      const eventsLogged = infoLog.mock.calls
+        .map(([message]) => JSON.parse(String(message)) as Record<string, unknown>);
+      expect(eventsLogged).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          event: 'mpesa_callback_received',
+          paymentId: 'payment-id',
+          applicationId: 'loan-application-id',
+          callbackResultCode: 0,
+        }),
+        expect.objectContaining({
+          event: 'mpesa_provider_status_queried',
+          paymentId: 'payment-id',
+          applicationId: 'loan-application-id',
+          resultCode: 0,
+          checkoutRequestMatched: true,
+          merchantRequestMatched: true,
+          resultCodeMatched: true,
+        }),
+        expect.objectContaining({
+          event: 'mpesa_payment_settlement_committed',
+          paymentId: 'payment-id',
+          applicationId: 'loan-application-id',
+          paymentType: PaymentType.LOAN_PROCESSING_FEE,
+        }),
+        expect.objectContaining({
+          event: 'mpesa_loan_application_submitted',
+          paymentId: 'payment-id',
+          applicationId: 'loan-application-id',
+        }),
+      ]));
+      expect(infoLog.mock.calls.every(([message]) =>
+        !String(message).includes(callbackToken) && !String(message).includes('+254712345678'),
+      )).toBe(true);
+    } finally {
+      infoLog.mockRestore();
+    }
 
     expect(paymentStatus).toBe('CONFIRMED');
     expect(paymentUpdateData).toMatchObject({
@@ -1529,6 +1585,31 @@ describe('M-Pesa payment callback reconciliation', () => {
       where: { id: 'loan-application-id', userId: 'user-id', status: 'PROCESSING_PAYMENT_PENDING' },
       data: { status: 'SUBMITTED', submittedAt: expect.any(Date) },
     }));
+  });
+
+  it('rolls back payment settlement when the associated application cannot be submitted', async () => {
+    const errorLog = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const linkedPayment = activationRequestRecord.paymentTransaction as Record<string, unknown>;
+    linkedPayment.type = PaymentType.LOAN_PROCESSING_FEE;
+    linkedPayment.loanApplicationId = 'loan-application-id';
+    transactionClient.loanApplication.updateMany.mockResolvedValueOnce({ count: 0 });
+    try {
+      await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
+        .rejects.toBeInstanceOf(ConflictException);
+      expect(paymentStatus).toBe('PENDING');
+      expect(paymentFailureCode).toBeNull();
+      expect(transactionCount).toBe(0);
+      expect(errorLog).toHaveBeenCalledWith(JSON.stringify({
+        event: 'mpesa_payment_settlement_failed',
+        paymentId: 'payment-id',
+        applicationId: 'loan-application-id',
+        step: 'PAYMENT_SETTLEMENT',
+        errorType: 'ConflictException',
+        errorCode: 'HTTP_409',
+      }));
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it('does not bind recovered identifiers when provider status disagrees with the callback', async () => {

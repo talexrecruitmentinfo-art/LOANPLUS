@@ -1639,15 +1639,37 @@ export class PaymentService {
   }
 
   async handleMpesaCallback(callbackToken: string, payload: unknown): Promise<{ ResultCode: number; ResultDesc: string }> {
-    const callback = this.parseCallback(payload);
-    const callbackTokenHash = hashToken(callbackToken);
-    const request = await this.prisma.activationPaymentRequest.findUnique({
-      where: { callbackTokenHash },
-      include: { paymentTransaction: true },
-    });
-    if (!request) {
-      throw new NotFoundException('Payment callback is invalid.');
+    let callback: MpesaCallback;
+    try {
+      callback = this.parseCallback(payload);
+    } catch (error) {
+      this.logCallbackFailure(error, 'CALLBACK_PARSE');
+      throw error;
     }
+    const callbackTokenHash = hashToken(callbackToken);
+    let request: Prisma.ActivationPaymentRequestGetPayload<{
+      include: { paymentTransaction: true };
+    }> | null;
+    try {
+      request = await this.prisma.activationPaymentRequest.findUnique({
+        where: { callbackTokenHash },
+        include: { paymentTransaction: true },
+      });
+    } catch (error) {
+      this.logCallbackFailure(error, 'CALLBACK_TOKEN_LOOKUP');
+      throw error;
+    }
+    if (!request) {
+      const error = new NotFoundException('Payment callback is invalid.');
+      this.logCallbackFailure(error, 'CALLBACK_TOKEN_LOOKUP');
+      throw error;
+    }
+    logger.log(JSON.stringify({
+      event: 'mpesa_callback_received',
+      paymentId: request.paymentTransaction.id,
+      applicationId: request.paymentTransaction.loanApplicationId,
+      callbackResultCode: callback.ResultCode,
+    }));
     let step = 'CALLBACK_VALIDATION';
     try {
       if (
@@ -1675,10 +1697,22 @@ export class PaymentService {
         request.checkoutRequestId ?? callback.CheckoutRequestID,
       );
       step = 'PROVIDER_STATUS_VALIDATION';
+      const checkoutRequestMatched = providerStatus.checkoutRequestId === callback.CheckoutRequestID;
+      const merchantRequestMatched = providerStatus.merchantRequestId === callback.MerchantRequestID;
+      const resultCodeMatched = providerStatus.resultCode === callback.ResultCode;
+      logger.log(JSON.stringify({
+        event: 'mpesa_provider_status_queried',
+        paymentId: request.paymentTransaction.id,
+        applicationId: request.paymentTransaction.loanApplicationId,
+        resultCode: providerStatus.resultCode,
+        checkoutRequestMatched,
+        merchantRequestMatched,
+        resultCodeMatched,
+      }));
       if (
-        providerStatus.checkoutRequestId !== callback.CheckoutRequestID ||
-        providerStatus.merchantRequestId !== callback.MerchantRequestID ||
-        providerStatus.resultCode !== callback.ResultCode
+        !checkoutRequestMatched ||
+        !merchantRequestMatched ||
+        !resultCodeMatched
       ) {
         throw new ServiceUnavailableException('M-Pesa callback could not be reconciled with provider status.');
       }
@@ -1695,23 +1729,53 @@ export class PaymentService {
         callback,
         payloadHash,
       );
+      if (providerStatus.resultCode === 0 && request.paymentTransaction.status === PaymentStatus.PENDING) {
+        logger.log(JSON.stringify({
+          event: 'mpesa_payment_settlement_committed',
+          paymentId: request.paymentTransaction.id,
+          applicationId: request.paymentTransaction.loanApplicationId,
+          paymentType: request.paymentTransaction.type,
+        }));
+        if (request.paymentTransaction.type === PaymentType.LOAN_PROCESSING_FEE) {
+          logger.log(JSON.stringify({
+            event: 'mpesa_loan_application_submitted',
+            paymentId: request.paymentTransaction.id,
+            applicationId: request.paymentTransaction.loanApplicationId,
+          }));
+        }
+      }
     } catch (error) {
-      const errorCode = error instanceof Prisma.PrismaClientKnownRequestError
-        ? error.code
-        : error instanceof HttpException
-          ? `HTTP_${error.getStatus()}`
-          : 'UNEXPECTED';
-      logger.error(JSON.stringify({
-        event: 'mpesa_callback_processing_failed',
-        paymentId: request.paymentTransaction.id,
-        paymentReference: request.paymentTransaction.internalReference,
-        step,
-        errorType: error instanceof Error ? error.constructor.name : 'Unknown',
-        errorCode,
-      }));
+      this.logCallbackFailure(error, step, request.paymentTransaction);
       throw error;
     }
     return { ResultCode: 0, ResultDesc: 'Accepted' };
+  }
+
+  private logCallbackFailure(
+    error: unknown,
+    step: string,
+    payment?: { id: string; loanApplicationId: string | null },
+  ): void {
+    const errorCode = error instanceof Prisma.PrismaClientKnownRequestError
+      ? error.code
+      : error instanceof HttpException
+        ? `HTTP_${error.getStatus()}`
+        : 'UNEXPECTED';
+    const verificationFailure = step === 'CALLBACK_PARSE' ||
+      step === 'CALLBACK_VALIDATION' ||
+      step === 'PROVIDER_STATUS_VALIDATION';
+    logger.error(JSON.stringify({
+      event: verificationFailure
+        ? 'mpesa_callback_verification_failed'
+        : step === 'PAYMENT_SETTLEMENT'
+          ? 'mpesa_payment_settlement_failed'
+          : 'mpesa_callback_processing_failed',
+      paymentId: payment?.id ?? null,
+      applicationId: payment?.loanApplicationId ?? null,
+      step,
+      errorType: error instanceof Error ? error.constructor.name : 'Unknown',
+      errorCode,
+    }));
   }
 
   private assertPaymentAssociation(

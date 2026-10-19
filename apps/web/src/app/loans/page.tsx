@@ -4,7 +4,11 @@ import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiRequest } from '@/lib/api';
 import { formatMoney } from '@/lib/currency';
-import { loadLoanApplicationStatus } from '@/lib/payment-status.mjs';
+import {
+  loadLoanApplicationStatus,
+  PAYMENT_STATUS_POLL_DELAYS_MS,
+  shouldPollLoanApplicationStatus,
+} from '@/lib/payment-status.mjs';
 
 interface Product {
   id: string;
@@ -102,16 +106,18 @@ function estimateTotalRepayment(product: Product, principalKes: number): number 
 }
 
 function statusLabel(application: LoanApplication): string {
+  const feeConfirmed = application.processingFeePayments.some((attempt) => attempt.status === 'CONFIRMED');
   if (application.status === 'DRAFT' || application.status === 'PROCESSING_PAYMENT_PENDING') {
     const latest = application.processingFeePayments[0];
     if (application.processingFeePayments.some((attempt) =>
       attempt.status === 'PENDING' || (attempt.status === 'FAILED' && attempt.failureCode === 'MPESA_RESULT_4999'),
     )) return 'Processing Payment Unresolved';
-    if (latest?.status === 'CONFIRMED') return 'Payment Confirmed — Awaiting Review';
+    if (latest?.status === 'CONFIRMED') return 'Payment Confirmed — Application Submission Pending';
     if (latest?.status === 'FAILED') return 'Processing Payment Failed';
     if (latest?.status === 'PENDING') return 'Processing Payment Pending';
     return application.status === 'DRAFT' ? 'Draft' : 'Processing Payment Unresolved';
   }
+  if (!feeConfirmed || !application.submittedAt) return 'Application status requires verification';
   if (application.status === 'SUBMITTED') return 'Submitted — Awaiting Admin Review';
   if (application.status === 'UNDER_REVIEW') return 'Under Review';
   if (application.status === 'APPROVED') return 'Approved — Awaiting Offer Acceptance';
@@ -185,6 +191,7 @@ export default function LoanProductsPage() {
   const paymentActionInFlight = useRef(false);
   const applicationsRequestSequence = useRef(0);
   const statusRequestSequence = useRef(0);
+  const paymentStatusPollAttempts = useRef(0);
 
   const product = products.find((item) => item.id === form.productId);
 
@@ -198,7 +205,8 @@ export default function LoanProductsPage() {
     if (requestId === applicationsRequestSequence.current) setApplications(nextApplications);
   }, []);
 
-  const refreshPaymentStatus = useCallback(async () => {
+  const refreshPaymentStatus = useCallback(async (manual = false) => {
+    if (manual) paymentStatusPollAttempts.current = 0;
     const requestId = ++statusRequestSequence.current;
     const applicationsRequestId = ++applicationsRequestSequence.current;
     setApplicationStatusLoading(true);
@@ -216,6 +224,21 @@ export default function LoanProductsPage() {
       if (requestId === statusRequestSequence.current) setApplicationStatusLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (!signedIn || !shouldPollLoanApplicationStatus(applications)) {
+      paymentStatusPollAttempts.current = 0;
+      return;
+    }
+    if (applicationStatusLoading || paymentStatusPollAttempts.current >= PAYMENT_STATUS_POLL_DELAYS_MS.length) return;
+
+    const delay = PAYMENT_STATUS_POLL_DELAYS_MS[paymentStatusPollAttempts.current];
+    const timer = window.setTimeout(() => {
+      paymentStatusPollAttempts.current += 1;
+      void refreshPaymentStatus();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [applications, signedIn, applicationStatusLoading, refreshPaymentStatus]);
 
   async function refreshProducts() {
     setProductsLoading(true);
@@ -355,11 +378,11 @@ export default function LoanProductsPage() {
       setMpesaPhoneConfirmed(false);
       setResumingApplicationId(null);
       await refreshApplications();
-      await refreshPaymentStatus();
+      await refreshPaymentStatus(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The processing-fee request could not be completed.');
       await refreshApplications().catch(() => undefined);
-      await refreshPaymentStatus();
+      await refreshPaymentStatus(true);
     } finally {
       paymentActionInFlight.current = false;
       setBusyId(null);
@@ -423,7 +446,7 @@ export default function LoanProductsPage() {
       {applicationStatusLoading && <p className="fee-unavailable-notice" role="status">Checking your saved applications and payment statuses.</p>}
       {applicationStatusError && <div className="fee-unavailable-notice" role="alert">
         <p>{applicationStatusError} <Link href="/login">Sign in</Link> or retry. Payment initiation remains disabled until this check succeeds.</p>
-        <button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading} onClick={() => void refreshPaymentStatus()}>Retry status check</button>
+        <button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading} onClick={() => void refreshPaymentStatus(true)}>Retry status check</button>
       </div>}
       {!signedIn && !loading && <p className="product-list"><Link className="button" href="/login">Sign in to apply</Link></p>}
       {signedIn && product && (
@@ -533,7 +556,7 @@ export default function LoanProductsPage() {
         ))}
       </section>
       {signedIn && <section className="customer-ledger-list">
-        <div className="customer-ledger-heading"><h2>My loan applications</h2><div><span>{applications.length}</span><button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading} onClick={() => void refreshPaymentStatus()}>Refresh status</button></div></div>
+        <div className="customer-ledger-heading"><h2>My loan applications</h2><div><span>{applications.length}</span><button className="quiet-button" type="button" disabled={busyId !== null || applicationStatusLoading} onClick={() => void refreshPaymentStatus(true)}>Refresh status</button></div></div>
         {applications.length === 0 ? <p>No applications yet. Select a loan product and complete the application above.</p> : applications.map((application) => {
           const terms = application.approvedTermsSnapshot;
           const guarantor = (key: string) => typeof application.applicationData[key] === 'string' ? application.applicationData[key] as string : '—';
@@ -556,7 +579,9 @@ export default function LoanProductsPage() {
               {feeAttempts.length > 0 && <dl>
                 {feeAttempts.map((fee) => <div key={fee.id}>
                   <dt>Loan Processing Fee — {formatMoney(fee.amountKes)} · {fee.status === 'CONFIRMED'
-                    ? 'Payment confirmed — application submitted for review'
+                    ? application.submittedAt
+                      ? 'Payment confirmed — application submitted for review'
+                      : 'Payment confirmed — application submission pending'
                     : fee.status === 'PENDING'
                       ? 'Payment outcome pending verification — do not pay again'
                       : fee.status === 'FAILED' && fee.failureCode === 'MPESA_RESULT_4999'
@@ -567,6 +592,7 @@ export default function LoanProductsPage() {
                   <dd>Reference {fee.internalReference}</dd>
                   {fee.confirmedAt && <dd>Confirmed {new Date(fee.confirmedAt).toLocaleString('en-KE')}</dd>}
                   {fee.receiptReference && <dd>M-Pesa receipt {fee.receiptReference}</dd>}
+                  {fee.status === 'CONFIRMED' && !application.submittedAt && <dd role="status">Payment is confirmed, but the application has not yet reached submitted status. Refresh the saved status; do not pay again. <Link href="/support">Contact support</Link> if this continues.</dd>}
                   {(fee.status === 'PENDING' || fee.failureCode === 'MPESA_RESULT_4999') && <dd>Refresh the saved status or <Link href="/support">contact support</Link> for reconciliation. Do not create another attempt for this application while its outcome is uncertain.</dd>}
                   {fee.status === 'FAILED' && !isRetryableFeeFailure(fee) && <dd>Do not retry this fee without confirmation. <Link href="/support">Contact support</Link> for the verified next step.</dd>}
                 </div>)}

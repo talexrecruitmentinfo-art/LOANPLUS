@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { loadLoanApplicationStatus } from '../src/lib/payment-status.mjs';
+import {
+  loadLoanApplicationStatus,
+  PAYMENT_STATUS_POLL_DELAYS_MS,
+  shouldPollLoanApplicationStatus,
+} from '../src/lib/payment-status.mjs';
 
 const loanPage = await readFile(new URL('../src/app/loans/page.tsx', import.meta.url), 'utf8');
 const statusHelper = await readFile(new URL('../src/lib/payment-status.mjs', import.meta.url), 'utf8');
@@ -130,6 +134,32 @@ test('a refreshed confirmed payment replaces the unresolved status without creat
   assert.match(loanPage, /applicationsRequestId === applicationsRequestSequence\.current/);
 });
 
+test('status polling is bounded, backs off, and stops after application submission', () => {
+  assert.deepEqual(PAYMENT_STATUS_POLL_DELAYS_MS, [2_000, 4_000, 8_000, 15_000, 30_000, 30_000]);
+  assert.equal(shouldPollLoanApplicationStatus([unresolvedApplication]), true);
+  assert.equal(shouldPollLoanApplicationStatus([{
+    ...unresolvedApplication,
+    status: 'PROCESSING_PAYMENT_PENDING',
+    processingFeePayments: [{ ...unresolvedApplication.processingFeePayments[0], status: 'CONFIRMED' }],
+  }]), true);
+  assert.equal(shouldPollLoanApplicationStatus([{
+    ...unresolvedApplication,
+    status: 'SUBMITTED',
+    processingFeePayments: [{
+      ...unresolvedApplication.processingFeePayments[0],
+      status: 'CONFIRMED',
+      failureCode: null,
+    }],
+  }]), false);
+  assert.match(loanPage, /cache: 'no-store'/);
+  assert.match(loanPage, /window\.clearTimeout\(timer\)/);
+  assert.match(loanPage, /paymentStatusPollAttempts\.current >= PAYMENT_STATUS_POLL_DELAYS_MS\.length/);
+  assert.match(loanPage, /Payment confirmed — application submission pending/);
+  assert.match(loanPage, /Payment is confirmed, but the application has not yet reached submitted status/);
+  assert.match(loanPage, /if \(!feeConfirmed \|\| !application\.submittedAt\) return 'Application status requires verification'/);
+  assert.match(loanPage, /fee\.status === 'CONFIRMED'\s*\?\s*application\.submittedAt/);
+});
+
 test('an existing unresolved fee remains visible on its application without globally blocking new applications', async () => {
   const result = await loadLoanApplicationStatus(async (path) =>
     path === '/auth/me' ? { id: 'customer' } : [{ id: 'new-application', processingFeePayments: [] }, unresolvedApplication],
@@ -143,7 +173,7 @@ test('an existing unresolved fee remains visible on its application without glob
 });
 
 test('payment-status refresh is read-only and always terminates its loading state', async () => {
-  const refresh = loanPage.match(/const refreshPaymentStatus = useCallback\(async \(\) => \{([\s\S]*?)\n  \}, \[\]\)/)?.[1] ?? '';
+  const refresh = loanPage.match(/const refreshPaymentStatus = useCallback\(async \([^)]*\) => \{([\s\S]*?)\n  \}, \[\]\)/)?.[1] ?? '';
 
   assert.match(refresh, /loadLoanApplicationStatus<LoanApplication>\(apiRequest\)/);
   assert.match(refresh, /finally \{\s*if \(requestId === statusRequestSequence\.current\) setApplicationStatusLoading\(false\);/);
