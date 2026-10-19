@@ -19,7 +19,7 @@ import {
   normalizeKenyaPhone,
 } from '../auth/security.util';
 import { LedgerService } from '../ledger/ledger.service';
-import { MpesaService, StkPushInitiationError } from './mpesa.service';
+import { MpesaService, StkPushInitiationError, StkPushPreflightError } from './mpesa.service';
 import { InitiateLoanProcessingFeeDto } from './payment.dto';
 import { buildMpesaCallbackUrl } from './mpesa-callback-url';
 import { getLoanProcessingFeePolicy, LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
@@ -81,8 +81,12 @@ function isRetryableFeeAttempt(attempt: {
 } | undefined): boolean {
   return attempt?.status === PaymentStatus.FAILED &&
     attempt.receiptReference === null &&
-    /^MPESA_RESULT_[1-9]\d*$/.test(attempt.failureCode ?? '') &&
-    attempt.failureCode !== 'MPESA_RESULT_4999';
+    (
+      (/^MPESA_RESULT_[1-9]\d*$/.test(attempt.failureCode ?? '') &&
+        attempt.failureCode !== 'MPESA_RESULT_4999') ||
+      /^MPESA_PREFLIGHT_[A-Z_]+$/.test(attempt.failureCode ?? '') ||
+      attempt.failureCode === 'MPESA_STK_REJECTED'
+    );
 }
 
 @Injectable()
@@ -372,7 +376,7 @@ export class PaymentService {
         amountKes: LOAN_PROCESSING_FEE_KES,
         phoneNumber: phoneNumber.slice(1),
         accountReference: payment.internalReference.slice(-12),
-        description: 'Loan processing fee',
+        description: 'Loan fee',
         callbackUrl,
       }, async () => {
         initiationStep = 'PERSIST_STK_REQUESTED';
@@ -383,6 +387,51 @@ export class PaymentService {
         initiationStep = 'STK_REQUEST';
       });
     } catch (error) {
+      if (error instanceof StkPushPreflightError) {
+        const failureCode = `MPESA_PREFLIGHT_${error.reasonCode}`;
+        await this.prisma.paymentTransaction.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: { status: PaymentStatus.FAILED, failureCode, initiationPhase: 'PREFLIGHT_FAILED' },
+        });
+        logger.warn(JSON.stringify({
+          event: 'mpesa_stk_preflight_failed',
+          paymentId: payment.id,
+          paymentReference: payment.internalReference,
+          phase: 'PRE_PROVIDER',
+          step: 'MPESA_PREFLIGHT',
+          reasonCode: error.reasonCode,
+          providerRequestSent: false,
+        }));
+        return {
+          reference: payment.internalReference,
+          status: PaymentStatus.FAILED,
+          amountKes: LOAN_PROCESSING_FEE_KES,
+          currency: 'KES',
+          message: 'The payment request failed local validation and no M-Pesa request was sent. Review the application and try again.',
+        };
+      }
+      if (error instanceof StkPushInitiationError && error.phase === 'STK_REJECTED') {
+        await this.prisma.paymentTransaction.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: { status: PaymentStatus.FAILED, failureCode: 'MPESA_STK_REJECTED', initiationPhase: 'STK_REJECTED' },
+        });
+        logger.warn(JSON.stringify({
+          event: 'mpesa_stk_request_rejected',
+          paymentId: payment.id,
+          paymentReference: payment.internalReference,
+          phase: 'PROVIDER_RESPONSE',
+          step: 'STK_REQUEST',
+          reasonCode: 'PROVIDER_REJECTED_REQUEST',
+          providerResponseCode: error.providerResponseCode,
+        }));
+        return {
+          reference: payment.internalReference,
+          status: PaymentStatus.FAILED,
+          amountKes: LOAN_PROCESSING_FEE_KES,
+          currency: 'KES',
+          message: 'M-Pesa rejected the request before accepting a payment prompt. Review the payment details before trying again.',
+        };
+      }
       const initiationPhase = error instanceof StkPushInitiationError
         ? error.phase === 'OAUTH'
           ? 'OAUTH_FAILED_BEFORE_STK'

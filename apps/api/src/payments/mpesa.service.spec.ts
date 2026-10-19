@@ -173,10 +173,23 @@ describe('M-Pesa Daraja HTTP integration', () => {
       { ...valid, phoneNumber: '25471234567A' },
       { ...valid, phoneNumber: '25471234567' },
       { ...valid, accountReference: 'REFERENCE-TOO-LONG' },
-      { ...valid, description: 'Description is too long' },
     ]) {
       await expect(mpesa.initiateStkPush(input)).rejects.toBeInstanceOf(ServiceUnavailableException);
     }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('identifies an overlong transaction description as a local preflight failure before OAuth or STK', async () => {
+    await expect(mpesa.initiateStkPush({
+      amountKes: 50,
+      phoneNumber: '254712345678',
+      accountReference: 'LPATEST12345',
+      description: 'Loan processing fee',
+      callbackUrl: 'https://api.example.invalid/callback/token',
+    })).rejects.toMatchObject({
+      reasonCode: 'INVALID_DESCRIPTION',
+      message: 'M-Pesa request failed local preflight validation.',
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -215,6 +228,15 @@ describe('M-Pesa Daraja HTTP integration', () => {
     fetchMock
       .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
       .mockResolvedValueOnce(mockJson({ ResponseCode: '1', errorMessage: 'private provider detail' }));
+    await expect(mpesa.initiateStkPush(input)).rejects.toMatchObject({
+      phase: 'STK_REJECTED',
+      providerResponseCode: '1',
+      message: 'M-Pesa payment initiation is unavailable.',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
+      .mockResolvedValueOnce(mockJson({ ResponseCode: '0' }));
     await expect(mpesa.initiateStkPush(input)).rejects.toMatchObject({
       phase: 'STK_RESPONSE',
       message: 'M-Pesa payment initiation is unavailable.',

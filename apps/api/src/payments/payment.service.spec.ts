@@ -11,7 +11,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { PrismaService } from '../prisma/prisma.service';
 import { encryptSensitiveValue, hashToken } from '../auth/security.util';
 import { LedgerService } from '../ledger/ledger.service';
-import { MpesaService, StkPushInitiationError } from './mpesa.service';
+import { MpesaService, StkPushInitiationError, StkPushPreflightError } from './mpesa.service';
 import { PaymentService } from './payment.service';
 import { InitiateLoanProcessingFeeDto } from './payment.dto';
 
@@ -379,8 +379,17 @@ describe('M-Pesa payment callback reconciliation', () => {
         return { id: payment.id, internalReference: payment.internalReference };
       });
       const initiationPhases: string[] = [];
-      const updatePayment = jest.fn(async ({ data }: { data: { initiationPhase?: string } }) => {
+      const updatePayment = jest.fn(async ({ where, data }: {
+        where: { id?: string };
+        data: {
+          initiationPhase?: string;
+          status?: 'PENDING' | 'FAILED';
+          failureCode?: string | null;
+        };
+      }) => {
         if (data.initiationPhase) initiationPhases.push(data.initiationPhase);
+        const payment = [...createdPayments.values()].find((item) => item.id === where.id);
+        if (payment) Object.assign(payment, data);
         return { count: 1 };
       });
       const updateRequest = jest.fn(async () => ({ count: 1 }));
@@ -444,6 +453,8 @@ describe('M-Pesa payment callback reconciliation', () => {
         } as never)),
         activationPaymentRequest: { update: updateRequest },
       } as unknown as PrismaService;
+      let rejectPreflight = false;
+      let rejectProvider = false;
       const initiateStkPush = jest.fn(async (_input: {
         amountKes: number;
         phoneNumber: string;
@@ -451,6 +462,8 @@ describe('M-Pesa payment callback reconciliation', () => {
         description: string;
         callbackUrl: string;
       }, beforeStkRequest?: () => Promise<void>) => {
+        if (rejectPreflight) throw new StkPushPreflightError('INVALID_DESCRIPTION');
+        if (rejectProvider) throw new StkPushInitiationError('STK_REJECTED', '1');
         await beforeStkRequest?.();
         return {
           checkoutRequestId: 'ws_CO_test',
@@ -491,7 +504,7 @@ describe('M-Pesa payment callback reconciliation', () => {
       expect(initiateStkPush).toHaveBeenCalledWith(expect.objectContaining({
         amountKes: 50,
         phoneNumber: '254112345678',
-        description: 'Loan processing fee',
+        description: 'Loan fee',
       }), expect.any(Function));
       const stkInput = initiateStkPush.mock.calls[0][0] as {
         accountReference: string;
@@ -555,6 +568,88 @@ describe('M-Pesa payment callback reconciliation', () => {
       });
       expect(initiateStkPush).toHaveBeenCalledTimes(2);
 
+      rejectPreflight = true;
+      const warning = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        const preflightResponse = await paymentService.initiateLoanProcessingFee(
+          'user-id',
+          Object.assign(new InitiateLoanProcessingFeeDto(), {
+            applicationId: 'application-id-3',
+            reviewConfirmed: true,
+            mpesaPhoneNumber: '+254712345678',
+          }),
+          'loan-fee-idempotency-preflight',
+        );
+        const preflightPayment = [...createdPayments.values()][2];
+        expect(preflightResponse).toMatchObject({
+          status: 'FAILED',
+          reference: preflightPayment.internalReference,
+        });
+        expect(preflightPayment).toMatchObject({
+          status: 'FAILED',
+          failureCode: 'MPESA_PREFLIGHT_INVALID_DESCRIPTION',
+        });
+        expect(updatePayment).toHaveBeenCalledWith({
+          where: { id: preflightPayment.id, status: 'PENDING' },
+          data: {
+            status: 'FAILED',
+            failureCode: 'MPESA_PREFLIGHT_INVALID_DESCRIPTION',
+            initiationPhase: 'PREFLIGHT_FAILED',
+          },
+        });
+        expect(warning).toHaveBeenCalledWith(JSON.stringify({
+          event: 'mpesa_stk_preflight_failed',
+          paymentId: preflightPayment.id,
+          paymentReference: preflightPayment.internalReference,
+          phase: 'PRE_PROVIDER',
+          step: 'MPESA_PREFLIGHT',
+          reasonCode: 'INVALID_DESCRIPTION',
+          providerRequestSent: false,
+        }));
+        expect(warning.mock.calls[0][0]).not.toContain('254712345678');
+        expect(initiateStkPush).toHaveBeenCalledTimes(3);
+      } finally {
+        warning.mockRestore();
+        rejectPreflight = false;
+      }
+
+      rejectProvider = true;
+      const providerWarning = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        const rejectedResponse = await paymentService.initiateLoanProcessingFee(
+          'user-id',
+          Object.assign(new InitiateLoanProcessingFeeDto(), {
+            applicationId: 'application-id-4',
+            reviewConfirmed: true,
+            mpesaPhoneNumber: '+254712345678',
+          }),
+          'loan-fee-idempotency-rejected',
+        );
+        const rejectedPayment = [...createdPayments.values()][3];
+        expect(rejectedResponse).toMatchObject({
+          status: 'FAILED',
+          reference: rejectedPayment.internalReference,
+        });
+        expect(rejectedPayment).toMatchObject({
+          status: 'FAILED',
+          failureCode: 'MPESA_STK_REJECTED',
+        });
+        expect(providerWarning).toHaveBeenCalledWith(JSON.stringify({
+          event: 'mpesa_stk_request_rejected',
+          paymentId: rejectedPayment.id,
+          paymentReference: rejectedPayment.internalReference,
+          phase: 'PROVIDER_RESPONSE',
+          step: 'STK_REQUEST',
+          reasonCode: 'PROVIDER_REJECTED_REQUEST',
+          providerResponseCode: '1',
+        }));
+        expect(providerWarning.mock.calls[0][0]).not.toContain('254712345678');
+        expect(initiateStkPush).toHaveBeenCalledTimes(4);
+      } finally {
+        providerWarning.mockRestore();
+        rejectProvider = false;
+      }
+
       firstPayment.status = 'FAILED';
       firstPayment.failureCode = 'MPESA_RESULT_1032';
       const retryResponse = await paymentService.initiateLoanProcessingFee(
@@ -563,9 +658,9 @@ describe('M-Pesa payment callback reconciliation', () => {
         'loan-fee-idempotency-0004',
       );
       expect(retryResponse).toMatchObject({ status: 'PENDING', amountKes: 50 });
-      expect(createdPaymentCount).toBe(3);
+      expect(createdPaymentCount).toBe(5);
       expect([...createdPayments.values()].filter((payment) => payment.loanApplicationId === 'application-id')).toHaveLength(2);
-      expect(initiateStkPush).toHaveBeenCalledTimes(3);
+      expect(initiateStkPush).toHaveBeenCalledTimes(5);
 
       const replayedFirstResponse = await paymentService.initiateLoanProcessingFee(
         'user-id',
@@ -576,8 +671,8 @@ describe('M-Pesa payment callback reconciliation', () => {
         reference: firstResponse.reference,
         status: 'FAILED',
       });
-      expect(createdPaymentCount).toBe(3);
-      expect(initiateStkPush).toHaveBeenCalledTimes(3);
+      expect(createdPaymentCount).toBe(5);
+      expect(initiateStkPush).toHaveBeenCalledTimes(5);
     });
 
     it('persists the uncertain STK request phase without retrying when initiation times out', async () => {

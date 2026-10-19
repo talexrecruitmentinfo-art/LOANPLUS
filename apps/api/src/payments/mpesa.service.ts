@@ -6,8 +6,23 @@ interface StkInitiationResult {
 }
 
 export class StkPushInitiationError extends ServiceUnavailableException {
-  constructor(readonly phase: 'OAUTH' | 'STK_REQUEST' | 'STK_RESPONSE') {
+  constructor(
+    readonly phase: 'OAUTH' | 'STK_REQUEST' | 'STK_RESPONSE' | 'STK_REJECTED',
+    readonly providerResponseCode?: string,
+  ) {
     super('M-Pesa payment initiation is unavailable.');
+  }
+}
+
+export type StkPushPreflightReason =
+  | 'INVALID_AMOUNT'
+  | 'INVALID_PHONE'
+  | 'INVALID_ACCOUNT_REFERENCE'
+  | 'INVALID_DESCRIPTION';
+
+export class StkPushPreflightError extends ServiceUnavailableException {
+  constructor(readonly reasonCode: StkPushPreflightReason) {
+    super('M-Pesa request failed local preflight validation.');
   }
 }
 
@@ -52,14 +67,17 @@ export class MpesaService {
     this.requiredSetting('MPESA_CONSUMER_KEY');
     this.requiredSetting('MPESA_CONSUMER_SECRET');
     this.assertLivePaymentsEnabled();
-    if (
-      !Number.isSafeInteger(input.amountKes) ||
-      input.amountKes <= 0 ||
-      !/^254[17]\d{8}$/.test(input.phoneNumber) ||
-      !/^[A-Za-z0-9]{1,12}$/.test(input.accountReference) ||
-      !/^[A-Za-z0-9 ]{1,13}$/.test(input.description)
-    ) {
-      throw new ServiceUnavailableException('M-Pesa payment initiation is unavailable.');
+    if (!Number.isSafeInteger(input.amountKes) || input.amountKes <= 0) {
+      throw new StkPushPreflightError('INVALID_AMOUNT');
+    }
+    if (!/^254[17]\d{8}$/.test(input.phoneNumber)) {
+      throw new StkPushPreflightError('INVALID_PHONE');
+    }
+    if (!/^[A-Za-z0-9]{1,12}$/.test(input.accountReference)) {
+      throw new StkPushPreflightError('INVALID_ACCOUNT_REFERENCE');
+    }
+    if (!/^[A-Za-z0-9 ]{1,13}$/.test(input.description)) {
+      throw new StkPushPreflightError('INVALID_DESCRIPTION');
     }
     let accessToken: string;
     try {
@@ -91,6 +109,9 @@ export class MpesaService {
       });
     } catch {
       throw new StkPushInitiationError('STK_REQUEST');
+    }
+    if (typeof response.ResponseCode === 'string' && /^\d{1,12}$/.test(response.ResponseCode) && response.ResponseCode !== '0') {
+      throw new StkPushInitiationError('STK_REJECTED', response.ResponseCode);
     }
     if (
       response.ResponseCode !== '0' ||
