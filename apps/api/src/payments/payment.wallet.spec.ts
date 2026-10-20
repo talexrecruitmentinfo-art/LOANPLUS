@@ -1,5 +1,5 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { PaymentType } from '@prisma/client';
+import { BadRequestException, ForbiddenException, Logger } from '@nestjs/common';
+import { PaymentStatus, PaymentType } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { LedgerService } from '../ledger/ledger.service';
@@ -122,7 +122,7 @@ describe('M-Pesa wallet deposit initiation', () => {
       amountKes: 500,
       phoneNumber: '254712345678',
       accountReference: (payment?.internalReference as string).slice(-12),
-      description: 'Wallet deposit',
+      description: 'Wallet topup',
       callbackUrl: expect.stringMatching(/^https:\/\/api\.example\.test\/api\/v1\/payments\/mpesa\/callback\//),
     }), expect.any(Function));
     expect(activationRequestUpdate).toHaveBeenCalledWith(expect.objectContaining({
@@ -247,5 +247,160 @@ describe('M-Pesa wallet deposit initiation', () => {
     const retry = await service.initiateWalletDeposit('customer-id', depositRequest(), 'wallet-deposit-key-004');
     expect(retry).toMatchObject({ status: 'PENDING' });
     expect(stkRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks an explicit Safaricom STK rejection failed and retains only safe provider diagnostics', async () => {
+    const logger = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    stkRequest.mockRejectedValueOnce(new StkPushInitiationError(
+      'STK_REJECTED',
+      '1',
+      200,
+      'Invalid phone 254712345678.',
+    ));
+
+    try {
+      const result = await service.initiateWalletDeposit(
+        'customer-id',
+        depositRequest(),
+        'wallet-deposit-provider-rejection',
+      );
+
+      expect(result).toMatchObject({
+        status: 'FAILED',
+        message: 'The M-Pesa request was rejected before a payment could be confirmed. Review the payment details before retrying.',
+      });
+      expect(payment).toMatchObject({
+        status: 'FAILED',
+        failureCode: 'MPESA_STK_REJECTED',
+        initiationPhase: 'STK_REJECTED',
+      });
+      const diagnostic = logger.mock.calls
+        .map(([message]) => JSON.parse(String(message)) as Record<string, unknown>)
+        .find((entry) => entry.event === 'wallet_deposit_initiation_failed');
+      expect(diagnostic).toMatchObject({
+        paymentReference: payment?.internalReference,
+        failureStage: 'STK_REJECTED',
+        providerHttpStatus: 200,
+        providerResponseCode: '1',
+        providerDescription: 'Invalid phone [REDACTED].',
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain('254712345678');
+    } finally {
+      logger.mockRestore();
+    }
+  });
+
+  it('fails authentication errors before STK without leaving a false pending deposit', async () => {
+    stkRequest.mockRejectedValueOnce(new StkPushInitiationError(
+      'OAUTH',
+      'unauthorized',
+      401,
+      'Invalid credentials.',
+      'HTTP',
+    ));
+
+    const result = await service.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(),
+      'wallet-deposit-oauth-failure',
+    );
+
+    expect(result).toMatchObject({ status: 'FAILED' });
+    expect(payment).toMatchObject({
+      status: 'FAILED',
+      failureCode: 'MPESA_OAUTH_FAILED',
+      initiationPhase: 'OAUTH',
+    });
+  });
+
+  it('keeps STK HTTP errors and malformed responses pending because acceptance is ambiguous', async () => {
+    stkRequest.mockRejectedValueOnce(new StkPushInitiationError(
+      'STK_REQUEST',
+      'temporarily_unavailable',
+      503,
+      'Service unavailable.',
+      'HTTP',
+    ));
+    const result = await service.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(),
+      'wallet-deposit-http-uncertain',
+    );
+    expect(result).toMatchObject({ status: 'PENDING' });
+    expect(payment).toMatchObject({
+      status: 'PENDING',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      initiationPhase: 'STK_REQUEST_OUTCOME_UNCERTAIN',
+    });
+
+    payment = null;
+    stkRequest.mockRejectedValueOnce(new StkPushInitiationError('STK_RESPONSE', undefined, 200));
+    const malformed = await service.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(),
+      'wallet-deposit-malformed-response',
+    );
+    expect(malformed).toMatchObject({ status: 'PENDING' });
+    expect(payment).toMatchObject({
+      status: 'PENDING',
+      failureCode: 'INITIATION_OUTCOME_UNCERTAIN',
+      initiationPhase: 'STK_RESPONSE_UNCERTAIN',
+    });
+  });
+
+  it('shows customers the failure stage without exposing internal failure codes', async () => {
+    const findMany = jest.fn(async () => [
+      {
+        internalReference: 'LPD_LOCAL',
+        type: PaymentType.WALLET_DEPOSIT,
+        amountKes: 500,
+        currency: 'KES',
+        status: PaymentStatus.FAILED,
+        failureCode: 'MPESA_PREFLIGHT_INVALID_DESCRIPTION',
+        initiationPhase: 'LOCAL_PREFLIGHT',
+        providerReference: null,
+        receiptReference: null,
+        confirmedAt: null,
+        createdAt: new Date(),
+      },
+      {
+        internalReference: 'LPD_OAUTH',
+        type: PaymentType.WALLET_DEPOSIT,
+        amountKes: 500,
+        currency: 'KES',
+        status: PaymentStatus.FAILED,
+        failureCode: 'MPESA_OAUTH_FAILED',
+        initiationPhase: 'OAUTH',
+        providerReference: null,
+        receiptReference: null,
+        confirmedAt: null,
+        createdAt: new Date(),
+      },
+      {
+        internalReference: 'LPD_REJECTED',
+        type: PaymentType.WALLET_DEPOSIT,
+        amountKes: 500,
+        currency: 'KES',
+        status: PaymentStatus.FAILED,
+        failureCode: 'MPESA_STK_REJECTED',
+        initiationPhase: 'STK_REJECTED',
+        providerReference: null,
+        receiptReference: null,
+        confirmedAt: null,
+        createdAt: new Date(),
+      },
+    ]);
+    const listingService = new PaymentService({
+      paymentTransaction: { findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    const payments = await listingService.listCustomerPayments('customer-id');
+
+    expect(payments.map((item) => item.providerResult.message)).toEqual([
+      'Payment details failed local validation. No request was sent to Safaricom; review the amount and phone number before retrying.',
+      'The request could not be sent to Safaricom, so no payment prompt was issued. Try again later or contact support.',
+      'Safaricom rejected the STK request before a payment could be confirmed. Review the payment details or contact support.',
+    ]);
+    expect(payments.every((item) => !('failureCode' in item))).toBe(true);
   });
 });

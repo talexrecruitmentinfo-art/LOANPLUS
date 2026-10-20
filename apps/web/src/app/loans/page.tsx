@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ApiRequestError, apiRequest } from '@/lib/api';
 import { formatMoney } from '@/lib/currency';
+import { normalizeKenyanPhone } from '@/lib/kenyan-phone.mjs';
 import {
   loadLoanApplicationStatus,
   PAYMENT_STATUS_POLL_DELAYS_MS,
@@ -159,7 +160,7 @@ function hasOutstandingLoan(applications: LoanApplication[]): boolean {
 
 function matchesApplicationForm(application: LoanApplication, form: ApplicationForm): boolean {
   const normalizeText = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
-  const normalizePhone = (value: string) => value.replace(/\D/g, '').slice(-9);
+  const normalizePhone = (value: string) => normalizeKenyanPhone(value) ?? value.replace(/\D/g, '').slice(-9);
   const data = application.applicationData;
   const storedText = (key: string) => typeof data[key] === 'string' ? data[key] as string : '';
   return application.productId === form.productId &&
@@ -173,7 +174,7 @@ function matchesApplicationForm(application: LoanApplication, form: ApplicationF
 function fieldError(name: string, value: string, product?: Product): string {
   if (!value.trim()) return 'This field is required.';
   if (name.endsWith('Name') && value.trim().replace(/\s+/g, ' ').length < 2) return 'Enter the full name.';
-  if ((name.endsWith('Phone') || name === 'mpesaPhoneNumber') && !/^(?:\+?254|0)?[17]\d{8}$/.test(value.replace(/[\s()-]/g, ''))) {
+  if ((name.endsWith('Phone') || name === 'mpesaPhoneNumber') && !normalizeKenyanPhone(value)) {
     return 'Enter a valid Kenyan mobile number.';
   }
   if (name === 'requestedPrincipalKes') {
@@ -363,8 +364,9 @@ export default function LoanProductsPage() {
 
   async function payProcessingFee() {
     if (paymentActionInFlight.current) return;
+    const normalizedMpesaPhoneNumber = normalizeKenyanPhone(mpesaPhoneNumber);
     const phoneError = fieldError('mpesaPhoneNumber', mpesaPhoneNumber);
-    if (phoneError || !mpesaPhoneConfirmed) {
+    if (!normalizedMpesaPhoneNumber || phoneError || !mpesaPhoneConfirmed) {
       setError(phoneError || 'Confirm the M-Pesa number that should receive the payment prompt.');
       return;
     }
@@ -423,7 +425,7 @@ export default function LoanProductsPage() {
       const payment = await apiRequest<{ reference: string; status: string; message: string }>('/payments/loan-processing-fee', {
         method: 'POST',
         headers: { 'Idempotency-Key': feeKey.current },
-        body: JSON.stringify({ applicationId, reviewConfirmed: true, mpesaPhoneNumber }),
+        body: JSON.stringify({ applicationId, reviewConfirmed: true, mpesaPhoneNumber: normalizedMpesaPhoneNumber }),
       });
       setNotice(payment.message);
       creationKey.current = null;
@@ -554,7 +556,7 @@ export default function LoanProductsPage() {
               </dl>
               <p><b>Fee required:</b> A {feeQuoteAmount} loan processing fee is required before this application can be submitted. It covers processing this loan application and is paid separately from your loan repayment. Payment does not guarantee loan approval or disbursement. Your M-Pesa PIN is entered only in Safaricom’s prompt.</p>
               <label>M-Pesa phone number for the prompt
-                <input type="tel" inputMode="tel" autoComplete="tel" placeholder="07XX XXX XXX" value={mpesaPhoneNumber} onChange={(event) => {
+                <input type="tel" inputMode="tel" autoComplete="tel" placeholder="07XX XXX XXX" value={mpesaPhoneNumber} maxLength={16} pattern="\+?[\d\x20\x28\x29\x2D]{9,16}" onChange={(event) => {
                   setMpesaPhoneNumber(event.target.value);
                   setMpesaPhoneConfirmed(false);
                 }} aria-invalid={Boolean(mpesaPhoneNumber && fieldError('mpesaPhoneNumber', mpesaPhoneNumber))} required />

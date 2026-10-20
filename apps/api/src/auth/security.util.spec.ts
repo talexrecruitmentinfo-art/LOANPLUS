@@ -22,6 +22,7 @@ describe('authentication security utilities', () => {
     expect(normalizeKenyaPhone('0712-345-678')).toBe('+254712345678');
     expect(normalizeKenyaPhone('(0712) 345 678')).toBe('+254712345678');
     expect(normalizeKenyaPhone('+254712345678')).toBe('+254712345678');
+    expect(normalizeKenyaPhone('254 712 345 678')).toBe('+254712345678');
     expect(normalizeKenyaPhone('+254112345678')).toBe('+254112345678');
     expect(normalizeKenyaPhone('0112345678')).toBe('+254112345678');
     expect(() => normalizeKenyaPhone('+712345678')).toThrow(BadRequestException);

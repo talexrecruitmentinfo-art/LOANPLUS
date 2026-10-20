@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
+import { HttpException, Injectable, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
 
 interface StkInitiationResult {
   checkoutRequestId: string;
@@ -6,12 +6,41 @@ interface StkInitiationResult {
 }
 
 export class StkPushInitiationError extends ServiceUnavailableException {
+  readonly providerDescription?: string;
+
   constructor(
-    readonly phase: 'OAUTH' | 'STK_REQUEST' | 'STK_RESPONSE' | 'STK_REJECTED',
+    readonly phase: 'CONFIGURATION' | 'OAUTH' | 'STK_REQUEST' | 'STK_RESPONSE' | 'STK_REJECTED',
     readonly providerResponseCode?: string,
+    readonly providerHttpStatus?: number,
+    providerDescription?: string,
+    readonly providerFailureStage?: 'HTTP' | 'TRANSPORT' | 'INVALID_RESPONSE',
   ) {
     super('M-Pesa payment initiation is unavailable.');
+    this.providerDescription = providerDescription ? sanitizeProviderDescription(providerDescription) : undefined;
   }
+}
+
+class DarajaRequestError extends ServiceUnavailableException {
+  constructor(
+    readonly failureStage: 'HTTP' | 'TRANSPORT' | 'INVALID_RESPONSE',
+    readonly providerHttpStatus: number | undefined,
+    readonly providerResponseCode: string | undefined,
+    readonly providerDescription: string | undefined,
+  ) {
+    super('M-Pesa is temporarily unavailable.');
+  }
+}
+
+function sanitizeProviderDescription(candidate: string): string | undefined {
+  const safe = candidate
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\b(access[\s_-]*token|consumer[\s_-]*secret|passkey|password|session[\s_-]*cookie)\b\s*[:=]\s*\S+/gi, '$1=[REDACTED]')
+    .replace(/\+?\d[\d ()-]{7,}\d/g, '[REDACTED]')
+    .replace(/\b\d{7,}\b/g, '[REDACTED]')
+    .replace(/[^\p{L}\p{N} .,;:!?='"()\[\]_-]/gu, ' ')
+    .trim()
+    .slice(0, 200);
+  return safe || undefined;
 }
 
 export type StkPushPreflightReason =
@@ -63,10 +92,17 @@ export class MpesaService {
     description: string;
     callbackUrl: string;
   }, beforeStkRequest?: () => Promise<void>): Promise<StkInitiationResult> {
-    const { apiBase, shortCode, partyB, passkey, transactionType } = this.getConfiguration();
-    this.requiredSetting('MPESA_CONSUMER_KEY');
-    this.requiredSetting('MPESA_CONSUMER_SECRET');
-    this.assertLivePaymentsEnabled();
+    let configuration: ReturnType<MpesaService['getConfiguration']>;
+    try {
+      configuration = this.getConfiguration();
+      this.requiredSetting('MPESA_CONSUMER_KEY');
+      this.requiredSetting('MPESA_CONSUMER_SECRET');
+      this.assertLivePaymentsEnabled();
+    } catch (error) {
+      if (error instanceof HttpException) throw new StkPushInitiationError('CONFIGURATION');
+      throw error;
+    }
+    const { apiBase, shortCode, partyB, passkey, transactionType } = configuration;
     if (!Number.isSafeInteger(input.amountKes) || input.amountKes <= 0) {
       throw new StkPushPreflightError('INVALID_AMOUNT');
     }
@@ -82,15 +118,16 @@ export class MpesaService {
     let accessToken: string;
     try {
       accessToken = await this.getAccessToken(apiBase);
-    } catch {
-      throw new StkPushInitiationError('OAUTH');
+    } catch (error) {
+      throw this.toInitiationError('OAUTH', error);
     }
     const timestamp = this.formatTimestamp(new Date());
     const password = Buffer.from(`${shortCode}${passkey}${timestamp}`).toString('base64');
     await beforeStkRequest?.();
     let response: Record<string, unknown>;
+    let providerHttpStatus: number;
     try {
-      response = await this.requestJson(`${apiBase}/mpesa/stkpush/v1/processrequest`, {
+      const result = await this.requestJson(`${apiBase}/mpesa/stkpush/v1/processrequest`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -107,14 +144,18 @@ export class MpesaService {
           TransactionDesc: input.description,
         }),
       });
-    } catch {
-      throw new StkPushInitiationError('STK_REQUEST');
+      response = result.payload;
+      providerHttpStatus = result.httpStatus;
+    } catch (error) {
+      throw this.toInitiationError('STK_REQUEST', error);
     }
-    if (typeof response.ResponseCode === 'string' && /^\d{1,12}$/.test(response.ResponseCode) && response.ResponseCode !== '0') {
-      throw new StkPushInitiationError('STK_REJECTED', response.ResponseCode);
+    const responseCode = this.getProviderResponseCode(response.ResponseCode);
+    const responseDescription = this.getProviderDescription(response);
+    if (responseCode !== undefined && /^\d{1,12}$/.test(responseCode) && responseCode !== '0') {
+      throw new StkPushInitiationError('STK_REJECTED', responseCode, providerHttpStatus, responseDescription);
     }
     if (
-      response.ResponseCode !== '0' ||
+      responseCode !== '0' ||
       typeof response.CheckoutRequestID !== 'string' ||
       response.CheckoutRequestID.length === 0 ||
       response.CheckoutRequestID.length > 100 ||
@@ -122,7 +163,7 @@ export class MpesaService {
       response.MerchantRequestID.length === 0 ||
       response.MerchantRequestID.length > 100
     ) {
-      throw new StkPushInitiationError('STK_RESPONSE');
+      throw new StkPushInitiationError('STK_RESPONSE', responseCode, providerHttpStatus, responseDescription);
     }
     return {
       checkoutRequestId: response.CheckoutRequestID,
@@ -137,7 +178,7 @@ export class MpesaService {
     const accessToken = await this.getAccessToken(apiBase);
     const timestamp = this.formatTimestamp(new Date());
     const password = Buffer.from(`${shortCode}${passkey}${timestamp}`).toString('base64');
-    const response = await this.requestJson(`${apiBase}/mpesa/stkpushquery/v1/query`, {
+    const { payload: response } = await this.requestJson(`${apiBase}/mpesa/stkpushquery/v1/query`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -174,12 +215,17 @@ export class MpesaService {
     const consumerKey = this.requiredSetting('MPESA_CONSUMER_KEY');
     const consumerSecret = this.requiredSetting('MPESA_CONSUMER_SECRET');
     const authorization = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-    const response = await this.requestJson(`${apiBase}/oauth/v1/generate?grant_type=client_credentials`, {
+    const { payload: response, httpStatus } = await this.requestJson(`${apiBase}/oauth/v1/generate?grant_type=client_credentials`, {
       method: 'GET',
       headers: { Authorization: `Basic ${authorization}` },
     });
     if (typeof response.access_token !== 'string' || response.access_token.length < 16) {
-      throw new ServiceUnavailableException('M-Pesa authentication is unavailable.');
+      throw new DarajaRequestError(
+        'INVALID_RESPONSE',
+        httpStatus,
+        this.getProviderResponseCode(response.ResponseCode ?? response.errorCode),
+        this.getProviderDescription(response),
+      );
     }
     return response.access_token;
   }
@@ -247,19 +293,73 @@ export class MpesaService {
     return value;
   }
 
-  private async requestJson(url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  private async requestJson(
+    url: string,
+    init: RequestInit,
+  ): Promise<{ payload: Record<string, unknown>; httpStatus: number }> {
     let response: Response;
     try {
       response = await fetch(url, { ...init, signal: AbortSignal.timeout(12_000) });
     } catch {
-      throw new ServiceUnavailableException('M-Pesa is temporarily unavailable.');
+      throw new DarajaRequestError('TRANSPORT', undefined, undefined, undefined);
     }
-    if (!response.ok) throw new ServiceUnavailableException('M-Pesa is temporarily unavailable.');
     const payload: unknown = await response.json().catch(() => null);
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      throw new ServiceUnavailableException('M-Pesa returned an invalid response.');
+    const providerPayload = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : null;
+    if (!response.ok) {
+      throw new DarajaRequestError(
+        'HTTP',
+        response.status,
+        providerPayload
+          ? this.getProviderResponseCode(providerPayload.ResponseCode ?? providerPayload.errorCode ?? providerPayload.error)
+          : undefined,
+        providerPayload ? this.getProviderDescription(providerPayload) : undefined,
+      );
     }
-    return payload as Record<string, unknown>;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new DarajaRequestError('INVALID_RESPONSE', response.status, undefined, undefined);
+    }
+    return { payload: payload as Record<string, unknown>, httpStatus: response.status };
+  }
+
+  private toInitiationError(
+    phase: 'OAUTH' | 'STK_REQUEST',
+    error: unknown,
+  ): StkPushInitiationError {
+    if (error instanceof DarajaRequestError) {
+      return new StkPushInitiationError(
+        phase,
+        error.providerResponseCode,
+        error.providerHttpStatus,
+        error.providerDescription,
+        error.failureStage,
+      );
+    }
+    return new StkPushInitiationError(phase);
+  }
+
+  private getProviderResponseCode(value: unknown): string | undefined {
+    const candidate = typeof value === 'string'
+      ? value
+      : typeof value === 'number' && Number.isSafeInteger(value)
+        ? String(value)
+        : undefined;
+    if (!candidate) return undefined;
+    return /^\d{1,6}$/.test(candidate) || /^[A-Za-z][A-Za-z0-9_.-]{0,39}$/.test(candidate)
+      ? candidate
+      : undefined;
+  }
+
+  private getProviderDescription(payload: Record<string, unknown>): string | undefined {
+    const candidate = [
+      payload.ResponseDescription,
+      payload.errorMessage,
+      payload.error_description,
+      payload.message,
+    ].find((value): value is string => typeof value === 'string');
+    if (!candidate) return undefined;
+    return sanitizeProviderDescription(candidate);
   }
 
   private formatTimestamp(date: Date): string {

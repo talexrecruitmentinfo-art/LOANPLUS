@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
 import { formatMoney, PLATFORM_CURRENCY } from '@/lib/currency';
+import { normalizeKenyanPhone } from '@/lib/kenyan-phone.mjs';
 
 interface Wallet {
   balanceKes: number;
@@ -228,6 +229,11 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
     event.preventDefault();
     const amountKes = Number(depositAmount);
     if (!Number.isSafeInteger(amountKes) || amountKes <= 0 || !depositQuote?.depositAvailable) return;
+    const normalizedPhoneNumber = normalizeKenyanPhone(mpesaPhoneNumber);
+    if (!normalizedPhoneNumber) {
+      setWalletActionError('Enter a valid Kenyan M-Pesa phone number.');
+      return;
+    }
     if (amountKes < (depositQuote.minimumAmountKes ?? Number.POSITIVE_INFINITY) ||
       amountKes > (depositQuote.maximumAmountKes ?? 0)) {
       setWalletActionError('Enter an amount within the approved wallet deposit limits.');
@@ -245,7 +251,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
       const result = await apiRequest<{ reference: string; status: string; message: string }>('/payments/wallet-deposits', {
         method: 'POST',
         headers: { 'Idempotency-Key': crypto.randomUUID() },
-        body: JSON.stringify({ amountKes, mpesaPhoneNumber }),
+        body: JSON.stringify({ amountKes, mpesaPhoneNumber: normalizedPhoneNumber }),
       });
       depositReferenceRef.current = result.reference;
       setDepositReference(result.reference);
@@ -354,7 +360,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
               <input type="number" min={depositQuote?.minimumAmountKes ?? undefined} max={depositQuote?.maximumAmountKes ?? undefined} step="1" value={depositAmount} onChange={(event) => setDepositAmount(event.target.value)} required />
             </label>
             <label>M-Pesa phone number
-              <input type="tel" inputMode="tel" autoComplete="tel" value={mpesaPhoneNumber} onChange={(event) => setMpesaPhoneNumber(event.target.value)} placeholder="+2547…" pattern="\+?[\d ()-]{9,16}" title="Enter a valid Kenyan M-Pesa phone number" required />
+              <input type="tel" inputMode="tel" autoComplete="tel" value={mpesaPhoneNumber} onChange={(event) => setMpesaPhoneNumber(event.target.value)} placeholder="+2547…" maxLength={16} pattern="\+?[\d\x20\x28\x29\x2D]{9,16}" title="Enter a valid Kenyan M-Pesa phone number" required />
             </label>
             <div className="wallet-deposit-actions">
               <button className="button" type="submit" disabled={walletActionBusy || loading || !walletStatusVerified || unresolvedDeposit || !depositQuote?.depositAvailable}>

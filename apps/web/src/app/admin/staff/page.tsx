@@ -201,7 +201,7 @@ export default function StaffAccountsPage() {
           <h3>Create Staff Account</h3>
           <label>Full name<input name="fullName" minLength={2} maxLength={160} required /></label>
           <label>Unique work email<input name="email" type="email" maxLength={254} autoComplete="off" required /></label>
-          <label>Phone number (optional)<input name="phone" type="tel" pattern="\+?[\d ()-]{9,18}" /></label>
+          <label>Phone number (optional)<input name="phone" type="tel" pattern="\+?[\d\x20\x28\x29\x2D]{9,18}" /></label>
           <label>Staff role<select name="role" defaultValue="" required>
             <option value="" disabled>Choose a least-privilege role</option>
             {roles.map((role) => <option value={role.role} key={role.role}>{role.label}</option>)}
@@ -277,7 +277,7 @@ export default function StaffAccountsPage() {
                 </div>
                 {editingId === member.id && <form className="product-config-form" onSubmit={(event) => void saveDetails(event, member)}>
                   <label>Full name<input value={editName} onChange={(event) => setEditName(event.target.value)} minLength={2} maxLength={160} required /></label>
-                  <label>Phone number<input type="tel" value={editPhone} onChange={(event) => setEditPhone(event.target.value)} pattern="\+?[\d ()-]{9,18}" /></label>
+                  <label>Phone number<input type="tel" value={editPhone} onChange={(event) => setEditPhone(event.target.value)} pattern="\+?[\d\x20\x28\x29\x2D]{9,18}" /></label>
                   <label>Reason<textarea name="reason" minLength={10} maxLength={500} rows={2} required /></label>
                   <button className="button" disabled={busy}>Save details</button>
                   <button className="quiet-button" type="button" onClick={() => setEditingId('')}>Cancel</button>

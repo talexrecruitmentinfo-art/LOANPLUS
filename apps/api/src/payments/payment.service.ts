@@ -353,7 +353,7 @@ export class PaymentService {
         amountKes: dto.amountKes,
         phoneNumber: phoneNumber.slice(1),
         accountReference: payment.internalReference.slice(-12),
-        description: 'Wallet deposit',
+        description: 'Wallet topup',
         callbackUrl,
       }, async () => {
         initiationStep = 'PERSIST_STK_REQUESTED';
@@ -364,36 +364,74 @@ export class PaymentService {
         initiationStep = 'STK_REQUEST';
       });
     } catch (error) {
-      if (error instanceof StkPushPreflightError || (error instanceof StkPushInitiationError && error.phase === 'STK_REJECTED')) {
-        const isRejected = error instanceof StkPushInitiationError;
+      const isPreflightFailure = error instanceof StkPushPreflightError;
+      const initiationError = error instanceof StkPushInitiationError ? error : null;
+      const isDefinitiveFailure = isPreflightFailure ||
+        initiationError?.phase === 'CONFIGURATION' ||
+        initiationError?.phase === 'OAUTH' ||
+        initiationError?.phase === 'STK_REJECTED';
+      if (isDefinitiveFailure) {
+        const failureCode = isPreflightFailure
+          ? `MPESA_PREFLIGHT_${error.reasonCode}`
+          : initiationError?.phase === 'STK_REJECTED'
+            ? 'MPESA_STK_REJECTED'
+            : initiationError?.phase === 'OAUTH'
+              ? 'MPESA_OAUTH_FAILED'
+              : 'MPESA_CONFIGURATION_FAILED';
+        const failureStage = isPreflightFailure ? 'LOCAL_PREFLIGHT' : initiationError!.phase;
         await this.prisma.paymentTransaction.updateMany({
           where: { id: payment.id, status: PaymentStatus.PENDING },
           data: {
             status: PaymentStatus.FAILED,
-            failureCode: isRejected ? 'MPESA_STK_REJECTED' : `MPESA_PREFLIGHT_${error.reasonCode}`,
-            initiationPhase: isRejected ? 'STK_REJECTED' : 'PREFLIGHT_FAILED',
+            failureCode,
+            initiationPhase: failureStage,
           },
         });
+        logger.warn(JSON.stringify({
+          event: 'wallet_deposit_initiation_failed',
+          paymentReference: payment.internalReference,
+          failureStage,
+          initiationStep,
+          outcome: 'DEFINITE_FAILURE_BEFORE_PAYMENT_CONFIRMATION',
+          providerHttpStatus: initiationError?.providerHttpStatus ?? null,
+          providerResponseCode: initiationError?.providerResponseCode ?? null,
+          providerDescription: initiationError?.providerDescription ?? null,
+          providerFailureStage: initiationError?.providerFailureStage ?? null,
+          localReasonCode: isPreflightFailure ? error.reasonCode : null,
+        }));
         return {
           reference: payment.internalReference,
           status: PaymentStatus.FAILED,
           amountKes: dto.amountKes,
           currency: 'KES',
-          message: 'The M-Pesa request was rejected before a payment could be confirmed. Review the amount and phone number before retrying.',
+          message: isPreflightFailure
+            ? 'The payment details could not be validated locally. Review the amount and phone number before retrying.'
+            : initiationError?.phase === 'STK_REJECTED'
+              ? 'The M-Pesa request was rejected before a payment could be confirmed. Review the payment details before retrying.'
+              : 'M-Pesa could not authenticate the request, so no payment prompt was sent. Try again later or contact support.',
         };
       }
-      const initiationPhase = error instanceof StkPushInitiationError
-        ? error.phase === 'OAUTH'
-          ? 'OAUTH_FAILED_BEFORE_STK'
-          : error.phase === 'STK_REQUEST'
-            ? 'STK_REQUEST_OUTCOME_UNCERTAIN'
-            : 'STK_RESPONSE_UNCERTAIN'
+      const initiationPhase = initiationError
+        ? initiationError.phase === 'STK_REQUEST'
+          ? 'STK_REQUEST_OUTCOME_UNCERTAIN'
+          : 'STK_RESPONSE_UNCERTAIN'
         : 'INITIATION_OUTCOME_UNCERTAIN';
       await this.prisma.paymentTransaction.updateMany({
         where: { id: payment.id, status: PaymentStatus.PENDING },
         data: { failureCode: 'INITIATION_OUTCOME_UNCERTAIN', initiationPhase },
       });
-      logger.warn(`Wallet STK initiation remains unresolved for payment ${payment.internalReference} (phase=${initiationPhase}; step=${initiationStep}; errorType=${error instanceof Error ? error.constructor.name : 'Unknown'}).`);
+      logger.warn(JSON.stringify({
+        event: 'wallet_deposit_initiation_unresolved',
+        paymentReference: payment.internalReference,
+        failureStage: initiationError?.phase ?? initiationStep,
+        initiationPhase,
+        initiationStep,
+        providerHttpStatus: initiationError?.providerHttpStatus ?? null,
+        providerResponseCode: initiationError?.providerResponseCode ?? null,
+        providerDescription: initiationError?.providerDescription ?? null,
+        providerFailureStage: initiationError?.providerFailureStage ?? null,
+        errorType: error instanceof Error ? error.constructor.name : 'Unknown',
+      }));
       return {
         reference: payment.internalReference,
         status: PaymentStatus.PENDING,
@@ -878,7 +916,7 @@ export class PaymentService {
           payment.type === PaymentType.WALLET_DEPOSIT) && status === PaymentStatus.PENDING,
         providerResult: {
           code: resultCode,
-          message: this.getCustomerPaymentMessage(status, resultCode),
+          message: this.getCustomerPaymentMessage(status, resultCode, failureCode),
         },
       };
     });
@@ -1955,7 +1993,11 @@ export class PaymentService {
         providerResult: {
           code: providerResultCode,
           receiptReference: latestTransaction.receiptReference,
-          message: this.getCustomerPaymentMessage(effectiveStatus, providerResultCode),
+          message: this.getCustomerPaymentMessage(
+            effectiveStatus,
+            providerResultCode,
+            latestTransaction.failureCode,
+          ),
         },
         accountActivated:
           effectiveStatus === PaymentStatus.CONFIRMED &&
@@ -1970,7 +2012,11 @@ export class PaymentService {
     return match ? Number(match[1]) : null;
   }
 
-  private getCustomerPaymentMessage(status: PaymentStatus, resultCode: number | null): string {
+  private getCustomerPaymentMessage(
+    status: PaymentStatus,
+    resultCode: number | null,
+    failureCode: string | null = null,
+  ): string {
     if (status === PaymentStatus.CONFIRMED) return 'Safaricom confirmed this payment.';
     if (status === PaymentStatus.PENDING) {
       return 'The payment outcome is still being verified with Safaricom. Do not submit another payment while this request remains unresolved.';
@@ -1979,8 +2025,17 @@ export class PaymentService {
     if (status === PaymentStatus.EXPIRED) return 'The M-Pesa payment expired without confirmation.';
     if (status === PaymentStatus.REVERSED) return 'This payment was reversed.';
     if (status === PaymentStatus.FAILED) {
+      if (failureCode?.startsWith('MPESA_PREFLIGHT_')) {
+        return 'Payment details failed local validation. No request was sent to Safaricom; review the amount and phone number before retrying.';
+      }
+      if (failureCode === 'MPESA_OAUTH_FAILED' || failureCode === 'MPESA_CONFIGURATION_FAILED') {
+        return 'The request could not be sent to Safaricom, so no payment prompt was issued. Try again later or contact support.';
+      }
+      if (failureCode === 'MPESA_STK_REJECTED') {
+        return 'Safaricom rejected the STK request before a payment could be confirmed. Review the payment details or contact support.';
+      }
       return resultCode === null
-        ? 'Safaricom reported that this payment failed.'
+        ? 'The payment could not be started or confirmed. Contact support before retrying.'
         : `Safaricom reported that this payment failed (result ${resultCode}).`;
     }
     return 'Payment confirmation has not been conclusively received. Do not submit another payment while this one is pending.';

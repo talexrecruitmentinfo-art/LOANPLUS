@@ -193,6 +193,31 @@ describe('M-Pesa Daraja HTTP integration', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('accepts the wallet deposit description after it is shortened to the Daraja limit', async () => {
+    const input = {
+      amountKes: 60,
+      phoneNumber: '254712345678',
+      accountReference: 'LPATEST12345',
+      callbackUrl: 'https://api.example.invalid/callback/token',
+    };
+
+    await expect(mpesa.initiateStkPush({ ...input, description: 'Wallet deposit' }))
+      .rejects.toMatchObject({ reasonCode: 'INVALID_DESCRIPTION' });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock
+      .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
+      .mockResolvedValueOnce(mockJson({
+        ResponseCode: '0',
+        CheckoutRequestID: 'ws_CO_wallet',
+        MerchantRequestID: 'mr_wallet',
+      }));
+    await expect(mpesa.initiateStkPush({ ...input, description: 'Wallet topup' }))
+      .resolves.toEqual({ checkoutRequestId: 'ws_CO_wallet', merchantRequestId: 'mr_wallet' });
+    const stkInit = fetchMock.mock.calls[1][1] as RequestInit;
+    expect(JSON.parse(String(stkInit.body))).toMatchObject({ TransactionDesc: 'Wallet topup' });
+  });
+
   it('rejects missing credential configuration without making HTTP requests', async () => {
     delete process.env.MPESA_CONSUMER_SECRET;
     expect(() => mpesa.assertConfiguredForPayments()).toThrow('MPESA_CONSUMER_SECRET');
@@ -227,10 +252,15 @@ describe('M-Pesa Daraja HTTP integration', () => {
 
     fetchMock
       .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
-      .mockResolvedValueOnce(mockJson({ ResponseCode: '1', errorMessage: 'private provider detail' }));
+      .mockResolvedValueOnce(mockJson({
+        ResponseCode: '1',
+        errorMessage: 'Invalid phone 254712345678; access_token=secret-value',
+      }));
     await expect(mpesa.initiateStkPush(input)).rejects.toMatchObject({
       phase: 'STK_REJECTED',
       providerResponseCode: '1',
+      providerHttpStatus: 200,
+      providerDescription: 'Invalid phone [REDACTED]; access_token=[REDACTED]',
       message: 'M-Pesa payment initiation is unavailable.',
     });
 
@@ -244,6 +274,55 @@ describe('M-Pesa Daraja HTTP integration', () => {
 
     fetchMock.mockRejectedValueOnce(new Error('test network timeout'));
     await expect(mpesa.queryStkStatus('ws_CO_test')).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('retains safe HTTP diagnostics for OAuth errors and keeps transport failures distinguishable', async () => {
+    fetchMock.mockResolvedValueOnce(mockJson({
+      error: 'unauthorized',
+      error_description: 'Consumer secret=secret-value is invalid.',
+    }, 401));
+    await expect(mpesa.initiateStkPush({
+      amountKes: 50,
+      phoneNumber: '254712345678',
+      accountReference: 'LPATEST12345',
+      description: 'Activation',
+      callbackUrl: 'https://api.example.invalid/callback/token',
+    })).rejects.toMatchObject({
+      phase: 'OAUTH',
+      providerHttpStatus: 401,
+      providerResponseCode: 'unauthorized',
+      providerDescription: 'Consumer secret=[REDACTED] is invalid.',
+      providerFailureStage: 'HTTP',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(mockJson({ access_token: 'test-access-token-123456' }))
+      .mockRejectedValueOnce(new Error('transport error containing private details'));
+    await expect(mpesa.initiateStkPush({
+      amountKes: 50,
+      phoneNumber: '254712345678',
+      accountReference: 'LPATEST12345',
+      description: 'Activation',
+      callbackUrl: 'https://api.example.invalid/callback/token',
+    })).rejects.toMatchObject({
+      phase: 'STK_REQUEST',
+      providerHttpStatus: undefined,
+      providerResponseCode: undefined,
+      providerDescription: undefined,
+      providerFailureStage: 'TRANSPORT',
+    });
+  });
+
+  it('classifies configuration failures before making any provider request', async () => {
+    delete process.env.MPESA_PASSKEY;
+    await expect(mpesa.initiateStkPush({
+      amountKes: 50,
+      phoneNumber: '254712345678',
+      accountReference: 'LPATEST12345',
+      description: 'Wallet deposit',
+      callbackUrl: 'https://api.example.invalid/callback/token',
+    })).rejects.toMatchObject({ phase: 'CONFIGURATION' });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('requires an explicit environment instead of silently selecting sandbox', async () => {
