@@ -2027,10 +2027,23 @@ export class PaymentService {
       }));
       if (
         !checkoutRequestMatched ||
-        !merchantRequestMatched ||
-        !resultCodeMatched
+        !merchantRequestMatched
       ) {
         throw new ServiceUnavailableException('M-Pesa callback could not be reconciled with provider status.');
+      }
+      if (!resultCodeMatched) {
+        step = 'PENDING_CALLBACK_RECORDING';
+        await this.recordUnresolvedCallback(
+          {
+            ...request,
+            checkoutRequestId: providerStatus.checkoutRequestId,
+            merchantRequestId: providerStatus.merchantRequestId,
+          },
+          providerStatus.resultCode,
+          payloadHash,
+          callback.ResultCode,
+        );
+        return { ResultCode: 0, ResultDesc: 'Accepted' };
       }
       step = 'PAYMENT_SETTLEMENT';
       await this.settleActivationPayment(
@@ -2193,7 +2206,9 @@ export class PaymentService {
       ? PaymentStatus.CONFIRMED
       : this.getTerminalProviderStatus(providerStatus.resultCode);
     if (targetStatus === null) {
-      if (payloadHash) await this.recordUnresolvedCallback(request, providerStatus.resultCode, payloadHash);
+      if (payloadHash) {
+        await this.recordUnresolvedCallback(request, providerStatus.resultCode, payloadHash, callback?.ResultCode);
+      }
       return;
     }
     const isActivationPayment = payment.type === PaymentType.ACTIVATION;
@@ -2261,11 +2276,22 @@ export class PaymentService {
           throw new ConflictException('Payment provider identifiers could not be safely associated.');
         }
         if (payloadHash) {
-          await tx.paymentCallbackEvent.create({
-            data: {
+          await tx.paymentCallbackEvent.upsert({
+            where: {
+              activationPaymentRequestId_payloadHash: {
+                activationPaymentRequestId: request.id,
+                payloadHash,
+              },
+            },
+            create: {
               activationPaymentRequestId: request.id,
               paymentTransactionId: request.paymentTransactionId,
               payloadHash,
+              providerResultCode: String(providerStatus.resultCode),
+              providerReceiptReference: receiptReference,
+            },
+            update: {
+              paymentTransactionId: request.paymentTransactionId,
               providerResultCode: String(providerStatus.resultCode),
               providerReceiptReference: receiptReference,
             },
@@ -2434,44 +2460,61 @@ export class PaymentService {
     },
     resultCode: number,
     payloadHash: string,
+    callbackResultCode?: number,
   ): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
-      const boundRequest = await tx.activationPaymentRequest.updateMany({
-        where: {
-          id: request.id,
-          paymentTransactionId: request.paymentTransactionId,
-          userId: request.userId,
-          OR: [
-            { checkoutRequestId: null, merchantRequestId: null },
-            {
-              checkoutRequestId: request.checkoutRequestId,
-              merchantRequestId: request.merchantRequestId,
-            },
-          ],
-        },
-        data: {
-          checkoutRequestId: request.checkoutRequestId,
-          merchantRequestId: request.merchantRequestId,
-        },
-      });
-      if (boundRequest.count !== 1) {
-        throw new ConflictException('Payment provider identifiers could not be safely associated.');
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const boundRequest = await tx.activationPaymentRequest.updateMany({
+          where: {
+            id: request.id,
+            paymentTransactionId: request.paymentTransactionId,
+            userId: request.userId,
+            OR: [
+              { checkoutRequestId: null, merchantRequestId: null },
+              {
+                checkoutRequestId: request.checkoutRequestId,
+                merchantRequestId: request.merchantRequestId,
+              },
+            ],
+          },
+          data: {
+            checkoutRequestId: request.checkoutRequestId,
+            merchantRequestId: request.merchantRequestId,
+          },
+        });
+        if (boundRequest.count !== 1) {
+          throw new ConflictException('Payment provider identifiers could not be safely associated.');
+        }
+        await tx.paymentCallbackEvent.createMany({
+          data: [{
+            activationPaymentRequestId: request.id,
+            paymentTransactionId: request.paymentTransactionId,
+            payloadHash,
+            providerResultCode: String(callbackResultCode ?? resultCode),
+            providerReceiptReference: null,
+          }],
+          skipDuplicates: true,
+        });
+        await tx.paymentTransaction.updateMany({
+          where: { id: request.paymentTransactionId, status: PaymentStatus.PENDING },
+          data: {
+            failureCode: resultCode === 0 && callbackResultCode !== undefined
+              ? 'CALLBACK_RESULT_MISMATCH'
+              : `MPESA_RESULT_${resultCode}`,
+          },
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2002' || error.code === 'P2034')) {
+        const persistedEvent = await this.prisma.paymentCallbackEvent.findFirst({
+          where: { activationPaymentRequestId: request.id, payloadHash },
+          select: { id: true },
+        });
+        if (persistedEvent) return;
       }
-      await tx.paymentCallbackEvent.createMany({
-        data: [{
-          activationPaymentRequestId: request.id,
-          paymentTransactionId: request.paymentTransactionId,
-          payloadHash,
-          providerResultCode: String(resultCode),
-          providerReceiptReference: null,
-        }],
-        skipDuplicates: true,
-      });
-      await tx.paymentTransaction.updateMany({
-        where: { id: request.paymentTransactionId, status: PaymentStatus.PENDING },
-        data: { failureCode: `MPESA_RESULT_${resultCode}` },
-      });
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      throw error;
+    }
   }
 
   private validateSuccessfulCallback(

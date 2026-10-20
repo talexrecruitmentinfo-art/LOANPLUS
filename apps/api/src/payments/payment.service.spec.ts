@@ -144,6 +144,14 @@ describe('M-Pesa payment callback reconciliation', () => {
           events.add(data.payloadHash);
           return {};
         }),
+        upsert: jest.fn(async ({ create, update }: {
+          create: Record<string, unknown> & { payloadHash: string };
+          update: Record<string, unknown>;
+        }) => {
+          callbackEventData = { ...(callbackEventData ?? create), ...update };
+          events.add(create.payloadHash);
+          return {};
+        }),
         createMany: jest.fn(async ({ data }: { data: Array<Record<string, unknown> & { payloadHash: string }> }) => {
           for (const entry of data) {
             callbackEventData = entry;
@@ -1762,6 +1770,94 @@ describe('M-Pesa payment callback reconciliation', () => {
     expect(userUpdate).toHaveBeenCalledTimes(1);
   });
 
+  it('records and acknowledges callback 1037 when the verified status query remains unresolved at 4999', async () => {
+    providerResultCode = 4999;
+    const result = await paymentService.handleMpesaCallback(callbackToken, {
+      Body: { stkCallback: {
+        CheckoutRequestID: checkoutRequestId,
+        MerchantRequestID: merchantRequestId,
+        ResultCode: 1037,
+        ResultDesc: 'Safaricom callback timeout result.',
+      } },
+    });
+
+    expect(result).toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+    expect(queryStkStatus).toHaveBeenCalledWith(checkoutRequestId);
+    expect(callbackEventData).toMatchObject({ providerResultCode: '1037', providerReceiptReference: null });
+    expect(paymentFailureCode).toBe('MPESA_RESULT_4999');
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
+    expect(userUpdate).not.toHaveBeenCalled();
+
+    providerResultCode = 0;
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback());
+
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(userUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles the same code-0 callback payload after its query changes from 4999 to success', async () => {
+    const callback = successfulCallback();
+    providerResultCode = 4999;
+
+    await expect(paymentService.handleMpesaCallback(callbackToken, callback))
+      .resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+    expect(paymentStatus).toBe('PENDING');
+    expect(callbackEventData).toMatchObject({ providerResultCode: '0', providerReceiptReference: null });
+    expect(postLedger).not.toHaveBeenCalled();
+
+    providerResultCode = 0;
+    await expect(paymentService.handleMpesaCallback(callbackToken, callback))
+      .resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(callbackEventData).toMatchObject({ providerResultCode: '0', providerReceiptReference: 'TESTRECEIPT1' });
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(userUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not settle a callback whose result conflicts with a queried success', async () => {
+    await expect(paymentService.handleMpesaCallback(callbackToken, {
+      Body: { stkCallback: {
+        CheckoutRequestID: checkoutRequestId,
+        MerchantRequestID: merchantRequestId,
+        ResultCode: 1037,
+        ResultDesc: 'Conflicting callback result.',
+      } },
+    })).resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+
+    expect(callbackEventData).toMatchObject({ providerResultCode: '1037', providerReceiptReference: null });
+    expect(paymentFailureCode).toBe('CALLBACK_RESULT_MISMATCH');
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
+  });
+
+  it('does not acknowledge a pending callback when durable event recording fails', async () => {
+    providerResultCode = 4999;
+    failNextTransaction = true;
+    const callback = {
+      Body: { stkCallback: {
+        CheckoutRequestID: checkoutRequestId,
+        MerchantRequestID: merchantRequestId,
+        ResultCode: 1037,
+        ResultDesc: 'Safaricom callback timeout result.',
+      } },
+    };
+
+    await expect(paymentService.handleMpesaCallback(callbackToken, callback))
+      .rejects.toThrow('test database unavailable');
+    expect(paymentStatus).toBe('PENDING');
+    expect(callbackEventData).toBeUndefined();
+    expect(postLedger).not.toHaveBeenCalled();
+
+    await expect(paymentService.handleMpesaCallback(callbackToken, callback))
+      .resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+    expect(callbackEventData).toMatchObject({ providerResultCode: '1037', providerReceiptReference: null });
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
+  });
+
   it('keeps legacy 4999 transactions unchanged after verified success pending an approved recovery procedure', async () => {
     paymentStatus = 'FAILED';
     paymentFailureCode = 'MPESA_RESULT_4999';
@@ -1918,6 +2014,14 @@ describe('M-Pesa payment callback reconciliation', () => {
         errorType: 'ConflictException',
         errorCode: 'HTTP_409',
       }));
+      await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
+        .resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+      expect(paymentStatus).toBe('CONFIRMED');
+      expect(transactionCount).toBe(1);
+      expect(postLedger).toHaveBeenCalledTimes(2);
+      expect(postLedger.mock.calls[0][1]).toMatchObject({ idempotencyKey: 'loan-processing-fee:payment-id' });
+      expect(postLedger.mock.calls[1][1]).toMatchObject({ idempotencyKey: 'loan-processing-fee:payment-id' });
+      expect(transactionClient.loanApplication.updateMany).toHaveBeenCalledTimes(2);
     } finally {
       errorLog.mockRestore();
     }
@@ -2025,7 +2129,10 @@ describe('M-Pesa payment callback reconciliation', () => {
   it('does not confirm based only on a successful callback when the provider query disagrees', async () => {
     providerResultCode = 1032;
     await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
-      .rejects.toBeInstanceOf(ServiceUnavailableException);
+      .resolves.toEqual({ ResultCode: 0, ResultDesc: 'Accepted' });
+    expect(queryStkStatus).toHaveBeenCalledWith(checkoutRequestId);
+    expect(callbackEventData).toMatchObject({ providerResultCode: '0', providerReceiptReference: null });
+    expect(paymentFailureCode).toBe('MPESA_RESULT_1032');
     expect(paymentStatus).toBe('PENDING');
     expect(postLedger).not.toHaveBeenCalled();
     expect(userUpdate).not.toHaveBeenCalled();
