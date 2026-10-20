@@ -215,6 +215,17 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .wallet-actions{max-width:960px;margin:16px auto 0;padding:18px 20px;border:1px solid var(--line);border-radius:14px;background:#fff}
 .wallet-actions h2{margin:0 0 12px;font-size:17px}
 .wallet-actions h2:not(:first-child){margin-top:24px}
+.wallet-deposit-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;min-width:0}
+.wallet-deposit-heading>div{min-width:0}
+.wallet-deposit-heading h2{margin:0}
+.wallet-deposit-heading p{margin:5px 0 0;color:var(--muted);font-size:11px;line-height:1.5}
+.wallet-deposit-heading>.button,.wallet-deposit-actions>.button,.wallet-deposit-actions>.quiet-button{min-height:44px;white-space:normal}
+.wallet-deposit-panel{display:grid;gap:12px;min-width:0;margin-top:16px;padding:15px;border:1px solid var(--line);border-radius:10px;background:#f8faf8}
+.wallet-deposit-panel-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.wallet-deposit-panel-heading h3{margin:0;font-size:14px}
+.wallet-deposit-pending{padding:11px 12px;border:1px solid #ead4a3;border-radius:8px;background:#fff8e9;color:#72530e;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.wallet-deposit-actions{display:flex;flex-wrap:wrap;gap:9px}
+.wallet-deposit-actions button{min-height:44px}
 .wallet-action-form{max-width:480px;display:grid;gap:10px}
 .wallet-action-form label{display:grid;gap:6px;font-size:12px;font-weight:700}
 .wallet-action-form input,.wallet-action-form select{width:100%;min-height:44px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);font:inherit}
@@ -246,6 +257,11 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
   .dashboard-shortcuts{grid-template-columns:1fr}
   .wallet-actions,.trust-error,.trust-loading{width:calc(100% - 28px)}
   .wallet-actions{padding:15px}
+  .wallet-deposit-heading{align-items:flex-start;flex-direction:column}
+  .wallet-deposit-heading>.button{width:100%}
+  .wallet-deposit-panel{padding:12px}
+  .wallet-deposit-actions{display:grid;grid-template-columns:1fr}
+  .wallet-deposit-actions button{width:100%}
   .trust-card-list{width:100%;padding-inline:14px}
   .trust-card{padding:13px;grid-template-columns:34px minmax(0,1fr);gap:9px}
   .trust-card-icon{width:34px;height:34px}

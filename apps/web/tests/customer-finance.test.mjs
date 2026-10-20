@@ -46,6 +46,43 @@ test('wallet and transactions are loaded from authenticated ledger endpoints wit
   assert.match(wallet, /Confirm a wallet repayment/);
 });
 
+test('wallet deposit form stays closed until requested and never reports success before backend confirmation', () => {
+  assert.match(wallet, /const \[depositFormOpen, setDepositFormOpen\] = useState\(false\)/);
+  assert.match(wallet, /aria-expanded=\{depositFormOpen\}/);
+  assert.match(wallet, /onClick=\{\(\) => setDepositFormOpen\(true\)\}>Deposit<\/button>/);
+  assert.match(wallet, /depositFormOpen && <section className="wallet-deposit-panel"/);
+  assert.match(wallet, /function cancelDepositForm\(\)/);
+  assert.match(wallet, /setDepositAmount\(''\)/);
+  assert.match(wallet, /setMpesaPhoneNumber\(''\)/);
+  assert.match(wallet, /onClick=\{cancelDepositForm\}>Cancel<\/button>/);
+  assert.match(wallet, /depositQuoteError/);
+  assert.match(wallet, /depositQuote\?\.unavailableReasons/);
+  assert.match(wallet, /!depositQuote\?\.depositAvailable/);
+  const panelStart = wallet.indexOf('{depositFormOpen && <section className="wallet-deposit-panel"');
+  const repaymentStart = wallet.indexOf('<h2>Repay a loan from your wallet</h2>', panelStart);
+  const depositPanel = wallet.slice(panelStart, repaymentStart);
+  assert.ok(panelStart >= 0 && repaymentStart > panelStart);
+  assert.match(depositPanel, /depositQuoteError/);
+  assert.match(depositPanel, /depositQuote\?\.unavailableReasons/);
+  assert.match(depositPanel, /disabled=\{walletActionBusy \|\| loading \|\| !walletStatusVerified \|\| unresolvedDeposit \|\| !depositQuote\?\.depositAvailable\}/);
+  assert.match(wallet, /Pending Safaricom confirmation/);
+  assert.match(wallet, /trackedDeposit\?\.status === 'CONFIRMED'/);
+  assert.match(wallet, /setWalletActionMessage\(`\$\{formatMoney\(trackedDeposit\.amountKes\)\} deposit confirmed/);
+  assert.match(wallet, /setDepositFormOpen\(false\)/);
+  assert.match(wallet, /setWallet\(nextWallet\)/);
+  assert.match(wallet, /setEntries\(nextEntries\.items\)/);
+  assert.match(wallet, /await refresh\(\)/);
+  const submitStart = wallet.indexOf('async function submitDeposit');
+  const cancelStart = wallet.indexOf('function cancelDepositForm', submitStart);
+  const submitDeposit = wallet.slice(submitStart, cancelStart);
+  assert.doesNotMatch(submitDeposit, /setWalletActionMessage\((?!'')/);
+  const cancelHandler = wallet.match(/function cancelDepositForm\(\) \{([\s\S]*?)\n  \}/)?.[1] ?? '';
+  assert.match(cancelHandler, /setDepositAmount\(''\)/);
+  assert.match(cancelHandler, /setMpesaPhoneNumber\(''\)/);
+  assert.match(cancelHandler, /if \(!depositReferenceRef\.current\) setWalletActionMessage\(''\)/);
+  assert.doesNotMatch(wallet, /setWallet\(\(current\) => \(\{[^}]*balanceKes/);
+});
+
 test('Trust Centre uses authenticated identity and backend fee status, with real policy and support links', () => {
   assert.match(trust, /apiRequest<TrustProfile>\('\/auth\/me'/);
   assert.match(trust, /apiRequest<ProcessingFeeQuote>\('\/payments\/loan-processing-fee-quote'/);

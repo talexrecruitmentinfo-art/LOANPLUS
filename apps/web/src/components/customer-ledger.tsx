@@ -74,11 +74,14 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [depositQuote, setDepositQuote] = useState<WalletDepositQuote | null>(null);
+  const [depositQuoteError, setDepositQuoteError] = useState('');
   const [eligibleLoans, setEligibleLoans] = useState<EligibleLoan[] | null>(null);
   const [repaymentReadiness, setRepaymentReadiness] = useState<WalletRepaymentReadiness | null>(null);
   const [serviceErrors, setServiceErrors] = useState<string[]>([]);
   const [depositAmount, setDepositAmount] = useState('');
   const [mpesaPhoneNumber, setMpesaPhoneNumber] = useState('');
+  const [depositFormOpen, setDepositFormOpen] = useState(false);
+  const [depositReference, setDepositReference] = useState('');
   const [selectedLoanId, setSelectedLoanId] = useState('');
   const [repaymentAmount, setRepaymentAmount] = useState('');
   const [walletActionBusy, setWalletActionBusy] = useState(false);
@@ -86,6 +89,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
   const [walletActionError, setWalletActionError] = useState('');
   const [walletStatusVerified, setWalletStatusVerified] = useState(false);
   const refreshSequence = useRef(0);
+  const depositReferenceRef = useRef('');
 
   const refresh = useCallback(async () => {
     const requestId = ++refreshSequence.current;
@@ -118,8 +122,9 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         if (quoteResult.status === 'fulfilled') setDepositQuote(quoteResult.value);
         else {
           setDepositQuote(null);
-          errors.push(quoteResult.reason instanceof Error ? quoteResult.reason.message : 'Deposit availability could not be checked.');
+          setDepositQuoteError(quoteResult.reason instanceof Error ? quoteResult.reason.message : 'Deposit availability could not be checked.');
         }
+        if (quoteResult.status === 'fulfilled') setDepositQuoteError('');
         if (loansResult.status === 'fulfilled') setEligibleLoans(loansResult.value);
         else {
           setEligibleLoans(null);
@@ -132,6 +137,23 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         }
         setServiceErrors(errors);
         setWalletStatusVerified(quoteResult.status === 'fulfilled');
+        const trackedDeposit = depositReferenceRef.current
+          ? nextPayments.find((payment) => payment.internalReference === depositReferenceRef.current)
+          : undefined;
+        if (trackedDeposit?.status === 'CONFIRMED') {
+          depositReferenceRef.current = '';
+          setDepositReference('');
+          setDepositFormOpen(false);
+          setDepositAmount('');
+          setMpesaPhoneNumber('');
+          setWalletActionError('');
+          setWalletActionMessage(`${formatMoney(trackedDeposit.amountKes)} deposit confirmed and added to your wallet.`);
+        } else if (trackedDeposit && ['FAILED', 'CANCELLED', 'EXPIRED', 'REVERSED'].includes(trackedDeposit.status)) {
+          depositReferenceRef.current = '';
+          setDepositReference('');
+          setWalletActionError(trackedDeposit.providerResult.message || `The deposit ${trackedDeposit.status.toLowerCase()}.`);
+          setWalletActionMessage('');
+        }
         if (loansResult.status === 'fulfilled' && !loansResult.value.some((loan) => loan.id === selectedLoanId)) {
           const nextLoan = loansResult.value[0];
           setSelectedLoanId(nextLoan?.id ?? '');
@@ -194,6 +216,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
   const selectedLoan = eligibleLoans?.find((loan) => loan.id === selectedLoanId);
   const unresolvedDeposit = payments.some((payment) =>
     payment.type === 'WALLET_DEPOSIT' && (payment.status === 'PENDING' || payment.unresolved));
+  const trackedDeposit = payments.find((payment) => payment.internalReference === depositReference);
 
   useEffect(() => {
     if (view !== 'wallet' || !unresolvedDeposit) return;
@@ -215,13 +238,23 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         headers: { 'Idempotency-Key': crypto.randomUUID() },
         body: JSON.stringify({ amountKes, mpesaPhoneNumber }),
       });
-      setWalletActionMessage(`${result.message} Reference: ${result.reference} · ${result.status}.`);
+      depositReferenceRef.current = result.reference;
+      setDepositReference(result.reference);
+      setWalletActionMessage('');
       await refresh();
     } catch (reason) {
       setWalletActionError(reason instanceof Error ? reason.message : 'The wallet deposit could not be started.');
     } finally {
       setWalletActionBusy(false);
     }
+  }
+
+  function cancelDepositForm() {
+    setDepositFormOpen(false);
+    setDepositAmount('');
+    setMpesaPhoneNumber('');
+    setWalletActionError('');
+    if (!depositReferenceRef.current) setWalletActionMessage('');
   }
 
   async function submitRepayment(event: FormEvent<HTMLFormElement>) {
@@ -276,27 +309,44 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         </section>
       )}
       {view === 'wallet' && <section className="wallet-actions" aria-label="Wallet services">
-        <h2>Deposit with M-Pesa</h2>
-        {unresolvedDeposit && <p className="form-error" role="alert">A previous wallet deposit is unresolved. Refresh its status and wait for reconciliation before starting another deposit.</p>}
-        {depositQuote?.unavailableReasons.map((reason) => <p className="form-error" role="status" key={reason}>{reason}</p>)}
-        {serviceErrors.map((reason) => <p className="form-error" role="alert" key={reason}>{reason}</p>)}
-        <form className="wallet-action-form" onSubmit={submitDeposit}>
-          <label>Deposit amount (KES)
-            <input type="number" min={depositQuote?.minimumAmountKes ?? undefined} max={depositQuote?.maximumAmountKes ?? undefined} step="1" value={depositAmount} onChange={(event) => setDepositAmount(event.target.value)} required />
-          </label>
+        <div className="wallet-deposit-heading">
+          <div><h2>Deposit with M-Pesa</h2><p>Wallet funds are added after verified payment confirmation.</p></div>
+          <button className="button" type="button" aria-expanded={depositFormOpen} aria-controls="wallet-deposit-form" onClick={() => setDepositFormOpen(true)}>Deposit</button>
+        </div>
+        {depositReference && <p className="wallet-deposit-pending" role="status">
+          {trackedDeposit?.status === 'PENDING' || !trackedDeposit
+            ? `Pending Safaricom confirmation · Reference ${depositReference}. Your wallet balance will update after verified success.`
+            : `Payment status: ${trackedDeposit.status.replaceAll('_', ' ')} · Reference ${depositReference}.`}
+        </p>}
+        {walletActionMessage && <p className="wallet-action-success" role="status">{walletActionMessage}</p>}
+        {walletActionError && <p className="form-error" role="alert">{walletActionError}</p>}
+        {depositFormOpen && <section className="wallet-deposit-panel" id="wallet-deposit-form" aria-labelledby="wallet-deposit-form-heading">
+          <div className="wallet-deposit-panel-heading"><h3 id="wallet-deposit-form-heading">Deposit with M-Pesa</h3><button className="quiet-button" type="button" disabled={walletActionBusy} onClick={cancelDepositForm}>Cancel</button></div>
+          {depositQuoteError && <p className="form-error" role="alert">{depositQuoteError}</p>}
+          {depositQuote?.unavailableReasons.map((reason) => <p className="form-error" role="status" key={reason}>{reason}</p>)}
           {depositQuote && <small>
             {depositQuote.minimumAmountKes !== null && depositQuote.maximumAmountKes !== null
               ? `Allowed amount: ${formatMoney(depositQuote.minimumAmountKes)}–${formatMoney(depositQuote.maximumAmountKes)}.`
               : 'Deposit limits are not configured.'}
           </small>}
-          <label>M-Pesa phone number
-            <input type="tel" inputMode="tel" autoComplete="tel" value={mpesaPhoneNumber} onChange={(event) => setMpesaPhoneNumber(event.target.value)} placeholder="+2547…" required />
-          </label>
-          <button className="button" type="submit" disabled={walletActionBusy || loading || !walletStatusVerified || unresolvedDeposit || !depositQuote?.depositAvailable}>
-            {walletActionBusy ? 'Starting…' : 'Continue to M-Pesa'}
-          </button>
-        </form>
-        <p>Your balance is credited only after verified M-Pesa confirmation. If a request is unresolved, do not submit another deposit.</p>
+          {!walletStatusVerified && !depositQuoteError && <p role="status">Checking deposit availability…</p>}
+          {unresolvedDeposit && <p className="form-error" role="alert">A previous wallet deposit is unresolved. Wait for reconciliation; do not submit another deposit.</p>}
+          <form className="wallet-action-form" onSubmit={submitDeposit}>
+            <label>Deposit amount (KES)
+              <input type="number" min={depositQuote?.minimumAmountKes ?? undefined} max={depositQuote?.maximumAmountKes ?? undefined} step="1" value={depositAmount} onChange={(event) => setDepositAmount(event.target.value)} required />
+            </label>
+            <label>M-Pesa phone number
+              <input type="tel" inputMode="tel" autoComplete="tel" value={mpesaPhoneNumber} onChange={(event) => setMpesaPhoneNumber(event.target.value)} placeholder="+2547…" required />
+            </label>
+            <div className="wallet-deposit-actions">
+              <button className="button" type="submit" disabled={walletActionBusy || loading || !walletStatusVerified || unresolvedDeposit || !depositQuote?.depositAvailable}>
+                {walletActionBusy ? 'Starting…' : 'Continue to M-Pesa'}
+              </button>
+              <button className="quiet-button" type="button" disabled={walletActionBusy} onClick={cancelDepositForm}>Cancel</button>
+            </div>
+          </form>
+        </section>}
+        {serviceErrors.map((reason) => <p className="form-error" role="alert" key={reason}>{reason}</p>)}
         <h2>Repay a loan from your wallet</h2>
         {repaymentReadiness?.unavailableReasons.map((reason) => <p className="form-error" role="status" key={reason}>{reason}</p>)}
         {eligibleLoans?.length === 0 && <p>No disbursed loan is currently eligible for wallet repayment.</p>}
@@ -321,8 +371,6 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
             </button>
           </form>
         )}
-        {walletActionMessage && <p className="wallet-action-success" role="status">{walletActionMessage}</p>}
-        {walletActionError && <p className="form-error" role="alert">{walletActionError}</p>}
       </section>}
       {view === 'transactions' && (
         <section className="customer-filter-row" aria-label="Filter account activity">
