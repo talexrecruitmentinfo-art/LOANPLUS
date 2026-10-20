@@ -34,6 +34,11 @@ test('wallet and transactions are loaded from authenticated ledger endpoints wit
   assert.match(wallet, /const refreshSequence = useRef\(0\)/);
   assert.match(wallet, /if \(requestId !== refreshSequence\.current\) return/);
   assert.match(wallet, /pendingDepositsKes/);
+  assert.match(wallet, /apiRequest<Wallet>\('\/wallet', \{ cache: 'no-store' \}\)/);
+  assert.match(wallet, /apiRequest<LedgerPage>\('\/wallet\/transactions\?limit=25', \{ cache: 'no-store' \}\)/);
+  assert.match(wallet, /await refresh\(\);/);
+  assert.match(wallet, /window\.setInterval\(\(\) => void refresh\(\), 5_000\)/);
+  assert.doesNotMatch(wallet, /setWallet\(\(current\) => \(\{[^}]*balanceKes/);
   assert.match(wallet, /do not submit another deposit/);
   assert.match(wallet, /wallet repayment/);
   assert.match(wallet, /Load more transactions/);
@@ -55,6 +60,9 @@ test('Trust Centre uses authenticated identity and backend fee status, with real
 test('home shows authenticated recent activity and keeps the overview available when wallet data fails', () => {
   assert.match(dashboard, /apiRequest<LedgerPage>\('\/wallet\/transactions\?limit=25', \{ cache: 'no-store' \}\)/);
   assert.match(dashboard, /apiRequest<PaymentAttempt\[]>\('\/payments', \{ cache: 'no-store' \}\)/);
+  assert.match(dashboard, /hasPendingWalletDeposit/);
+  assert.match(dashboard, /window\.setInterval\(\(\) => void refreshWalletActivity\(\), 5_000\)/);
+  assert.match(dashboard, /setRecentEntries\(nextEntries\.items\.slice\(0, 4\)\)/);
   assert.match(dashboard, /apiRequest<Product\[]>\('\/loans\/products', \{ cache: 'no-store' \}\)/);
   assert.match(dashboard, /No available loan products/);
   assert.match(dashboard, /Loan products could not be loaded/);
