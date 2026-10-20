@@ -249,6 +249,7 @@ export class AdminService {
           failureCode: true,
           confirmedAt: true,
           createdAt: true,
+          userId: true,
           user: { select: { fullName: true, email: true } },
           activationRequest: {
             select: {
@@ -258,7 +259,18 @@ export class AdminService {
             },
           },
           ledgerTransaction: {
-            select: { internalReference: true, transactionType: true, status: true },
+            select: {
+              internalReference: true,
+              transactionType: true,
+              status: true,
+              entries: {
+                select: {
+                  debitKes: true,
+                  creditKes: true,
+                  account: { select: { code: true, userId: true, accountType: true, currency: true } },
+                },
+              },
+            },
           },
         },
         orderBy: [{ createdAt: 'desc' }, { internalReference: 'desc' }],
@@ -267,7 +279,47 @@ export class AdminService {
       }),
     ]);
     return {
-      items,
+      items: items.map((payment) => {
+        const settlementIssues: string[] = [];
+        const ledgerRequired = payment.type === PaymentType.ACTIVATION ||
+          payment.type === PaymentType.LOAN_PROCESSING_FEE || payment.type === PaymentType.WALLET_DEPOSIT;
+        if (ledgerRequired && payment.status === PaymentStatus.CONFIRMED) {
+          const journal = payment.ledgerTransaction;
+          if (!journal) {
+            settlementIssues.push('MISSING_LEDGER_TRANSACTION');
+          } else {
+            const debitKes = journal.entries.reduce((total, entry) => total + entry.debitKes, 0);
+            const creditKes = journal.entries.reduce((total, entry) => total + entry.creditKes, 0);
+            if (journal.status !== 'POSTED') settlementIssues.push('LEDGER_NOT_POSTED');
+            if (debitKes !== payment.amountKes || creditKes !== payment.amountKes) {
+              settlementIssues.push('LEDGER_AMOUNT_MISMATCH');
+            }
+            if (payment.currency !== 'KES' || journal.entries.some((entry) => entry.account.currency !== 'KES')) {
+              settlementIssues.push('LEDGER_CURRENCY_MISMATCH');
+            }
+            if (payment.type === PaymentType.WALLET_DEPOSIT) {
+              const walletEntries = journal.entries.filter((entry) => entry.account.code.startsWith('WALLET_'));
+              const customerWalletEntries = walletEntries.filter((entry) =>
+                entry.account.code === `WALLET_${payment.userId}` &&
+                entry.account.userId === payment.userId && entry.account.accountType === 'LIABILITY',
+              );
+              const walletCreditKes = customerWalletEntries.reduce((total, entry) => total + entry.creditKes, 0);
+              if (walletEntries.some((entry) => entry.account.userId !== payment.userId)) {
+                settlementIssues.push('WALLET_OWNERSHIP_MISMATCH');
+              }
+              if (walletCreditKes > payment.amountKes) settlementIssues.push('DUPLICATE_WALLET_CREDIT');
+              else if (walletCreditKes !== payment.amountKes) settlementIssues.push('WALLET_CREDIT_MISMATCH');
+            }
+          }
+        } else if (payment.ledgerTransaction) {
+          settlementIssues.push('UNCONFIRMED_PAYMENT_HAS_LEDGER');
+        }
+        if (payment.status === PaymentStatus.PENDING && payment.activationRequest?.callbackEvents.length) {
+          settlementIssues.push('UNRESOLVED_PROVIDER_CALLBACK');
+        }
+        const { userId: _userId, ...customerPayment } = payment;
+        return { ...customerPayment, settlementIssues };
+      }),
       total,
       page: options.page,
       pageSize: options.pageSize,

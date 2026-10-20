@@ -88,6 +88,7 @@ test('admin payment monitoring filters wallet deposits and displays their ledger
   const adminPayments = await readFile(new URL('../src/app/admin/payments/page.tsx', import.meta.url), 'utf8');
   assert.match(adminPayments, /value="WALLET_DEPOSIT">Wallet deposit/);
   assert.match(adminPayments, /payment\.ledgerTransaction\.internalReference/);
+  assert.match(adminPayments, /payment\.settlementIssues/);
 });
 
 test('profile is server-backed and uses only existing security and support actions', () => {

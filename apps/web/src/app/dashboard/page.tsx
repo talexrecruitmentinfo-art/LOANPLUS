@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
 import { formatMoney as formatKes } from '@/lib/currency';
@@ -20,7 +20,7 @@ interface LoanApplication {
 }
 interface LedgerEntry { id: string; debitKes: number; creditKes: number; createdAt: string; transaction: { internalReference: string; transactionType: string; status: string } }
 interface LedgerPage { items: LedgerEntry[]; nextCursor: string | null }
-interface PaymentAttempt { internalReference: string; type: string; amountKes: number; currency: string; status: string; createdAt: string; providerResult: { message: string } }
+interface PaymentAttempt { internalReference: string; type: string; amountKes: number; currency: string; status: string; unresolved?: boolean; createdAt: string; providerResult: { message: string } }
 interface Product {
   id: string;
   name: string;
@@ -43,6 +43,7 @@ export default function DashboardPage() {
   const [productsLoading, setProductsLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const walletActivityRefreshSequence = useRef(0);
   const applicationStatus = (application: LoanApplication) => {
     if (application.status === 'DRAFT' || application.status === 'PROCESSING_PAYMENT_PENDING') {
       const latest = application.processingFeePayments[0];
@@ -96,9 +97,12 @@ export default function DashboardPage() {
         else setError('Your wallet balance could not be refreshed.');
         if (applicationsResult.status === 'fulfilled') setApplications(applicationsResult.value);
         else setError((current) => current || 'Loan application status could not be loaded.');
-        if (entriesResult.status === 'fulfilled') setRecentEntries(entriesResult.value.items.slice(0, 4));
+        if (entriesResult.status === 'fulfilled') {
+          const nextEntries = entriesResult.value;
+          setRecentEntries(nextEntries.items.slice(0, 4));
+        }
         else setError((current) => current || 'Recent wallet activity could not be loaded.');
-        if (paymentsResult.status === 'fulfilled') setPaymentAttempts(paymentsResult.value.slice(0, 3));
+        if (paymentsResult.status === 'fulfilled') setPaymentAttempts(paymentsResult.value);
         else setError((current) => current || 'Payment status could not be loaded.');
         if (productsResult.status === 'fulfilled') setProducts(productsResult.value.slice(0, 3));
         else {
@@ -119,6 +123,35 @@ export default function DashboardPage() {
     void loadDashboard();
     return () => { cancelled = true; };
   }, [router]);
+
+  const hasPendingWalletDeposit = paymentAttempts.some((payment) =>
+    payment.type === 'WALLET_DEPOSIT' && (payment.status === 'PENDING' || payment.unresolved),
+  );
+
+  const refreshWalletActivity = useCallback(async () => {
+    const requestId = ++walletActivityRefreshSequence.current;
+    const [walletResult, entriesResult, paymentsResult] = await Promise.allSettled([
+      apiRequest<Wallet>('/wallet', { cache: 'no-store' }),
+      apiRequest<LedgerPage>('/wallet/transactions?limit=25', { cache: 'no-store' }),
+      apiRequest<PaymentAttempt[]>('/payments', { cache: 'no-store' }),
+    ]);
+    if (requestId !== walletActivityRefreshSequence.current) return;
+    if (walletResult.status === 'fulfilled') setWallet(walletResult.value);
+    else setError((current) => current || 'Your wallet balance could not be refreshed.');
+    if (entriesResult.status === 'fulfilled') setRecentEntries(entriesResult.value.items.slice(0, 4));
+    else setError((current) => current || 'Recent wallet activity could not be refreshed.');
+    if (paymentsResult.status === 'fulfilled') setPaymentAttempts(paymentsResult.value);
+    else setError((current) => current || 'Payment status could not be refreshed.');
+  }, []);
+
+  useEffect(() => {
+    if (!hasPendingWalletDeposit) return;
+    const interval = window.setInterval(() => void refreshWalletActivity(), 5_000);
+    return () => {
+      window.clearInterval(interval);
+      walletActivityRefreshSequence.current += 1;
+    };
+  }, [hasPendingWalletDeposit, refreshWalletActivity]);
 
   if (loading) return <main className="dashboard-loading">Loading your account…</main>;
   if (!customer) return <main className="dashboard-loading">{error || 'Your account could not be loaded.'}</main>;
@@ -196,7 +229,7 @@ export default function DashboardPage() {
       </section>
       {paymentAttempts.length > 0 && <section className="dashboard-empty" aria-label="Recent payment attempts">
         <p className="eyebrow">PAYMENT ATTEMPTS</p>
-        <div className="application-list">{paymentAttempts.map((payment) => (
+        <div className="application-list">{paymentAttempts.slice(0, 3).map((payment) => (
           <article key={payment.internalReference}>
             <div><b>{payment.type.replaceAll('_', ' ')}</b><small>{payment.internalReference} · {new Date(payment.createdAt).toLocaleString('en-KE')}</small></div>
             <span>{formatKes(payment.amountKes)}</span>

@@ -95,8 +95,58 @@ describe('AdminService financial and account views', () => {
     ]);
     expect(query.select).toHaveProperty('activationRequest.select.callbackEvents');
     expect(query.select).toHaveProperty('ledgerTransaction.select.internalReference', true);
+    expect(query.select).toHaveProperty('ledgerTransaction.select.entries.select.account.select.currency', true);
     expect(query.select).not.toHaveProperty('activationRequest.select.payload');
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 0, take: 25 }));
+  });
+
+  it('flags confirmed wallet deposits whose posted journal has an amount mismatch', async () => {
+    const paymentTransaction = {
+      count: jest.fn().mockResolvedValue(1),
+      findMany: jest.fn().mockResolvedValue([
+        {
+          type: PaymentType.WALLET_DEPOSIT,
+          amountKes: 100,
+          currency: 'KES',
+          userId: 'customer-id',
+          status: PaymentStatus.CONFIRMED,
+          activationRequest: { callbackEvents: [] },
+          ledgerTransaction: {
+            status: 'POSTED',
+            entries: [
+              { debitKes: 100, creditKes: 0, account: { code: 'MPESA_CLEARING', userId: null, accountType: 'ASSET', currency: 'KES' } },
+              { debitKes: 0, creditKes: 90, account: { code: 'WALLET_customer-id', userId: 'customer-id', accountType: 'LIABILITY', currency: 'KES' } },
+            ],
+          },
+        },
+        {
+          type: PaymentType.WALLET_DEPOSIT,
+          amountKes: 200,
+          currency: 'KES',
+          userId: 'second-customer-id',
+          status: PaymentStatus.CONFIRMED,
+          activationRequest: { callbackEvents: [] },
+          ledgerTransaction: null,
+        },
+        {
+          type: PaymentType.WALLET_DEPOSIT,
+          amountKes: 300,
+          currency: 'KES',
+          userId: 'third-customer-id',
+          status: PaymentStatus.PENDING,
+          activationRequest: { callbackEvents: [{ providerResultCode: '4999' }] },
+          ledgerTransaction: null,
+        },
+      ]),
+    };
+    const service = new AdminService({ paymentTransaction } as unknown as PrismaService);
+
+    const result = await service.listPayments({ page: 1, pageSize: 25 });
+
+    expect(result.items[0].settlementIssues).toEqual(['LEDGER_AMOUNT_MISMATCH', 'WALLET_CREDIT_MISMATCH']);
+    expect(result.items[1].settlementIssues).toContain('MISSING_LEDGER_TRANSACTION');
+    expect(result.items[2].settlementIssues).toContain('UNRESOLVED_PROVIDER_CALLBACK');
+    expect(result.items[0]).not.toHaveProperty('userId');
   });
 
   it('returns bounded customer activity while excluding credentials and raw identity/payment payloads', async () => {

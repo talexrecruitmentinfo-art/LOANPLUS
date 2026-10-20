@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { CreateLoanApplicationDto } from '../loans/loan.dto';
 import { LoanService } from '../loans/loan.service';
-import { InitiateLoanProcessingFeeDto } from './payment.dto';
+import { InitiateLoanProcessingFeeDto, WalletDepositDto } from './payment.dto';
 import { MpesaService } from './mpesa.service';
 import { PaymentService } from './payment.service';
 
@@ -12,6 +12,7 @@ const databaseTest = databaseUrl ? it : it.skip;
 
 describe('loan processing-fee payment database integration', () => {
   let prisma: PrismaService;
+  let ledger: LedgerService;
   let payments: PaymentService;
   let loans: LoanService;
   let adminId: string;
@@ -48,13 +49,16 @@ describe('loan processing-fee payment database integration', () => {
     process.env.LOAN_PROCESSING_FEE_POLICY_VERSION = 'test-approved-v1';
     process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE =
       'Test-only approved processing-fee policy for isolated integration verification.';
+    process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED = 'true';
+    process.env.WALLET_DEPOSIT_MIN_KES = '100';
+    process.env.WALLET_DEPOSIT_MAX_KES = '100000';
     const parsedUrl = new URL(databaseUrl);
     if (!['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname) || !parsedUrl.pathname.endsWith('_test')) {
       throw new Error('TEST_DATABASE_URL must point to a local database whose name ends in _test.');
     }
     prisma = new PrismaService();
     await prisma.$connect();
-    const ledger = new LedgerService(prisma);
+    ledger = new LedgerService(prisma);
     payments = new PaymentService(prisma, mpesa, ledger);
     loans = new LoanService(prisma, ledger);
 
@@ -131,6 +135,7 @@ describe('loan processing-fee payment database integration', () => {
       await prisma.loanApplication.deleteMany({ where: { userId } });
       await prisma.loanProduct.deleteMany({ where: { id: productId } });
       await prisma.ledgerEntry.deleteMany({ where: { ledgerAccountId: { in: accountIds } } });
+      await prisma.ledgerAccount.deleteMany({ where: { userId } });
       await prisma.ledgerAccount.deleteMany({ where: { id: { in: accountIds } } });
       await prisma.systemSetting.deleteMany({ where: { key: 'loan.processing_fee_revenue_account' } });
       await prisma.authAuditLog.deleteMany({ where: { actorId: userId } });
@@ -255,5 +260,63 @@ describe('loan processing-fee payment database integration', () => {
       amountKes: 50,
     });
     expect(mpesa.initiateStkPush).toHaveBeenCalledTimes(2);
+  });
+
+  databaseTest('credits a wallet deposit once for concurrent verified callbacks and exposes it in wallet history', async () => {
+    const amountKes = 1250;
+    const started = await payments.initiateWalletDeposit(
+      userId,
+      Object.assign(new WalletDepositDto(), { amountKes, mpesaPhoneNumber: '+254712345678' }),
+      'wallet-deposit-integration-01',
+    );
+    expect(started).toMatchObject({ status: 'PENDING', amountKes, currency: 'KES' });
+    const payment = await prisma.paymentTransaction.findUniqueOrThrow({
+      where: { internalReference: started.reference },
+    });
+    paymentId = payment.id;
+    const request = await prisma.activationPaymentRequest.findUniqueOrThrow({
+      where: { paymentTransactionId: payment.id },
+      select: { checkoutRequestId: true },
+    });
+    if (!request.checkoutRequestId) throw new Error('Mock provider checkout ID was not retained.');
+    const callbackToken = new URL(callbackUrl).pathname.split('/').at(-1);
+    if (!callbackToken) throw new Error('Mock provider callback token was not retained.');
+    const payload = {
+      Body: { stkCallback: {
+        CheckoutRequestID: request.checkoutRequestId,
+        MerchantRequestID: merchantRequestId,
+        ResultCode: 0,
+        ResultDesc: 'Wallet deposit confirmed in integration fixture.',
+        CallbackMetadata: { Item: [
+          { Name: 'Amount', Value: amountKes },
+          { Name: 'MpesaReceiptNumber', Value: 'TESTDEPOSIT123' },
+          { Name: 'PhoneNumber', Value: 254712345678 },
+        ] },
+      } },
+    };
+
+    const callbackResults = await Promise.allSettled([
+      payments.handleMpesaCallback(callbackToken, payload),
+      payments.handleMpesaCallback(callbackToken, payload),
+    ]);
+    expect(callbackResults.some((result) => result.status === 'fulfilled')).toBe(true);
+
+    const [confirmedPayment, entries, wallet, history] = await Promise.all([
+      prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } }),
+      prisma.ledgerEntry.findMany({ where: { transaction: { paymentId: payment.id } }, include: { account: true } }),
+      ledger.getCustomerWallet(userId),
+      ledger.listCustomerEntries(userId),
+    ]);
+    expect(confirmedPayment).toMatchObject({ status: 'CONFIRMED', receiptReference: 'TESTDEPOSIT123' });
+    expect(entries).toHaveLength(2);
+    expect(entries.find((entry) => entry.account.userId === null)).toMatchObject({ debitKes: amountKes, creditKes: 0 });
+    expect(entries.find((entry) => entry.account.userId === userId)).toMatchObject({ debitKes: 0, creditKes: amountKes });
+    expect(wallet).toEqual({ balanceKes: amountKes, pendingDepositsKes: 0, currency: 'KES' });
+    expect(history.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        creditKes: amountKes,
+        transaction: expect.objectContaining({ transactionType: 'WALLET_DEPOSIT', status: 'POSTED' }),
+      }),
+    ]));
   });
 });

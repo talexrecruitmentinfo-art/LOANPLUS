@@ -144,6 +144,13 @@ describe('M-Pesa payment callback reconciliation', () => {
           events.add(data.payloadHash);
           return {};
         }),
+        createMany: jest.fn(async ({ data }: { data: Array<Record<string, unknown> & { payloadHash: string }> }) => {
+          for (const entry of data) {
+            callbackEventData = entry;
+            events.add(entry.payloadHash);
+          }
+          return { count: data.length };
+        }),
       },
       paymentTransaction: {
         updateMany: jest.fn(async ({ where, data }: {
@@ -202,7 +209,9 @@ describe('M-Pesa payment callback reconciliation', () => {
     const prismaMock = {
       activationPaymentRequest: {
         findUnique: jest.fn(async ({ where }: { where: { callbackTokenHash: string } }) =>
-          where.callbackTokenHash === request.callbackTokenHash ? request : null),
+          where.callbackTokenHash === request.callbackTokenHash
+            ? { ...request, paymentTransaction: { ...request.paymentTransaction, status: paymentStatus } }
+            : null),
       },
       paymentCallbackEvent: {
         findFirst: jest.fn(async ({ where }: { where: { payloadHash: string } }) =>
@@ -314,6 +323,49 @@ describe('M-Pesa payment callback reconciliation', () => {
     expect(userUpdate).not.toHaveBeenCalled();
   });
 
+  it('rechecks unresolved 4999 callbacks and credits only after a later verified success', async () => {
+    const depositAmount = 1250;
+    const depositRequest = {
+      ...activationRequestRecord,
+      policySnapshot: { purpose: 'WALLET_DEPOSIT', amountKes: depositAmount, currency: 'KES' },
+      paymentTransaction: {
+        ...activationRequestRecord.paymentTransaction,
+        type: PaymentType.WALLET_DEPOSIT,
+        amountKes: depositAmount,
+      },
+    };
+    (prisma.activationPaymentRequest.findUnique as jest.Mock).mockResolvedValue(depositRequest);
+    const pendingCallback = {
+      Body: { stkCallback: {
+        CheckoutRequestID: checkoutRequestId,
+        MerchantRequestID: merchantRequestId,
+        ResultCode: 4999,
+        ResultDesc: 'Request is still being processed.',
+      } },
+    };
+    providerResultCode = 4999;
+
+    await paymentService.handleMpesaCallback(callbackToken, pendingCallback);
+    await paymentService.handleMpesaCallback(callbackToken, pendingCallback);
+
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
+    expect(queryStkStatus).toHaveBeenCalledTimes(2);
+
+    providerResultCode = 0;
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback({
+      CallbackMetadata: { Item: [
+        { Name: 'Amount', Value: depositAmount },
+        { Name: 'MpesaReceiptNumber', Value: 'DEPOSITAFTER4999' },
+        { Name: 'PhoneNumber', Value: 254712345678 },
+      ] },
+    }));
+
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(queryStkStatus).toHaveBeenCalledTimes(3);
+  });
+
   it('binds and settles a valid callback that arrives before the STK response identifiers are persisted', async () => {
     const depositAmount = 1250;
     const depositRequest = {
@@ -373,6 +425,57 @@ describe('M-Pesa payment callback reconciliation', () => {
     expect(postLedger).not.toHaveBeenCalled();
   });
 
+  it('rejects wallet deposit callback amount and currency mismatches without crediting', async () => {
+    const depositRequest = {
+      ...activationRequestRecord,
+      policySnapshot: { purpose: 'WALLET_DEPOSIT', amountKes: 1250, currency: 'KES' },
+      paymentTransaction: {
+        ...activationRequestRecord.paymentTransaction,
+        type: PaymentType.WALLET_DEPOSIT,
+        amountKes: 1250,
+      },
+    };
+    (prisma.activationPaymentRequest.findUnique as jest.Mock).mockResolvedValue(depositRequest);
+
+    await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback({
+      CallbackMetadata: { Item: [
+        { Name: 'Amount', Value: 1249 },
+        { Name: 'MpesaReceiptNumber', Value: 'AMOUNTMISMATCH1' },
+        { Name: 'PhoneNumber', Value: 254712345678 },
+      ] },
+    }))).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
+
+    (prisma.activationPaymentRequest.findUnique as jest.Mock).mockResolvedValue({
+      ...depositRequest,
+      paymentTransaction: { ...depositRequest.paymentTransaction, currency: 'USD' },
+    });
+    await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback({
+      CallbackMetadata: { Item: [
+        { Name: 'Amount', Value: 1250 },
+        { Name: 'MpesaReceiptNumber', Value: 'CURRENCYMISMATCH1' },
+        { Name: 'PhoneNumber', Value: 254712345678 },
+      ] },
+    }))).rejects.toBeInstanceOf(ForbiddenException);
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
+  });
+
+  it('does not credit a deposit when the trusted payment belongs to another customer', async () => {
+    (prisma.activationPaymentRequest.findUnique as jest.Mock).mockResolvedValue({
+      ...activationRequestRecord,
+      paymentTransaction: { ...activationRequestRecord.paymentTransaction, userId: 'different-customer-id' },
+    });
+
+    await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
+      .rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(queryStkStatus).not.toHaveBeenCalled();
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['checkout', 'different-checkout', merchantRequestId],
     ['merchant', checkoutRequestId, 'different-merchant'],
@@ -410,10 +513,10 @@ describe('M-Pesa payment callback reconciliation', () => {
     }
   });
 
-  it('acknowledges a concurrent duplicate only when the matching callback event exists', async () => {
+  it.each(['P2002', 'P2034'])('acknowledges a concurrent duplicate only when the matching callback event exists (%s)', async (code) => {
     nextTransactionError = new Prisma.PrismaClientKnownRequestError(
-      'Unique constraint failed',
-      { code: 'P2002', clientVersion: '6.19.3' },
+      'Concurrent callback settlement conflict',
+      { code, clientVersion: '6.19.3' },
     );
     const payload = successfulCallback();
     const payloadHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');

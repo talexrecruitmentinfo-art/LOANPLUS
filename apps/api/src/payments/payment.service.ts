@@ -2004,7 +2004,9 @@ export class PaymentService {
         where: { activationPaymentRequestId: request.id, payloadHash },
         select: { id: true },
       });
-      if (priorEvent) return { ResultCode: 0, ResultDesc: 'Accepted' };
+      if (priorEvent && request.paymentTransaction.status === PaymentStatus.CONFIRMED) {
+        return { ResultCode: 0, ResultDesc: 'Accepted' };
+      }
 
       step = 'PROVIDER_STATUS_QUERY';
       const providerStatus = await this.mpesa.queryStkStatus(
@@ -2410,7 +2412,8 @@ export class PaymentService {
         });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && payloadHash) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2002' || error.code === 'P2034') && payloadHash) {
         const duplicateEvent = await this.prisma.paymentCallbackEvent.findFirst({
           where: { activationPaymentRequestId: request.id, payloadHash },
           select: { id: true },
@@ -2454,14 +2457,15 @@ export class PaymentService {
       if (boundRequest.count !== 1) {
         throw new ConflictException('Payment provider identifiers could not be safely associated.');
       }
-      await tx.paymentCallbackEvent.create({
-        data: {
+      await tx.paymentCallbackEvent.createMany({
+        data: [{
           activationPaymentRequestId: request.id,
           paymentTransactionId: request.paymentTransactionId,
           payloadHash,
           providerResultCode: String(resultCode),
           providerReceiptReference: null,
-        },
+        }],
+        skipDuplicates: true,
       });
       await tx.paymentTransaction.updateMany({
         where: { id: request.paymentTransactionId, status: PaymentStatus.PENDING },
