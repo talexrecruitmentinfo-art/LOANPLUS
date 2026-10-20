@@ -141,6 +141,7 @@ export class AdminService {
           { id: { contains: query, mode: 'insensitive' } },
           { fullName: { contains: query, mode: 'insensitive' } },
           { email: { contains: query, mode: 'insensitive' } },
+          { phone: { contains: query, mode: 'insensitive' } },
         ],
       });
     }
@@ -456,16 +457,17 @@ export class AdminService {
   async updateCustomerIdentityStatus(
     id: string,
     status: IdentityStatus,
-    reason: string,
+    reason: string | undefined,
     reviewConfirmed: boolean,
     adminId: string,
     ip?: string,
   ) {
-    const normalizedReason = reason.trim().replace(/\s+/g, ' ');
+    const normalizedReason = reason?.trim().replace(/\s+/g, ' ') ?? '';
     if (status !== IdentityStatus.VERIFIED && status !== IdentityStatus.REJECTED) {
       throw new BadRequestException('Identity status decisions must be VERIFIED or REJECTED.');
     }
-    if (normalizedReason.length < 10 || normalizedReason.length > 500) {
+    if ((status === IdentityStatus.REJECTED || normalizedReason.length > 0) &&
+      (normalizedReason.length < 10 || normalizedReason.length > 500)) {
       throw new BadRequestException('A decision reason between 10 and 500 characters is required.');
     }
     if (/\b\d(?:[\s-]*\d){6,11}\b/.test(normalizedReason)) {
@@ -517,7 +519,7 @@ export class AdminService {
           subjectType: 'CUSTOMER',
           subjectId: id,
           outcome: 'SUCCESS',
-          reason: normalizedReason,
+          reason: normalizedReason || 'Approved after completed identity review.',
           createdAt: new Date(),
           details: {
             before: { identityStatus: customer.identityStatus },

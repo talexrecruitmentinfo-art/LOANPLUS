@@ -6,14 +6,17 @@ const customerPage = await readFile(new URL('../src/app/admin/customers/page.tsx
 const loanPage = await readFile(new URL('../src/app/admin/loans/page.tsx', import.meta.url), 'utf8');
 const profilePage = await readFile(new URL('../src/app/profile/page.tsx', import.meta.url), 'utf8');
 const trustPage = await readFile(new URL('../src/app/trust/page.tsx', import.meta.url), 'utf8');
+const styles = await readFile(new URL('../src/app/admin.css', import.meta.url), 'utf8');
 
-test('Admin identity decisions require confirmation, review evidence, and a reason, then refresh status', () => {
+test('Admin identity approval needs review confirmation but no reason; rejection retains its required reason', () => {
   assert.match(customerPage, /Identity status<\/h3>/);
-  assert.match(customerPage, /Mark as Verified/);
+  assert.match(customerPage, /'Approve'/);
   assert.match(customerPage, /Reject verification/);
-  assert.match(customerPage, /window\.confirm\(/);
   assert.match(customerPage, /required identity review using approved evidence/);
-  assert.match(customerPage, /identityReason[\s\S]*minLength=\{10\}[\s\S]*required/);
+  assert.match(customerPage, /Reason for rejection<textarea name="identityReason" minLength=\{10\} maxLength=\{500\} rows=\{2\} required/);
+  assert.match(customerPage, /body: JSON\.stringify\(\{ status, \.\.\.\(status === 'REJECTED' \? \{ reason \} : \{\}\), reviewConfirmed \}\)/);
+  assert.match(customerPage, /identityRequestInFlight\.current/);
+  assert.match(customerPage, /setIdentityBusy\(true\)/);
   assert.match(customerPage, /identity-status/);
   assert.match(customerPage, /reviewConfirmed:/);
   assert.match(customerPage, /identityReview\?\.reviewerEmail/);
@@ -21,6 +24,19 @@ test('Admin identity decisions require confirmation, review evidence, and a reas
   assert.match(customerPage, /setCustomerDetail\(refreshed\)/);
   assert.match(customerPage, /await refresh\(\)/);
   assert.match(customerPage, /Never enter National ID numbers, phone numbers, or document details/);
+});
+
+test('customer details use responsive label-value layout and compact status badges', () => {
+  assert.match(customerPage, /admin-customer-value-wide/);
+  assert.match(customerPage, /Show full customer ID/);
+  assert.match(customerPage, /admin-customer-long-value/);
+  assert.match(customerPage, /data-label="Registered"/);
+  assert.match(customerPage, /admin-customer-status/);
+  assert.match(customerPage, /admin-customer-table/);
+  assert.match(customerPage, /Search name, email, phone or customer ID/);
+  assert.match(styles, /admin-customer-table \.admin-customer-list-row/);
+  assert.match(styles, /overflow-wrap:anywhere/);
+  assert.match(styles, /admin-customer-detail-grid\{display:grid;grid-template-columns:repeat\(auto-fit/);
 });
 
 test('identity status remains visible in relevant customer and loan review screens', () => {

@@ -85,7 +85,7 @@ describe('AdminController listing filters', () => {
     );
   });
 
-  it('forwards identity decisions only with the authenticated Admin actor and review confirmation', async () => {
+  it('forwards reasonless identity approval with the authenticated Admin actor and review confirmation', async () => {
     admin.updateCustomerIdentityStatus.mockResolvedValue({
       id: 'customer-id',
       identityStatus: 'VERIFIED',
@@ -95,14 +95,13 @@ describe('AdminController listing filters', () => {
 
     await controller.updateCustomerIdentityStatus('customer-id', {
       status: 'VERIFIED',
-      reason: 'Reviewed approved identity evidence',
       reviewConfirmed: true,
     }, request);
 
     expect(admin.updateCustomerIdentityStatus).toHaveBeenCalledWith(
       'customer-id',
       'VERIFIED',
-      'Reviewed approved identity evidence',
+      undefined,
       true,
       'superadmin-id',
       '127.0.0.1',

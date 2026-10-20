@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { IdentityStatus, PaymentStatus, PaymentType } from '@prisma/client';
-import { IsBoolean, IsDateString, IsIn, IsString, Length, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsDateString, IsIn, IsOptional, IsString, Length, MaxLength, MinLength } from 'class-validator';
 import { Throttle } from '@nestjs/throttler';
 import type { AuthenticatedRequest } from '../auth/request.types';
 import { AuthService } from '../auth/auth.service';
@@ -34,9 +34,10 @@ class UpdateCustomerIdentityStatusDto {
   @IsIn([IdentityStatus.VERIFIED, IdentityStatus.REJECTED])
   status!: IdentityStatus;
 
+  @IsOptional()
   @IsString()
   @Length(10, 500)
-  reason!: string;
+  reason?: string;
 
   @IsBoolean()
   reviewConfirmed!: boolean;

@@ -23,6 +23,7 @@ describe('AdminService financial and account views', () => {
           { id: { contains: 'Amina', mode: 'insensitive' } },
           { fullName: { contains: 'Amina', mode: 'insensitive' } },
           { email: { contains: 'Amina', mode: 'insensitive' } },
+          { phone: { contains: 'Amina', mode: 'insensitive' } },
         ] },
         { isActive: true },
         { identityStatus: 'VERIFIED' },
@@ -348,6 +349,39 @@ describe('AdminService financial and account views', () => {
       });
     });
 
+    it('approves without a typed reason and records a default audit note', async () => {
+      const tx = {
+        user: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: 'customer-id',
+            role: 'NORMAL_USER',
+            identityStatus: IdentityStatus.PENDING,
+          }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+        adminAuditLog: { create: jest.fn().mockResolvedValue({ id: 'audit-id' }) },
+      };
+      const service = new AdminService({
+        $transaction: jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+      } as unknown as PrismaService);
+
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.VERIFIED, undefined, true, 'superadmin-id',
+      )).resolves.toMatchObject({ identityStatus: IdentityStatus.VERIFIED, changed: true });
+      expect(tx.adminAuditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          superadminId: 'superadmin-id',
+          action: 'CUSTOMER_IDENTITY_VERIFIED',
+          subjectId: 'customer-id',
+          reason: 'Approved after completed identity review.',
+          details: {
+            before: { identityStatus: IdentityStatus.PENDING },
+            after: { identityStatus: IdentityStatus.VERIFIED },
+          },
+        }),
+      });
+    });
+
     it('rejects missing review confirmation, invalid decision states, short notes, and National ID-like numbers', async () => {
       const service = new AdminService({} as PrismaService);
       await expect(service.updateCustomerIdentityStatus(
@@ -358,6 +392,9 @@ describe('AdminService financial and account views', () => {
       )).rejects.toBeInstanceOf(BadRequestException);
       await expect(service.updateCustomerIdentityStatus(
         'customer-id', IdentityStatus.REJECTED, 'Too short', true, 'superadmin-id',
+      )).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.updateCustomerIdentityStatus(
+        'customer-id', IdentityStatus.REJECTED, undefined, true, 'superadmin-id',
       )).rejects.toBeInstanceOf(BadRequestException);
       await expect(service.updateCustomerIdentityStatus(
         'customer-id', IdentityStatus.REJECTED, 'National ID 1234 5678 was checked', true, 'superadmin-id',
