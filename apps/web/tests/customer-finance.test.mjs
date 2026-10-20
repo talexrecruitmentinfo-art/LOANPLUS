@@ -40,7 +40,7 @@ test('wallet and transactions are loaded from authenticated ledger endpoints wit
   assert.match(wallet, /pollWalletDepositStatus/);
   assert.doesNotMatch(wallet, /window\.setInterval\(\(\) => void refresh\(\), 5_000\)/);
   assert.doesNotMatch(wallet, /setWallet\(\(current\) => \(\{[^}]*balanceKes/);
-  assert.match(wallet, /A new deposit is unavailable until safely resolved/);
+  assert.doesNotMatch(wallet, /A new deposit is unavailable until safely resolved/);
   assert.match(wallet, /wallet repayment/);
   assert.match(wallet, /Load more transactions/);
   assert.match(wallet, /Confirm an M-Pesa wallet deposit/);
@@ -74,11 +74,13 @@ test('wallet deposit form stays closed until requested and never reports success
   assert.match(depositPanel, /Boolean\(depositQuoteError\)/);
   assert.match(wallet, /disabled=\{walletActionBusy \|\| loading \|\| depositQuoteLoading/);
   assert.match(wallet, /Checking whether wallet deposits are available…/);
-  assert.match(wallet, /Automatic checking runs for up to 1 minute/);
-  assert.match(wallet, /Automatic checking has stopped; it may still complete/);
+  assert.match(wallet, /Earlier M-Pesa request \$\{unresolvedLegacyDeposit\.reference\} may still complete/);
+  assert.match(wallet, /Starting another deposit could charge you twice/);
+  assert.match(wallet, /acknowledgePendingDepositRisk: true/);
+  assert.match(wallet, /Deposits are available\$\{/);
   assert.match(wallet, /Check status/);
   assert.match(wallet, /Request payment reconciliation/);
-  assert.match(wallet, /Previous deposit \$\{selectedDepositReference\} is awaiting Safaricom confirmation/);
+  assert.doesNotMatch(wallet, /Previous deposit \$\{selectedDepositReference\} is awaiting Safaricom confirmation/);
   assert.match(wallet, /shouldClearWalletDepositTracking/);
   assert.match(wallet, /depositStatus\?\.reference === selectedDepositReference/);
   assert.match(wallet, /depositReferenceRef\.current !== reference/);

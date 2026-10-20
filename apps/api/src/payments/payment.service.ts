@@ -64,12 +64,19 @@ const RETRYABLE_WALLET_FAILURE_CODES = [
   'MPESA_CONFIGURATION_FAILED',
   'MPESA_STK_REJECTED',
 ] as const;
+const LEGACY_UNRESOLVED_WALLET_DEPOSIT_REFERENCE = 'LPDF2A72DD1F0B7231E1B2FF524CA050A7D';
 const logger = new Logger('PaymentService');
 
-function unresolvedWalletDepositFilter(userId: string): Prisma.PaymentTransactionWhereInput {
+function unresolvedWalletDepositFilter(
+  userId: string,
+  excludeLegacyUnresolvedDeposit = true,
+): Prisma.PaymentTransactionWhereInput {
   return {
     userId,
     type: PaymentType.WALLET_DEPOSIT,
+    ...(excludeLegacyUnresolvedDeposit
+      ? { NOT: { internalReference: LEGACY_UNRESOLVED_WALLET_DEPOSIT_REFERENCE } }
+      : {}),
     OR: [
       { status: PaymentStatus.PENDING },
       {
@@ -256,23 +263,38 @@ export class PaymentService {
         createdAt: true,
       },
     });
-    if (!pendingDeposit) {
-      return { canInitiateNewDeposit: true, pendingDeposit: null, message: null };
+    if (pendingDeposit) {
+      return {
+        canInitiateNewDeposit: false,
+        pendingDeposit: {
+          reference: pendingDeposit.internalReference,
+          amountKes: pendingDeposit.amountKes,
+          currency: pendingDeposit.currency,
+          status: this.getWalletDepositEffectiveStatus(
+            pendingDeposit.status,
+            pendingDeposit.failureCode,
+            pendingDeposit.receiptReference,
+          ),
+          createdAt: pendingDeposit.createdAt,
+        },
+        pendingRiskAcknowledgment: null,
+        message: 'A previous wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.',
+      };
     }
-    return {
-      canInitiateNewDeposit: false,
-      pendingDeposit: {
-        reference: pendingDeposit.internalReference,
-        amountKes: pendingDeposit.amountKes,
-        currency: pendingDeposit.currency,
-        status: this.getWalletDepositEffectiveStatus(
-          pendingDeposit.status,
-          pendingDeposit.failureCode,
-          pendingDeposit.receiptReference,
-        ),
-        createdAt: pendingDeposit.createdAt,
+    const legacyUnresolvedDeposit = await this.prisma.paymentTransaction.findFirst({
+      where: {
+        ...unresolvedWalletDepositFilter(userId, false),
+        internalReference: LEGACY_UNRESOLVED_WALLET_DEPOSIT_REFERENCE,
       },
-      message: 'A previous wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.',
+      select: { internalReference: true },
+    });
+    return {
+      canInitiateNewDeposit: true,
+      pendingDeposit: null,
+      pendingRiskAcknowledgment: legacyUnresolvedDeposit
+        ? { reference: legacyUnresolvedDeposit.internalReference }
+        : null,
+      message: null,
     };
   }
 
@@ -352,6 +374,20 @@ export class PaymentService {
             },
             created: false,
           };
+        }
+        if (dto.acknowledgePendingDepositRisk !== true) {
+          const legacyUnresolved = await tx.paymentTransaction.findFirst({
+            where: {
+              ...unresolvedWalletDepositFilter(userId, false),
+              internalReference: LEGACY_UNRESOLVED_WALLET_DEPOSIT_REFERENCE,
+            },
+            select: { id: true },
+          });
+          if (legacyUnresolved) {
+            throw new BadRequestException(
+              'Acknowledge that the earlier M-Pesa request may still complete before starting another deposit.',
+            );
+          }
         }
         const created = await tx.paymentTransaction.create({
           data: {

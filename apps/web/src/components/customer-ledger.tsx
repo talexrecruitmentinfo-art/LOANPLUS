@@ -27,6 +27,7 @@ interface WalletDepositQuote {
 
 interface WalletDepositEligibility {
   canInitiateNewDeposit: boolean;
+  pendingRiskAcknowledgment: { reference: string } | null;
   pendingDeposit: {
     reference: string;
     amountKes: number;
@@ -502,7 +503,6 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
       setWalletActionError('Enter an amount within the approved wallet deposit limits.');
       return;
     }
-    if (!window.confirm(`Confirm an M-Pesa wallet deposit of ${formatMoney(amountKes)}?`)) return;
     walletActionBusyRef.current = true;
     setWalletActionBusy(true);
     setWalletActionError('');
@@ -513,6 +513,14 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
       if (!eligibility.canInitiateNewDeposit) {
         throw new Error(eligibility.message || 'A previous wallet deposit remains unresolved.');
       }
+      const unresolvedLegacyDeposit = eligibility.pendingRiskAcknowledgment;
+      const acknowledgePendingDepositRisk = unresolvedLegacyDeposit
+        ? window.confirm(
+          `Earlier M-Pesa request ${unresolvedLegacyDeposit.reference} may still complete. ` +
+          `Starting another deposit could charge you twice. Continue with a ${formatMoney(amountKes)} deposit?`,
+        )
+        : window.confirm(`Confirm an M-Pesa wallet deposit of ${formatMoney(amountKes)}?`);
+      if (!acknowledgePendingDepositRisk) return;
       await apiRequest<WalletDepositQuote>(
         `/payments/wallet-deposit-quote?amountKes=${encodeURIComponent(amountKes)}`,
         { cache: 'no-store' },
@@ -520,7 +528,11 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
       const result = await apiRequest<{ reference: string; status: string; message: string }>('/payments/wallet-deposits', {
         method: 'POST',
         headers: { 'Idempotency-Key': crypto.randomUUID() },
-        body: JSON.stringify({ amountKes, mpesaPhoneNumber: normalizedPhoneNumber }),
+        body: JSON.stringify({
+          amountKes,
+          mpesaPhoneNumber: normalizedPhoneNumber,
+          ...(unresolvedLegacyDeposit && { acknowledgePendingDepositRisk: true }),
+        }),
       });
       depositReferenceRef.current = result.reference;
       setDepositReference(result.reference);
@@ -642,11 +654,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
           <p className="form-error" role="status" key={reason}>{reason}</p>)}
         {selectedDepositReference && displayedDepositStatus && <div className="wallet-deposit-pending" aria-live="polite">
           <p role="status">
-            {displayedDepositStatus === 'PENDING'
-              ? depositPollingTimedOut
-                ? `Previous deposit ${selectedDepositReference} remains unresolved. Automatic checking has stopped; it may still complete. A new deposit is unavailable until safely resolved.`
-                : `Previous deposit ${selectedDepositReference} is awaiting Safaricom confirmation. Automatic checking runs for up to 1 minute; a new deposit is unavailable until safely resolved.`
-              : `Payment status: ${displayedDepositStatus?.replaceAll('_', ' ') ?? 'being checked'} · Reference ${selectedDepositReference}.`}
+            {`Payment status: ${displayedDepositStatus?.replaceAll('_', ' ') ?? 'being checked'} · Reference ${selectedDepositReference}.${depositPollingTimedOut ? ' Automatic status checks have stopped.' : ''}`}
           </p>
           {depositStatusError && <p className="form-error" role="alert">{depositStatusError}</p>}
           {displayedDepositStatus === 'PENDING' && <>

@@ -126,6 +126,9 @@ test('component follows backend retry eligibility and guards unresolved deposit 
   assert.match(walletComponent, /shouldClearWalletDepositTracking/);
   assert.match(walletComponent, /setDepositPollingTimedOut\(false\)/);
   assert.match(walletComponent, /Request payment reconciliation/);
+  assert.doesNotMatch(walletComponent, /A new deposit is unavailable until safely resolved/);
+  assert.doesNotMatch(walletComponent, /Previous deposit \$\{selectedDepositReference\} is awaiting Safaricom confirmation/);
+  assert.match(walletComponent, /Starting another deposit could charge you twice/);
   assert.doesNotMatch(walletComponent, /Boolean\(unresolvedDepositRecord\)/);
   assert.doesNotMatch(walletComponent, /walletActionBusyRef\.current \|\| unresolvedDeposit \|\| statusCheckBusy\.current/);
   assert.match(walletComponent, /checkDepositStatus\(selectedDepositReference\)/);

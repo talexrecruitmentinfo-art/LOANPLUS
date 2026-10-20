@@ -1,4 +1,4 @@
-import { Equals, IsInt, IsString, Length, Matches, Min } from 'class-validator';
+import { Equals, IsInt, IsOptional, IsString, Length, Matches, Min } from 'class-validator';
 
 export class InitiateLoanProcessingFeeDto {
   @IsString()
@@ -18,6 +18,10 @@ export class WalletDepositDto {
   @IsInt()
   @Min(1)
   amountKes!: number;
+
+  @IsOptional()
+  @Equals(true)
+  acknowledgePendingDepositRisk?: true;
 
   @IsString()
   @Length(9, 16)

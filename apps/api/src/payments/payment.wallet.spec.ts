@@ -33,11 +33,19 @@ describe('M-Pesa wallet deposit initiation', () => {
       checkoutRequestId: 'checkout-test',
       merchantRequestId: 'merchant-test',
     }));
+    const findUnresolvedPayment = jest.fn(async ({ where }: { where: Record<string, unknown> }) => {
+      if (!unresolvedPayment) return null;
+      const exactReference = where.internalReference;
+      const excludedReference = (where.NOT as { internalReference?: string } | undefined)?.internalReference;
+      if (exactReference && exactReference !== unresolvedPayment.internalReference) return null;
+      if (excludedReference === unresolvedPayment.internalReference) return null;
+      return unresolvedPayment;
+    });
     const transactionClient = {
       paymentTransaction: {
         findUnique: jest.fn(async ({ where }: { where: { idempotencyKey: string } }) =>
           payment?.idempotencyKey === where.idempotencyKey ? payment : null),
-        findFirst: jest.fn(async () => unresolvedPayment),
+        findFirst: findUnresolvedPayment,
         create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
           payment = {
             id: 'wallet-payment-id',
@@ -60,7 +68,7 @@ describe('M-Pesa wallet deposit initiation', () => {
       paymentTransaction: {
         findUnique: jest.fn(async ({ where }: { where: { idempotencyKey: string } }) =>
           payment?.idempotencyKey === where.idempotencyKey ? payment : null),
-        findFirst: jest.fn(async () => unresolvedPayment),
+        findFirst: findUnresolvedPayment,
         updateMany: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
           if (payment) payment = { ...payment, ...data };
           return { count: 1 };
@@ -110,9 +118,10 @@ describe('M-Pesa wallet deposit initiation', () => {
     else process.env.MPESA_CALLBACK_URL = environment.callbackUrl;
   });
 
-  const depositRequest = () => Object.assign(new WalletDepositDto(), {
+  const depositRequest = (acknowledgePendingDepositRisk = false) => Object.assign(new WalletDepositDto(), {
     amountKes: 500,
     mpesaPhoneNumber: '+254712345678',
+    ...(acknowledgePendingDepositRisk && { acknowledgePendingDepositRisk: true as const }),
   });
 
   it('persists a distinct wallet deposit before issuing one STK request', async () => {
@@ -159,26 +168,49 @@ describe('M-Pesa wallet deposit initiation', () => {
     expect(stkRequest).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps a pending deposit ineligible despite the separate wallet-product approval reference', async () => {
-    unresolvedPayment = {
+  it('allows a new deposit past the specific legacy unresolved reference after risk acknowledgment', async () => {
+    const legacyPayment = {
       id: 'existing-payment',
       internalReference: 'LPDF2A72DD1F0B7231E1B2FF524CA050A7D',
       amountKes: 65,
       currency: 'KES',
       status: 'PENDING',
+      callbackEvidence: { resultCode: 4999, received: true },
       createdAt: new Date(),
     };
+    unresolvedPayment = legacyPayment;
     const eligibility = await service.getWalletDepositEligibility('customer-id');
 
-    expect(eligibility).toMatchObject({
-      canInitiateNewDeposit: false,
-      pendingDeposit: {
-        reference: 'LPDF2A72DD1F0B7231E1B2FF524CA050A7D',
-        amountKes: 65,
-        status: 'PENDING',
-      },
+    expect(eligibility).toEqual({
+      canInitiateNewDeposit: true,
+      pendingDeposit: null,
+      pendingRiskAcknowledgment: { reference: legacyPayment.internalReference },
+      message: null,
     });
-    expect(unresolvedPayment).toMatchObject({ status: 'PENDING' });
+    await expect(service.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(),
+      'wallet-deposit-legacy-no-ack',
+    )).rejects.toThrow('Acknowledge that the earlier M-Pesa request may still complete');
+    expect(stkRequest).not.toHaveBeenCalled();
+
+    const result = await service.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(true),
+      'wallet-deposit-legacy-acknowledged',
+    );
+    expect(result.status).toBe('PENDING');
+    expect(result.reference).not.toBe(legacyPayment.internalReference);
+    expect(payment).toMatchObject({
+      internalReference: expect.not.stringMatching(/^LPDF2A72DD1F0B7231E1B2FF524CA050A7D$/),
+      status: 'PENDING',
+    });
+    expect(legacyPayment).toMatchObject({
+      internalReference: 'LPDF2A72DD1F0B7231E1B2FF524CA050A7D',
+      status: 'PENDING',
+      callbackEvidence: { resultCode: 4999, received: true },
+    });
+    expect(stkRequest).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a legacy 4999 deposit ineligible and exposes it as pending without rewriting it', async () => {
@@ -281,6 +313,7 @@ describe('M-Pesa wallet deposit initiation', () => {
     await expect(service.getWalletDepositEligibility('customer-id')).resolves.toEqual({
       canInitiateNewDeposit: true,
       pendingDeposit: null,
+      pendingRiskAcknowledgment: null,
       message: null,
     });
   });
