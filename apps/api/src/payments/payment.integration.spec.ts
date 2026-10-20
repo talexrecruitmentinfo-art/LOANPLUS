@@ -306,6 +306,10 @@ describe('loan processing-fee payment database integration', () => {
       'wallet-deposit-integration-01',
     );
     expect(started).toMatchObject({ status: 'PENDING', amountKes, currency: 'KES' });
+    await expect(payments.getWalletDepositEligibility(userId)).resolves.toMatchObject({
+      canInitiateNewDeposit: false,
+      pendingDeposit: { reference: started.reference, status: 'PENDING' },
+    });
     const payment = await prisma.paymentTransaction.findUniqueOrThrow({
       where: { internalReference: started.reference },
     });
@@ -354,5 +358,30 @@ describe('loan processing-fee payment database integration', () => {
         transaction: expect.objectContaining({ transactionType: 'WALLET_DEPOSIT', status: 'POSTED' }),
       }),
     ]));
+
+    await expect(payments.getWalletDepositEligibility(userId)).resolves.toMatchObject({
+      canInitiateNewDeposit: true,
+      pendingDeposit: null,
+    });
+    const secondStarted = await payments.initiateWalletDeposit(
+      userId,
+      Object.assign(new WalletDepositDto(), { amountKes: 1300, mpesaPhoneNumber: '+254712345678' }),
+      'wallet-deposit-integration-02',
+    );
+    const secondPayment = await prisma.paymentTransaction.findUniqueOrThrow({
+      where: { internalReference: secondStarted.reference },
+    });
+    await payments.handleMpesaCallback(callbackToken, payload);
+
+    const [firstAfterLateCallback, secondAfterLateCallback, firstEntriesAfterLateCallback, secondEntries] = await Promise.all([
+      prisma.paymentTransaction.findUniqueOrThrow({ where: { id: payment.id } }),
+      prisma.paymentTransaction.findUniqueOrThrow({ where: { id: secondPayment.id } }),
+      prisma.ledgerEntry.findMany({ where: { transaction: { paymentId: payment.id } } }),
+      prisma.ledgerEntry.findMany({ where: { transaction: { paymentId: secondPayment.id } } }),
+    ]);
+    expect(firstAfterLateCallback).toMatchObject({ status: 'CONFIRMED', internalReference: started.reference });
+    expect(secondAfterLateCallback).toMatchObject({ status: 'PENDING', internalReference: secondStarted.reference });
+    expect(firstEntriesAfterLateCallback).toHaveLength(2);
+    expect(secondEntries).toHaveLength(0);
   });
 });

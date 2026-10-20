@@ -95,10 +95,12 @@ test('status request failures stop the automatic loop so the customer can retry 
   assert.equal(requests, 1);
 });
 
-test('component keeps unresolved deposits blocking, uses a one-shot manual check, and guards stale references', () => {
+test('component follows backend retry eligibility and guards unresolved deposit status checks', () => {
   assert.match(walletComponent, /payments\s*\.filter\(\(payment\) => payment\.type === 'WALLET_DEPOSIT'/);
-  assert.match(walletComponent, /Boolean\(unresolvedDepositRecord\)/);
-  assert.match(walletComponent, /walletActionBusyRef\.current \|\| unresolvedDeposit \|\| statusCheckBusy\.current/);
+  assert.match(walletComponent, /apiRequest<WalletDepositEligibility>\([\s\S]*?\/payments\/wallet-deposit-eligibility/);
+  assert.match(walletComponent, /depositEligibility\?\.canInitiateNewDeposit !== true/);
+  assert.doesNotMatch(walletComponent, /Boolean\(unresolvedDepositRecord\)/);
+  assert.doesNotMatch(walletComponent, /walletActionBusyRef\.current \|\| unresolvedDeposit \|\| statusCheckBusy\.current/);
   assert.match(walletComponent, /checkDepositStatus\(selectedDepositReference\)/);
   assert.match(walletComponent, /statusCheckController\.current\?\.abort\(\)/);
   assert.match(walletComponent, /depositReferenceRef\.current !== reference/);

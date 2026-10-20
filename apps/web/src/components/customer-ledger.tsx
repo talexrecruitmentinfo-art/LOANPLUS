@@ -22,6 +22,18 @@ interface WalletDepositQuote {
   unavailableReasons: string[];
 }
 
+interface WalletDepositEligibility {
+  canInitiateNewDeposit: boolean;
+  pendingDeposit: {
+    reference: string;
+    amountKes: number;
+    currency: string;
+    status: string;
+    createdAt: string;
+  } | null;
+  message: string | null;
+}
+
 interface EligibleLoan {
   id: string;
   status: string;
@@ -89,6 +101,9 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
   const [depositQuote, setDepositQuote] = useState<WalletDepositQuote | null>(null);
   const [depositQuoteError, setDepositQuoteError] = useState('');
   const [depositQuoteLoading, setDepositQuoteLoading] = useState(false);
+  const [depositEligibility, setDepositEligibility] = useState<WalletDepositEligibility | null>(null);
+  const [depositEligibilityError, setDepositEligibilityError] = useState('');
+  const [depositEligibilityLoading, setDepositEligibilityLoading] = useState(false);
   const [eligibleLoans, setEligibleLoans] = useState<EligibleLoan[] | null>(null);
   const [repaymentReadiness, setRepaymentReadiness] = useState<WalletRepaymentReadiness | null>(null);
   const [serviceErrors, setServiceErrors] = useState<string[]>([]);
@@ -107,6 +122,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
   const [depositPollingTimedOut, setDepositPollingTimedOut] = useState(false);
   const refreshSequence = useRef(0);
   const quoteSequence = useRef(0);
+  const eligibilitySequence = useRef(0);
   const quoteController = useRef<AbortController | null>(null);
   const depositReferenceRef = useRef('');
   const depositPollingWindow = useRef<{ reference: string; startedAt: number; stopped: boolean } | null>(null);
@@ -205,6 +221,30 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
     }
   }, []);
 
+  const loadDepositEligibility = useCallback(async () => {
+    const requestId = ++eligibilitySequence.current;
+    setDepositEligibilityLoading(true);
+    setDepositEligibilityError('');
+    try {
+      const eligibility = await apiRequest<WalletDepositEligibility>(
+        '/payments/wallet-deposit-eligibility',
+        { cache: 'no-store' },
+      );
+      if (requestId !== eligibilitySequence.current) return null;
+      setDepositEligibility(eligibility);
+      return eligibility;
+    } catch (reason) {
+      if (requestId !== eligibilitySequence.current) return null;
+      setDepositEligibility(null);
+      setDepositEligibilityError(reason instanceof Error
+        ? reason.message
+        : 'Deposit retry eligibility could not be checked.');
+      return null;
+    } finally {
+      if (requestId === eligibilitySequence.current) setDepositEligibilityLoading(false);
+    }
+  }, []);
+
   const loadMoreEntries = useCallback(async () => {
     if (!nextEntryCursor || loadingMoreEntries) return;
     const requestId = refreshSequence.current;
@@ -242,6 +282,12 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
     };
   }, [loadDepositQuote, view]);
 
+  useEffect(() => {
+    if (view !== 'wallet') return;
+    void loadDepositEligibility();
+    return () => { eligibilitySequence.current += 1; };
+  }, [loadDepositEligibility, view]);
+
   const filteredEntries = useMemo(() => entries.filter((entry) => {
     const query = search.trim().toLowerCase();
     const matchesQuery = !query || [
@@ -260,13 +306,13 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
     .filter((payment) => payment.type === 'WALLET_DEPOSIT' &&
       (payment.status === 'PENDING' || payment.unresolved))
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0];
-  const selectedDepositReference = unresolvedDepositRecord?.internalReference || depositReference;
+  const unresolvedDepositReference =
+    depositEligibility?.pendingDeposit?.reference ?? unresolvedDepositRecord?.internalReference;
+  const selectedDepositReference = unresolvedDepositReference || depositReference;
   const trackedDeposit = payments.find((payment) => payment.internalReference === selectedDepositReference);
   const displayedDepositStatus = depositStatus?.reference === selectedDepositReference
     ? depositStatus.status
-    : trackedDeposit?.status ?? unresolvedDepositRecord?.status ?? null;
-  const unresolvedDeposit = Boolean(unresolvedDepositRecord) ||
-    (displayedDepositStatus === 'PENDING' && Boolean(selectedDepositReference));
+    : trackedDeposit?.status ?? depositEligibility?.pendingDeposit?.status ?? unresolvedDepositRecord?.status ?? null;
 
   const applyDepositStatus = useCallback(async (reference: string, status: string) => {
     if (!componentMounted.current || depositReferenceRef.current !== reference) return;
@@ -283,6 +329,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
     if (pollingWindow?.reference === reference) pollingWindow.stopped = true;
     setDepositPollingTimedOut(false);
     const refreshedPayments = await refresh();
+    await loadDepositEligibility();
     if (!componentMounted.current || depositReferenceRef.current !== reference) return;
     if (!refreshedPayments) {
       setDepositStatusError('The payment status was received, but wallet activity could not be refreshed. Check status again.');
@@ -304,13 +351,13 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         `The deposit ${status.toLowerCase()}.`,
       );
     }
-  }, [refresh, trackedDeposit?.amountKes]);
+  }, [loadDepositEligibility, refresh, trackedDeposit?.amountKes]);
   applyDepositStatusRef.current = applyDepositStatus;
 
   useEffect(() => {
-    if (view !== 'wallet' || !unresolvedDepositRecord ||
-      depositReferenceRef.current === unresolvedDepositRecord.internalReference) return;
-    const reference = unresolvedDepositRecord.internalReference;
+    if (view !== 'wallet' || !unresolvedDepositReference ||
+      depositReferenceRef.current === unresolvedDepositReference) return;
+    const reference = unresolvedDepositReference;
     depositReferenceRef.current = reference;
     statusCheckController.current?.abort();
     statusCheckController.current = null;
@@ -318,8 +365,11 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
     setDepositStatusChecking(false);
     depositPollingWindow.current = { reference, startedAt: Date.now(), stopped: false };
     setDepositReference(reference);
-    setDepositStatus({ reference, status: unresolvedDepositRecord.status });
-  }, [unresolvedDepositRecord, view]);
+    setDepositStatus({
+      reference,
+      status: depositEligibility?.pendingDeposit?.status ?? unresolvedDepositRecord?.status ?? 'PENDING',
+    });
+  }, [depositEligibility?.pendingDeposit?.status, unresolvedDepositRecord?.status, unresolvedDepositReference, view]);
 
   useEffect(() => {
     if (view !== 'wallet' || !selectedDepositReference || displayedDepositStatus !== 'PENDING') return;
@@ -403,7 +453,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
 
   async function submitDeposit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (walletActionBusyRef.current || unresolvedDeposit || statusCheckBusy.current || !paymentHistoryVerified) return;
+    if (walletActionBusyRef.current || statusCheckBusy.current || !paymentHistoryVerified) return;
     const amountKes = Number(depositAmount);
     if (!Number.isSafeInteger(amountKes) || amountKes <= 0 || !depositQuote?.depositAvailable) return;
     const normalizedPhoneNumber = normalizeKenyanPhone(mpesaPhoneNumber);
@@ -422,6 +472,11 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
     setWalletActionError('');
     setWalletActionMessage('');
     try {
+      const eligibility = await loadDepositEligibility();
+      if (!eligibility) throw new Error('Deposit retry eligibility could not be checked.');
+      if (!eligibility.canInitiateNewDeposit) {
+        throw new Error(eligibility.message || 'A previous wallet deposit remains unresolved.');
+      }
       await apiRequest<WalletDepositQuote>(
         `/payments/wallet-deposit-quote?amountKes=${encodeURIComponent(amountKes)}`,
         { cache: 'no-store' },
@@ -439,6 +494,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
       depositPollingWindow.current = result.status === 'PENDING'
         ? { reference: result.reference, startedAt: Date.now(), stopped: false }
         : { reference: result.reference, startedAt: Date.now(), stopped: true };
+      await loadDepositEligibility();
       setWalletActionMessage('');
       if (result.status !== 'PENDING') {
         const refreshedPayments = await refresh();
@@ -520,6 +576,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
           <button className="button" type="button" aria-expanded={depositFormOpen} aria-controls="wallet-deposit-form" onClick={() => {
             setDepositFormOpen(true);
             void loadDepositQuote();
+            void loadDepositEligibility();
           }}>Deposit</button>
         </div>
         {depositQuoteLoading && <p role="status">Checking whether wallet deposits are available…</p>}
@@ -538,6 +595,13 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
               : 'Wallet deposits are currently unavailable.'}
           </p>
         )}
+        {depositEligibilityError && <div className="form-error" role="alert">
+          <p>{depositEligibilityError}</p>
+          <button className="quiet-button" type="button" disabled={depositEligibilityLoading}
+              onClick={() => void loadDepositEligibility()}>
+              {depositEligibilityLoading ? 'Checking…' : 'Retry deposit eligibility check'}
+          </button>
+        </div>}
         {depositQuote && !depositQuoteLoading && depositQuote.unavailableReasons.map((reason) =>
           <p className="form-error" role="status" key={reason}>{reason}</p>)}
         {selectedDepositReference && <div className="wallet-deposit-pending" aria-live="polite">
@@ -549,10 +613,8 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
               : `Payment status: ${displayedDepositStatus?.replaceAll('_', ' ') ?? 'being checked'} · Reference ${selectedDepositReference}.`}
           </p>
           <small>Reference {selectedDepositReference}</small>
-          {unresolvedDepositRecord && <p role="alert">
-            A previous wallet deposit is unresolved. Wait for reconciliation; do not submit another deposit.
-            {' '}Reference {unresolvedDepositRecord.internalReference} · Status {unresolvedDepositRecord.status}.
-            {depositPollingTimedOut ? ' Automatic checking has stopped.' : ''}
+          {displayedDepositStatus === 'PENDING' && <p role="status">
+            Previous deposit {selectedDepositReference} remains unresolved. A new deposit is unavailable until its outcome is verified; a polling timeout does not mean it failed.
           </p>}
           {depositStatusError && <p className="form-error" role="alert">{depositStatusError}</p>}
           {displayedDepositStatus === 'PENDING' && (depositPollingTimedOut || Boolean(depositStatusError)) && (
@@ -580,8 +642,10 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
             </label>
             <div className="wallet-deposit-actions">
                       <button className="button" type="submit" disabled={walletActionBusy || loading || depositQuoteLoading ||
-                Boolean(depositQuoteError) || !depositQuote?.depositAvailable || unresolvedDeposit ||
-                        depositStatusChecking || !paymentHistoryVerified}>
+                Boolean(depositQuoteError) || !depositQuote?.depositAvailable ||
+                depositEligibilityLoading || Boolean(depositEligibilityError) ||
+                depositEligibility?.canInitiateNewDeposit !== true ||
+                depositStatusChecking || !paymentHistoryVerified}>
                 {walletActionBusy ? 'Starting…' : 'Continue to M-Pesa'}
               </button>
               <button className="quiet-button" type="button" disabled={walletActionBusy} onClick={cancelDepositForm}>Cancel</button>

@@ -55,6 +55,12 @@ export class PaymentController {
     return { data: await this.payments.getWalletDepositQuote(amount) };
   }
 
+  @Get('wallet-deposit-eligibility')
+  @UseGuards(CustomerSessionGuard)
+  async getWalletDepositEligibility(@Req() request: AuthenticatedRequest) {
+    return { data: await this.payments.getWalletDepositEligibility(request.principal!.id) };
+  }
+
   @Post('wallet-deposits')
   @UseGuards(CustomerSessionGuard)
   @Throttle({ default: { limit: 3, ttl: 60_000 } })

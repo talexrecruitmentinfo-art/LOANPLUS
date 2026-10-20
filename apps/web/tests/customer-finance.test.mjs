@@ -40,7 +40,7 @@ test('wallet and transactions are loaded from authenticated ledger endpoints wit
   assert.match(wallet, /pollWalletDepositStatus/);
   assert.doesNotMatch(wallet, /window\.setInterval\(\(\) => void refresh\(\), 5_000\)/);
   assert.doesNotMatch(wallet, /setWallet\(\(current\) => \(\{[^}]*balanceKes/);
-  assert.match(wallet, /do not submit another deposit/);
+  assert.match(wallet, /A new deposit is unavailable until its outcome is verified/);
   assert.match(wallet, /wallet repayment/);
   assert.match(wallet, /Load more transactions/);
   assert.match(wallet, /Confirm an M-Pesa wallet deposit/);
@@ -68,15 +68,17 @@ test('wallet deposit form stays closed until requested and never reports success
   const depositPanel = wallet.slice(panelStart, repaymentStart);
   assert.ok(panelStart >= 0 && repaymentStart > panelStart);
   assert.match(depositPanel, /depositQuoteLoading/);
-  assert.match(depositPanel, /unresolvedDeposit/);
+  assert.match(depositPanel, /depositEligibility\?\.canInitiateNewDeposit !== true/);
+  assert.match(depositPanel, /depositEligibilityLoading/);
+  assert.match(depositPanel, /depositEligibilityError/);
   assert.match(depositPanel, /Boolean\(depositQuoteError\)/);
   assert.match(wallet, /disabled=\{walletActionBusy \|\| loading \|\| depositQuoteLoading/);
   assert.match(wallet, /Checking whether wallet deposits are available…/);
   assert.match(wallet, /Waiting for Safaricom confirmation\. We’ll check for up to 1 minute\./);
   assert.match(wallet, /We’re still waiting for Safaricom confirmation\. Automatic checking has stopped\./);
   assert.match(wallet, /Check status/);
-  assert.match(wallet, /A previous wallet deposit is unresolved/);
-  assert.match(wallet, /Reference \{unresolvedDepositRecord\.internalReference\} · Status \{unresolvedDepositRecord\.status\}/);
+  assert.match(wallet, /Previous deposit \{selectedDepositReference\} remains unresolved/);
+  assert.match(wallet, /a polling timeout does not mean it failed/);
   assert.match(wallet, /depositStatus\?\.reference === selectedDepositReference/);
   assert.match(wallet, /depositReferenceRef\.current !== reference/);
   assert.match(wallet, /return \(\) => controller\.abort\(\)/);
@@ -88,7 +90,10 @@ test('wallet deposit form stays closed until requested and never reports success
   const cancelStart = wallet.indexOf('function cancelDepositForm', submitStart);
   const submitDeposit = wallet.slice(submitStart, cancelStart);
   assert.doesNotMatch(submitDeposit, /setWalletActionMessage\((?!'')/);
+  assert.match(submitDeposit, /await loadDepositEligibility\(\)/);
   assert.match(submitDeposit, /wallet-deposit-quote\?amountKes=/);
+  assert.ok(submitDeposit.indexOf('await loadDepositEligibility()') <
+    submitDeposit.indexOf('wallet-deposit-quote?amountKes='));
   assert.ok(submitDeposit.indexOf('wallet-deposit-quote?amountKes=') <
     submitDeposit.indexOf("'/payments/wallet-deposits'"));
   const cancelHandler = wallet.match(/function cancelDepositForm\(\) \{([\s\S]*?)\n  \}/)?.[1] ?? '';

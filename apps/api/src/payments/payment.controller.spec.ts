@@ -53,6 +53,28 @@ describe('PaymentController', () => {
     expect(getWalletDepositQuote).toHaveBeenCalledTimes(1);
   });
 
+  it('returns wallet retry eligibility for the authenticated customer and guards the endpoint', async () => {
+    const eligibility = {
+      canInitiateNewDeposit: false,
+      pendingDeposit: {
+        reference: 'LPD_PENDING_REFERENCE',
+        amountKes: 500,
+        currency: 'KES',
+        status: 'PENDING',
+        createdAt: new Date(),
+      },
+      message: 'A previous wallet deposit remains unresolved.',
+    };
+    const getWalletDepositEligibility = jest.fn(async () => eligibility);
+    const controller = new PaymentController({ getWalletDepositEligibility } as unknown as PaymentService);
+    const request = { principal: { id: 'customer-id' } } as AuthenticatedRequest;
+    const handler = PaymentController.prototype.getWalletDepositEligibility;
+
+    await expect(controller.getWalletDepositEligibility(request)).resolves.toEqual({ data: eligibility });
+    expect(getWalletDepositEligibility).toHaveBeenCalledWith('customer-id');
+    expect(Reflect.getMetadata('__guards__', handler)).toContain(CustomerSessionGuard);
+  });
+
   it('returns the authenticated customer unresolved-fee status and guards the endpoint', async () => {
     const unresolved = {
       reference: 'LPP_UNRESOLVED_REFERENCE',

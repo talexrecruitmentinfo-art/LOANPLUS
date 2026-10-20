@@ -35,7 +35,8 @@ describe('M-Pesa wallet deposit initiation', () => {
     }));
     const transactionClient = {
       paymentTransaction: {
-        findUnique: jest.fn(async () => null),
+        findUnique: jest.fn(async ({ where }: { where: { idempotencyKey: string } }) =>
+          payment?.idempotencyKey === where.idempotencyKey ? payment : null),
         findFirst: jest.fn(async () => unresolvedPayment),
         create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
           payment = {
@@ -45,6 +46,7 @@ describe('M-Pesa wallet deposit initiation', () => {
             status: 'PENDING',
             ...data,
           };
+          unresolvedPayment = payment;
           return { id: payment.id, internalReference: payment.internalReference };
         }),
         updateMany: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
@@ -56,7 +58,8 @@ describe('M-Pesa wallet deposit initiation', () => {
     };
     const prisma = {
       paymentTransaction: {
-        findUnique: jest.fn(async () => null),
+        findUnique: jest.fn(async ({ where }: { where: { idempotencyKey: string } }) =>
+          payment?.idempotencyKey === where.idempotencyKey ? payment : null),
         findFirst: jest.fn(async () => unresolvedPayment),
         updateMany: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
           if (payment) payment = { ...payment, ...data };
@@ -84,8 +87,14 @@ describe('M-Pesa wallet deposit initiation', () => {
           } }
           : null),
       },
-      $transaction: jest.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
-        callback(transactionClient)),
+      $transaction: (() => {
+        let transactionQueue = Promise.resolve();
+        return jest.fn((callback: (tx: typeof transactionClient) => Promise<unknown>) => {
+          const result = transactionQueue.then(() => callback(transactionClient));
+          transactionQueue = result.then(() => undefined, () => undefined);
+          return result;
+        });
+      })(),
     } as unknown as PrismaService;
     const mpesa = {
       assertConfiguredForPayments: jest.fn(),
@@ -128,6 +137,57 @@ describe('M-Pesa wallet deposit initiation', () => {
     expect(activationRequestUpdate).toHaveBeenCalledWith(expect.objectContaining({
       data: { checkoutRequestId: 'checkout-test', merchantRequestId: 'merchant-test' },
     }));
+  });
+
+  it('replays the same idempotency key without creating another STK request', async () => {
+    const first = await service.initiateWalletDeposit('customer-id', depositRequest(), 'wallet-deposit-key-replay');
+    const replay = await service.initiateWalletDeposit('customer-id', depositRequest(), 'wallet-deposit-key-replay');
+
+    expect(replay).toMatchObject({ reference: first.reference, status: 'PENDING' });
+    expect(stkRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes concurrent attempts and issues only one STK request while a payment is pending', async () => {
+    const results = await Promise.all([
+      service.initiateWalletDeposit('customer-id', depositRequest(), 'wallet-deposit-key-concurrent-1'),
+      service.initiateWalletDeposit('customer-id', depositRequest(), 'wallet-deposit-key-concurrent-2'),
+    ]);
+
+    expect(results[0].reference).toBe(results[1].reference);
+    expect(payment).toMatchObject({ status: 'PENDING' });
+    expect(unresolvedPayment).toMatchObject({ status: 'PENDING', internalReference: results[0].reference });
+    expect(stkRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a pending deposit ineligible despite the separate wallet-product approval reference', async () => {
+    unresolvedPayment = {
+      id: 'existing-payment',
+      internalReference: 'LPDF2A72DD1F0B7231E1B2FF524CA050A7D',
+      amountKes: 500,
+      currency: 'KES',
+      status: 'PENDING',
+      createdAt: new Date(),
+    };
+    const eligibility = await service.getWalletDepositEligibility('customer-id');
+
+    expect(eligibility).toMatchObject({
+      canInitiateNewDeposit: false,
+      pendingDeposit: {
+        reference: 'LPDF2A72DD1F0B7231E1B2FF524CA050A7D',
+        status: 'PENDING',
+      },
+    });
+    expect(unresolvedPayment).toMatchObject({ status: 'PENDING' });
+  });
+
+  it('authorizes a new attempt only after backend records no pending deposit', async () => {
+    unresolvedPayment = null;
+
+    await expect(service.getWalletDepositEligibility('customer-id')).resolves.toEqual({
+      canInitiateNewDeposit: true,
+      pendingDeposit: null,
+      message: null,
+    });
   });
 
   it.each([0, 99, 20001, 10.5])('rejects invalid wallet deposit amount %s before M-Pesa initiation', async (amountKes) => {
@@ -334,6 +394,7 @@ describe('M-Pesa wallet deposit initiation', () => {
     });
 
     payment = null;
+    unresolvedPayment = null;
     stkRequest.mockRejectedValueOnce(new StkPushInitiationError('STK_RESPONSE', undefined, 200));
     const malformed = await service.initiateWalletDeposit(
       'customer-id',

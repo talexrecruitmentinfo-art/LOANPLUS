@@ -214,6 +214,34 @@ export class PaymentService {
     };
   }
 
+  async getWalletDepositEligibility(userId: string) {
+    const pendingDeposit = await this.prisma.paymentTransaction.findFirst({
+      where: { userId, type: PaymentType.WALLET_DEPOSIT, status: PaymentStatus.PENDING },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        internalReference: true,
+        amountKes: true,
+        currency: true,
+        status: true,
+        createdAt: true,
+      },
+    });
+    if (!pendingDeposit) {
+      return { canInitiateNewDeposit: true, pendingDeposit: null, message: null };
+    }
+    return {
+      canInitiateNewDeposit: false,
+      pendingDeposit: {
+        reference: pendingDeposit.internalReference,
+        amountKes: pendingDeposit.amountKes,
+        currency: pendingDeposit.currency,
+        status: pendingDeposit.status,
+        createdAt: pendingDeposit.createdAt,
+      },
+      message: 'A previous wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.',
+    };
+  }
+
   async initiateWalletDeposit(
     userId: string,
     dto: WalletDepositDto,
@@ -282,7 +310,7 @@ export class PaymentService {
               status: unresolved.status,
               amountKes: unresolved.amountKes,
               currency: unresolved.currency,
-              message: 'A previous wallet deposit is unresolved. Do not submit another payment until it has been reconciled.',
+              message: 'A previous wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.',
             },
             created: false,
           };
@@ -335,7 +363,7 @@ export class PaymentService {
             status: unresolved.status,
             amountKes: unresolved.amountKes,
             currency: unresolved.currency,
-            message: 'A previous wallet deposit is unresolved. Do not submit another payment until it has been reconciled.',
+            message: 'A previous wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.',
           };
         }
       }
@@ -437,7 +465,7 @@ export class PaymentService {
         status: PaymentStatus.PENDING,
         amountKes: dto.amountKes,
         currency: 'KES',
-        message: 'The M-Pesa request outcome is unresolved. Do not submit another deposit while this payment is being checked.',
+        message: 'The M-Pesa request outcome remains unresolved. A new deposit is unavailable until its outcome is verified.',
       };
     }
 
@@ -2796,7 +2824,7 @@ export class PaymentService {
       amountKes: payment.amountKes,
       currency: payment.currency,
       message: payment.status === PaymentStatus.PENDING
-        ? 'This wallet deposit is still unresolved. Do not submit another payment while it is being checked.'
+        ? 'This wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.'
         : payment.status === PaymentStatus.CONFIRMED
           ? 'This wallet deposit has already been confirmed.'
           : 'This wallet deposit attempt has already been recorded.',
