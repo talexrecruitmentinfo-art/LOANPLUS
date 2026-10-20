@@ -116,6 +116,23 @@ test('loan application collects guarantors, reviews details, and uses the proces
   assert.doesNotMatch(loans, /KSh 50|formatMoney\(50\)/);
 });
 
+test('loan journey applies reference styling while preserving live products, estimates, and real application statuses', () => {
+  assert.match(loans, /loan-journey-page/);
+  assert.match(loans, /loan-product-card/);
+  assert.match(loans, /loan-estimate-card/);
+  assert.match(loans, /estimateTotalRepayment\(product, Number\(form\.requestedPrincipalKes\)\)/);
+  assert.match(loans, /loan-status-\$\{application\.status\.toLowerCase\(\)\}/);
+  assert.match(loans, /className="loan-step-indicator"/);
+  assert.match(loans, /\/loans\/products/);
+  assert.match(loans, /\/loans\/applications/);
+  assert.match(loans, /\/payments\/loan-processing-fee/);
+  assert.match(redesign, /\.loan-journey-page/);
+  assert.match(redesign, /\.loan-estimate-card/);
+  assert.match(redesign, /@media\(max-width:650px\)/);
+  assert.match(redesign, /\.auth-form-wrap/);
+  assert.match(redesign, /\.dashboard-home-welcome/);
+});
+
 test('processing-fee quote comes from the backend constant and discloses unconfigured refund policy', () => {
   assert.match(paymentController, /getLoanProcessingFeeQuote/);
   assert.match(paymentService, /paymentAvailable: unavailableReasons\.length === 0/);

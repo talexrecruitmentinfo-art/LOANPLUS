@@ -260,6 +260,128 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 
 @media(min-width:760px){
   .customer-app-shell{padding-top:66px;padding-bottom:0}
+}
+
+  .auth-page{
+    display:flex;flex-direction:column;align-items:center;background:#fff;
+  }
+  .auth-aside{
+    width:100%;min-height:auto;padding:20px max(6%,calc((100% - 1080px)/2));
+    flex:0 0 auto;background:#fff;color:var(--green);
+  }
+  .auth-aside:before,.auth-aside:after,.auth-aside-copy,.auth-aside-index{display:none}
+  .auth-wordmark{color:var(--green)}
+  .auth-wordmark .brand-mark{background:var(--green);color:#fff}
+  .auth-main{
+    width:min(100%,560px);min-height:0;padding:0 24px 32px;flex:1 0 auto;justify-content:flex-start;
+  }
+  .auth-topline{display:none}
+  .auth-form-wrap{
+    width:100%;margin:30px auto 22px;padding:28px;
+    border:1px solid #e4ece5;border-radius:18px;background:#fff;
+    box-shadow:0 10px 35px rgba(23,80,53,.07);
+  }
+  .auth-form-wrap h2{color:#173d2b}
+  .auth-legal{margin:0 auto;text-align:center}
+
+  .dashboard-home-welcome{
+    padding-top:34px;padding-bottom:30px;
+    background:linear-gradient(125deg,#087247,#0b8653);color:#fff;
+  }
+  .dashboard-home-welcome .eyebrow,.dashboard-home-welcome>p:last-child{color:#d7f1e3}
+  .dashboard-home-welcome h1{font-size:clamp(27px,5vw,36px);letter-spacing:-.035em}
+  .dashboard-wallet-card{
+    margin-top:-10px;padding:21px 22px;border:1px solid rgba(255,255,255,.15);
+    border-radius:18px;background:linear-gradient(130deg,#087b4d,#0b9660);
+    box-shadow:0 10px 28px rgba(13,103,64,.16);
+  }
+  .dashboard-quick-actions{margin-top:18px}
+  .dashboard-action{border-radius:14px;box-shadow:0 4px 14px rgba(35,73,47,.035)}
+  .dashboard-action>span{width:36px;height:36px;border-radius:12px;background:#e7f5ed}
+  .dashboard-products{margin-top:28px}
+  .dashboard-section-heading h2{font-size:19px}
+  .dashboard-product-row{
+    border-radius:14px;box-shadow:0 4px 15px rgba(35,73,47,.035);
+  }
+  .dashboard-product-icon{background:#087b4d}
+
+  .loan-journey-page{padding-bottom:calc(100px + env(safe-area-inset-bottom))}
+  .loan-journey-page>.dashboard-top{
+    height:68px;background:#fff;box-shadow:0 2px 14px rgba(28,71,44,.04);
+  }
+  .loan-journey-page>.dashboard-welcome{
+    padding:34px max(6%,calc((100% - 960px)/2)) 28px;
+    background:linear-gradient(125deg,#087247,#0b8653);color:#fff;
+  }
+  .loan-journey-page>.dashboard-welcome .eyebrow,
+  .loan-journey-page>.dashboard-welcome>p:last-child{color:#d7f1e3}
+  .loan-journey-page>.dashboard-welcome h1{font-size:clamp(29px,5vw,39px)}
+  .loan-journey-page>.product-list,
+  .loan-journey-page>.loan-application-panel{max-width:960px}
+  .loan-journey-page>.product-list{padding-top:24px}
+  .loan-catalogue .product-list-heading{padding:0 4px}
+  .loan-product-card{
+    padding:20px;gap:14px 22px;border:1px solid #e2ebe3;border-radius:16px;
+    box-shadow:0 5px 18px rgba(31,75,47,.045);
+  }
+  .loan-product-heading{display:flex;align-items:center;gap:12px}
+  .loan-product-icon{
+    width:42px;height:42px;display:grid;place-items:center;flex:0 0 auto;
+    border-radius:14px;background:#e7f5ed;color:#08784b;font:800 13px Manrope,sans-serif;
+  }
+  .loan-product-heading h2{margin:0}
+  .loan-product-heading .eyebrow{margin:0 0 4px}
+  .loan-product-description{max-width:440px;margin:0;color:var(--muted);font-size:12px;line-height:1.65}
+  .loan-product-card dl{align-self:center}
+  .loan-product-card>.product-apply-button{align-self:center}
+  .loan-application-card{
+    padding:24px;border-color:#e1ebe3;background:#fff;
+    box-shadow:0 8px 26px rgba(31,75,47,.055);
+  }
+  .loan-application-card .loan-application-title{margin-bottom:22px}
+  .loan-application-card .loan-application-title h2{color:#173d2b}
+  .loan-step-indicator{margin-bottom:23px}
+  .loan-step-indicator li:not(:last-child)::after{height:2px;background:#dcebe0}
+  .loan-step-indicator li[aria-current=step]>span{box-shadow:0 0 0 4px #e3f2e8}
+  .loan-application-guided{align-items:start}
+  .loan-estimate-card{
+    grid-column:2;align-self:start;padding:14px;
+    display:grid;gap:8px;border:1px solid #dcebe0;border-radius:12px;background:#f5faf6;
+  }
+  .loan-estimate-card>div{display:flex;justify-content:space-between;gap:12px;font-size:11px}
+  .loan-estimate-card>div>span{color:var(--muted)}
+  .loan-estimate-card>div>b{text-align:right;color:var(--ink)}
+  .loan-estimate-card>div:last-of-type{padding-top:9px;border-top:1px solid #dcebe0}
+  .loan-estimate-card>div:last-of-type>b{color:#08784b;font-size:13px}
+  .loan-estimate-card>small{color:var(--muted);font-size:10px;line-height:1.5}
+  .loan-status-card{padding:17px;border-radius:14px;box-shadow:0 4px 15px rgba(31,75,47,.035)}
+  .loan-status-heading{display:flex!important;align-items:flex-start;justify-content:space-between;gap:14px}
+  .loan-status-heading>div{min-width:0}
+  .loan-status-heading .status-label{margin:0!important;white-space:normal;line-height:1.45}
+
+  @media(max-width:650px){
+    .auth-aside{padding:17px 22px}
+    .auth-main{padding:0 16px 24px}
+    .auth-form-wrap{margin:18px auto 20px;padding:21px 17px;border-radius:15px;box-shadow:0 5px 22px rgba(23,80,53,.06)}
+    .auth-legal{font-size:10px}
+    .dashboard-home-welcome{padding:27px 20px 24px}
+    .dashboard-wallet-card{margin-top:-8px}
+    .loan-journey-page>.dashboard-welcome{padding:27px 20px 23px}
+    .loan-journey-page>.product-list{padding-top:19px}
+    .loan-product-card{padding:16px;grid-template-columns:1fr;gap:11px}
+    .loan-product-card dl{width:100%}
+    .loan-product-card>.product-apply-button{width:100%;justify-self:stretch}
+    .loan-application-card{padding:18px 15px}
+    .loan-estimate-card{grid-column:auto}
+    .loan-status-heading{flex-direction:column;gap:8px}
+  }
+  @media(min-width:760px){
+    .dashboard-home .dashboard-wallet-card{margin-top:-12px}
+    .loan-journey-page>.dashboard-welcome{padding-top:42px;padding-bottom:35px}
+    .loan-journey-page>.product-list{padding-top:30px}
+    .loan-application-card{padding:28px}
+  }
+@media(min-width:760px){
   .customer-app-nav{
     inset:0 0 auto;min-height:64px;justify-content:center;gap:8px;padding:6px 24px;
     border:0;border-bottom:1px solid var(--line);box-shadow:0 3px 16px rgba(27,53,39,.05);
@@ -327,4 +449,20 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 }
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}
+@media(max-width:650px){
+  .auth-aside{min-height:0;padding:17px 22px}
+  .auth-main{min-height:0;padding:0 16px 24px}
+  .auth-form-wrap{margin:18px auto 20px;padding:21px 17px}
+  .auth-legal{margin:0 auto}
+  .dashboard-home .dashboard-home-welcome{padding:27px 20px 24px}
+  .loan-journey-page>.dashboard-welcome{padding:27px 20px 23px}
+  .loan-journey-page>.product-list{padding-top:19px}
+  .loan-journey-page>.loan-application-panel{padding:18px 15px!important}
+  .loan-product-card{padding:16px;grid-template-columns:1fr;gap:11px}
+  .loan-product-card dl{width:100%}
+  .loan-product-card>.product-apply-button{width:100%;justify-self:stretch}
+  .loan-application-card{padding:18px 15px}
+  .loan-estimate-card{grid-column:auto}
+  .loan-status-heading{flex-direction:column;gap:8px}
 }

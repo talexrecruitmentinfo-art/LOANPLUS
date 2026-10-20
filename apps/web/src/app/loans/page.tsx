@@ -217,6 +217,13 @@ export default function LoanProductsPage() {
   const paymentStatusPollAttempts = useRef(0);
 
   const product = products.find((item) => item.id === form.productId);
+  const requestedAmountKes = Number(form.requestedPrincipalKes);
+  const requestedAmountIsInRange = product !== undefined &&
+    requestedAmountKes >= product.minimumPrincipalKes &&
+    requestedAmountKes <= product.maximumPrincipalKes;
+  const estimatedRepaymentKes = product && requestedAmountIsInRange
+    ? estimateTotalRepayment(product, requestedAmountKes)
+    : null;
 
   useEffect(() => {
     if (product) document.getElementById('apply-heading')?.scrollIntoView({ block: 'start' });
@@ -466,7 +473,7 @@ export default function LoanProductsPage() {
   }
 
   return (
-    <main className="dashboard-page">
+    <main className="dashboard-page loan-journey-page">
       <header className="dashboard-top">
         <Link className="wordmark" href="/"><span className="brand-mark">L+</span> loanplus</Link>
         <Link className="quiet-button" href="/dashboard">My account</Link>
@@ -486,7 +493,7 @@ export default function LoanProductsPage() {
       </div>}
       {!signedIn && !loading && <p className="product-list"><Link className="button" href="/login">Sign in to apply</Link></p>}
       {signedIn && product && (
-        <section className="loan-application-panel" aria-labelledby="apply-heading">
+        <section className="loan-application-panel loan-application-card" aria-labelledby="apply-heading">
           <div className="loan-application-title">
             <div><p className="eyebrow">SELECTED LOAN PRODUCT</p><h2 id="apply-heading">{reviewing ? 'Review your application' : product.name}</h2></div>
             <button className="quiet-button" type="button" disabled={busyId !== null} onClick={() => { creationKey.current = null; feeKey.current = null; setResumingApplicationId(null); setForm(emptyForm); setReviewing(false); setTermsAccepted(false); }}>Change product</button>
@@ -505,6 +512,14 @@ export default function LoanProductsPage() {
                 <input type="number" inputMode="numeric" min={product?.minimumPrincipalKes ?? 1} max={product?.maximumPrincipalKes ?? 1_000_000_000} step="1" value={form.requestedPrincipalKes} onChange={(event) => updateField('requestedPrincipalKes', event.target.value)} aria-invalid={Boolean(fieldErrors.requestedPrincipalKes)} aria-describedby={fieldErrors.requestedPrincipalKes ? 'amount-error' : undefined} required />
                 {fieldErrors.requestedPrincipalKes && <small id="amount-error" role="alert">{fieldErrors.requestedPrincipalKes}</small>}
               </label>
+              <aside className="loan-estimate-card" aria-live="polite" aria-label="Estimated loan cost">
+                <div><span>Loan term</span><b>{product.durationDays} days</b></div>
+                <div><span>Interest rate (flat, full term)</span><b>{(product.interestRateBps / 100).toFixed(2)}%</b></div>
+                <div><span>Estimated interest</span><b>{estimatedRepaymentKes === null ? (form.requestedPrincipalKes ? 'Enter a valid amount' : 'Enter an amount') : formatMoney(estimatedRepaymentKes - requestedAmountKes - product.flatFeeKes)}</b></div>
+                <div><span>Other product charges</span><b>{formatMoney(product.flatFeeKes)}</b></div>
+                <div><span>Estimated total repayment</span><b>{estimatedRepaymentKes === null ? (form.requestedPrincipalKes ? 'Enter a valid amount' : 'Enter an amount') : formatMoney(estimatedRepaymentKes)}</b></div>
+                <small>Estimate uses the selected product’s current terms. Your approved offer may differ.</small>
+              </aside>
               <fieldset>
                 <legend>Guarantor 1</legend>
                 <label>Full name<input autoComplete="name" value={form.guarantorOneName} onChange={(event) => updateField('guarantorOneName', event.target.value)} aria-invalid={Boolean(fieldErrors.guarantorOneName)} required />{fieldErrors.guarantorOneName && <small role="alert">{fieldErrors.guarantorOneName}</small>}</label>
@@ -572,11 +587,12 @@ export default function LoanProductsPage() {
           )}
         </section>
       )}
-      <section className="product-list">
+      <section className="product-list loan-catalogue">
         <div className="product-list-heading"><p className="eyebrow">BORROWING OPTIONS</p><h2>Choose a loan product.</h2><p>Compare current configured terms before you apply. Product names, limits and charges are managed by LoanPlus. Paying a processing fee never guarantees approval or disbursement.</p></div>
         {productsLoading ? <p role="status">Loading configured loan products…</p> : productsError ? <div className="dashboard-empty" role="alert"><h2>Loan products could not be loaded.</h2><p>{productsError}</p><button className="quiet-button" type="button" onClick={() => void refreshProducts()}>Retry catalogue</button></div> : products.length === 0 ? <div className="dashboard-empty"><p className="eyebrow">NO PRODUCTS AVAILABLE</p><h2>There are no active loan products.</h2><p>Configured borrowing options will appear here when available.</p></div> : products.map((item) => (
-          <article className="product-row" key={item.id}>
-            <div><p className="eyebrow">{item.durationDays} DAY TERM</p><h2>{item.name}</h2><p>{item.description}</p></div>
+          <article className="product-row loan-product-card" key={item.id}>
+            <div className="loan-product-heading"><span className="loan-product-icon" aria-hidden="true">L+</span><div><p className="eyebrow">{item.durationDays} DAY TERM</p><h2>{item.name}</h2></div></div>
+            <p className="loan-product-description">{item.description}</p>
             <dl>
               <div><dt>Principal range</dt><dd>{formatMoney(item.minimumPrincipalKes)} – {formatMoney(item.maximumPrincipalKes)}</dd></div>
               <div><dt>Interest (flat, full term)</dt><dd>{(item.interestRateBps / 100).toFixed(2)}%</dd></div>
@@ -600,9 +616,8 @@ export default function LoanProductsPage() {
           const feeAttempts = application.processingFeePayments;
           const canPayFee = canPayApplicationFee(application);
           return (
-            <article className="customer-loan-application" key={application.id}>
-              <div><b>{terms?.productName ?? application.product.name}</b><small>Reference {application.id} · Requested {formatMoney(application.requestedPrincipalKes)}</small></div>
-              <span className="status-label">{statusLabel(application)}</span>
+            <article className={`customer-loan-application loan-status-card loan-status-${application.status.toLowerCase()}`} key={application.id}>
+              <div className="loan-status-heading"><div><b>{terms?.productName ?? application.product.name}</b><small>Reference {application.id} · Requested {formatMoney(application.requestedPrincipalKes)}</small></div><span className="status-label">{statusLabel(application)}</span></div>
               {canPayFee && <div className="draft-application-details">
                 <p>Draft saved. Review the application details and continue to the processing-fee payment step.</p>
                 {feeAttempts.length > 0 && <p>The previous attempt was conclusively declined. A new attempt will be recorded separately; the old payment history will remain available.</p>}
