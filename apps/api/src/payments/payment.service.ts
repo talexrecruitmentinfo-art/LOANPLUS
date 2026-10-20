@@ -20,7 +20,7 @@ import {
 } from '../auth/security.util';
 import { LedgerService } from '../ledger/ledger.service';
 import { MpesaService, StkPushInitiationError, StkPushPreflightError } from './mpesa.service';
-import { InitiateLoanProcessingFeeDto } from './payment.dto';
+import { InitiateLoanProcessingFeeDto, WalletDepositDto } from './payment.dto';
 import { buildMpesaCallbackUrl } from './mpesa-callback-url';
 import { getLoanProcessingFeePolicy, LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
 import { OUTSTANDING_LOAN_STATUSES } from '../loans/loan-eligibility.constants';
@@ -100,11 +100,13 @@ export class PaymentService {
 
   async getLoanProcessingFeeQuote() {
     const policy = getLoanProcessingFeePolicy();
-    const [revenueSetting, clearing] = await Promise.all([
+    const [revenueSetting, chargesSetting, clearing] = await Promise.all([
       this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.charges_revenue_account' } }),
       this.prisma.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } }),
     ]);
     const revenueCode = typeof revenueSetting?.value === 'string' ? revenueSetting.value : null;
+    const chargesRevenueCode = typeof chargesSetting?.value === 'string' ? chargesSetting.value : null;
     const revenue = revenueCode
       ? await this.prisma.ledgerAccount.findUnique({ where: { code: revenueCode } })
       : null;
@@ -117,7 +119,8 @@ export class PaymentService {
     }
     if (!revenueCode) {
       unavailableReasons.push('An active KES processing-fee revenue account has not been configured by an administrator.');
-    } else if (!revenue?.isActive || revenue.currency !== 'KES' || revenue.accountType !== LedgerAccountType.REVENUE) {
+    } else if (!revenue?.isActive || revenue.currency !== 'KES' ||
+      revenue.accountType !== LedgerAccountType.REVENUE || revenueCode === chargesRevenueCode) {
       unavailableReasons.push('The configured processing-fee destination must be an active KES revenue account.');
     }
     try {
@@ -142,6 +145,274 @@ export class PaymentService {
       refundPolicyDisclosure: policy.disclosure,
       paymentAvailable: unavailableReasons.length === 0,
       unavailableReasons,
+    };
+  }
+
+  async getWalletDepositQuote() {
+    const limits = this.getWalletDepositLimits();
+    const clearingAccount = await this.prisma.ledgerAccount.findUnique({
+      where: { code: 'MPESA_CLEARING' },
+      select: { isActive: true, currency: true, accountType: true },
+    });
+    const unavailableReasons: string[] = [];
+    if (!limits) {
+      unavailableReasons.push('Approved wallet-deposit minimum and maximum amounts are not configured.');
+    }
+    if (process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED !== 'true') {
+      unavailableReasons.push('The configured M-Pesa business product has not been confirmed for customer wallet deposits.');
+    }
+    if (!clearingAccount?.isActive || clearingAccount.currency !== 'KES' ||
+      clearingAccount.accountType !== LedgerAccountType.ASSET) {
+      unavailableReasons.push('An active KES M-Pesa clearing asset account is required.');
+    }
+    try {
+      this.mpesa.assertConfiguredForPayments();
+      buildMpesaCallbackUrl('readinesschecktoken');
+    } catch (error) {
+      if (!(error instanceof HttpException)) throw error;
+      const response = error.getResponse();
+      if (typeof response === 'string') unavailableReasons.push(response);
+      else if (typeof response === 'object' && response !== null && 'message' in response) {
+        const message = response.message;
+        unavailableReasons.push(Array.isArray(message) ? message.join(' ') : String(message));
+      } else unavailableReasons.push(error.message);
+    }
+    return {
+      currency: 'KES',
+      minimumAmountKes: limits?.minimumAmountKes ?? null,
+      maximumAmountKes: limits?.maximumAmountKes ?? null,
+      depositAvailable: unavailableReasons.length === 0,
+      unavailableReasons,
+    };
+  }
+
+  async initiateWalletDeposit(
+    userId: string,
+    dto: WalletDepositDto,
+    idempotencyKey: string | undefined,
+  ) {
+    if (!Number.isSafeInteger(dto.amountKes) || dto.amountKes <= 0) {
+      throw new BadRequestException('Enter a positive whole-KSh deposit amount.');
+    }
+    if (process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED !== 'true') {
+      throw new ServiceUnavailableException('The configured M-Pesa business product has not been confirmed for customer wallet deposits.');
+    }
+    const limits = this.getWalletDepositLimits();
+    if (!limits) {
+      throw new ServiceUnavailableException('Approved wallet-deposit amount limits are not configured.');
+    }
+    if (dto.amountKes < limits.minimumAmountKes || dto.amountKes > limits.maximumAmountKes) {
+      throw new BadRequestException('The deposit amount is outside the configured wallet limits.');
+    }
+    const phoneNumber = normalizeKenyaPhone(dto.mpesaPhoneNumber);
+    if (!idempotencyKey || !/^[a-zA-Z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+      throw new BadRequestException('A valid Idempotency-Key header is required.');
+    }
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ userId, amountKes: dto.amountKes, currency: 'KES', phoneNumber }))
+      .digest('hex');
+    const scopedKey = `wallet-deposit:${createHash('sha256').update(`${userId}:${idempotencyKey}`).digest('hex')}`;
+    const existing = await this.prisma.paymentTransaction.findUnique({ where: { idempotencyKey: scopedKey } });
+    if (existing) return this.assertWalletDepositReplay(existing, userId, requestHash);
+
+    const [user, clearingAccount] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } }),
+      this.prisma.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } }),
+    ]);
+    if (!user?.isActive) throw new ForbiddenException('This account cannot initiate a wallet deposit.');
+    if (!clearingAccount?.isActive || clearingAccount.currency !== 'KES' ||
+      clearingAccount.accountType !== LedgerAccountType.ASSET) {
+      throw new ServiceUnavailableException('Wallet deposit clearing account is unavailable.');
+    }
+    this.mpesa.assertConfiguredForPayments();
+    const callbackToken = randomBytes(32).toString('base64url');
+    const callbackUrl = buildMpesaCallbackUrl(callbackToken);
+    let payment: { id: string; internalReference: string };
+    try {
+      const started = await this.prisma.$transaction(async (tx) => {
+        const replay = await tx.paymentTransaction.findUnique({ where: { idempotencyKey: scopedKey } });
+        if (replay) return {
+          payment: null,
+          result: this.assertWalletDepositReplay(replay, userId, requestHash),
+          created: false,
+        };
+        const unresolved = await tx.paymentTransaction.findFirst({
+          where: { userId, type: PaymentType.WALLET_DEPOSIT, status: PaymentStatus.PENDING },
+          orderBy: { createdAt: 'asc' },
+        });
+        if (unresolved) {
+          return {
+            payment: null,
+            result: {
+              reference: unresolved.internalReference,
+              status: unresolved.status,
+              amountKes: unresolved.amountKes,
+              currency: unresolved.currency,
+              message: 'A previous wallet deposit is unresolved. Do not submit another payment until it has been reconciled.',
+            },
+            created: false,
+          };
+        }
+        const created = await tx.paymentTransaction.create({
+          data: {
+            internalReference: `LPD${randomBytes(16).toString('hex').toUpperCase()}`,
+            idempotencyKey: scopedKey,
+            requestHash,
+            userId,
+            type: PaymentType.WALLET_DEPOSIT,
+            amountKes: dto.amountKes,
+            currency: 'KES',
+            initiationPhase: 'CREATED',
+            activationRequest: {
+              create: {
+                userId,
+                callbackTokenHash: hashToken(callbackToken),
+                phoneNumberCiphertext: encryptSensitiveValue(phoneNumber),
+                policySnapshot: {
+                  purpose: 'WALLET_DEPOSIT',
+                  amountKes: dto.amountKes,
+                  currency: 'KES',
+                },
+                expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+              },
+            },
+          },
+          select: { id: true, internalReference: true },
+        });
+        return { payment: created, result: null, created: true };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      if (!started.created) return started.result!;
+      if (!started.payment) throw new ConflictException('Wallet deposit request was not persisted.');
+      payment = started.payment;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2002' || error.code === 'P2034')) {
+        const [replay, unresolved] = await Promise.all([
+          this.prisma.paymentTransaction.findUnique({ where: { idempotencyKey: scopedKey } }),
+          this.prisma.paymentTransaction.findFirst({
+            where: { userId, type: PaymentType.WALLET_DEPOSIT, status: PaymentStatus.PENDING },
+            orderBy: { createdAt: 'asc' },
+          }),
+        ]);
+        if (replay) return this.assertWalletDepositReplay(replay, userId, requestHash);
+        if (unresolved) {
+          return {
+            reference: unresolved.internalReference,
+            status: unresolved.status,
+            amountKes: unresolved.amountKes,
+            currency: unresolved.currency,
+            message: 'A previous wallet deposit is unresolved. Do not submit another payment until it has been reconciled.',
+          };
+        }
+      }
+      throw error;
+    }
+
+    let initiationStep = 'PERSIST_OAUTH_REQUESTED';
+    let providerRequest: { checkoutRequestId: string; merchantRequestId: string };
+    try {
+      await this.prisma.paymentTransaction.updateMany({
+        where: { id: payment.id, status: PaymentStatus.PENDING },
+        data: { initiationPhase: 'OAUTH_REQUESTED' },
+      });
+      providerRequest = await this.mpesa.initiateStkPush({
+        amountKes: dto.amountKes,
+        phoneNumber: phoneNumber.slice(1),
+        accountReference: payment.internalReference.slice(-12),
+        description: 'Wallet deposit',
+        callbackUrl,
+      }, async () => {
+        initiationStep = 'PERSIST_STK_REQUESTED';
+        await this.prisma.paymentTransaction.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: { initiationPhase: 'STK_REQUESTED' },
+        });
+        initiationStep = 'STK_REQUEST';
+      });
+    } catch (error) {
+      if (error instanceof StkPushPreflightError || (error instanceof StkPushInitiationError && error.phase === 'STK_REJECTED')) {
+        const isRejected = error instanceof StkPushInitiationError;
+        await this.prisma.paymentTransaction.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: {
+            status: PaymentStatus.FAILED,
+            failureCode: isRejected ? 'MPESA_STK_REJECTED' : `MPESA_PREFLIGHT_${error.reasonCode}`,
+            initiationPhase: isRejected ? 'STK_REJECTED' : 'PREFLIGHT_FAILED',
+          },
+        });
+        return {
+          reference: payment.internalReference,
+          status: PaymentStatus.FAILED,
+          amountKes: dto.amountKes,
+          currency: 'KES',
+          message: 'The M-Pesa request was rejected before a payment could be confirmed. Review the amount and phone number before retrying.',
+        };
+      }
+      const initiationPhase = error instanceof StkPushInitiationError
+        ? error.phase === 'OAUTH'
+          ? 'OAUTH_FAILED_BEFORE_STK'
+          : error.phase === 'STK_REQUEST'
+            ? 'STK_REQUEST_OUTCOME_UNCERTAIN'
+            : 'STK_RESPONSE_UNCERTAIN'
+        : 'INITIATION_OUTCOME_UNCERTAIN';
+      await this.prisma.paymentTransaction.updateMany({
+        where: { id: payment.id, status: PaymentStatus.PENDING },
+        data: { failureCode: 'INITIATION_OUTCOME_UNCERTAIN', initiationPhase },
+      });
+      logger.warn(`Wallet STK initiation remains unresolved for payment ${payment.internalReference} (phase=${initiationPhase}; step=${initiationStep}; errorType=${error instanceof Error ? error.constructor.name : 'Unknown'}).`);
+      return {
+        reference: payment.internalReference,
+        status: PaymentStatus.PENDING,
+        amountKes: dto.amountKes,
+        currency: 'KES',
+        message: 'The M-Pesa request outcome is unresolved. Do not submit another deposit while this payment is being checked.',
+      };
+    }
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const bound = await tx.activationPaymentRequest.updateMany({
+          where: {
+            paymentTransactionId: payment.id,
+            OR: [
+              { checkoutRequestId: null, merchantRequestId: null },
+              {
+                checkoutRequestId: providerRequest.checkoutRequestId,
+                merchantRequestId: providerRequest.merchantRequestId,
+              },
+            ],
+          },
+          data: {
+            checkoutRequestId: providerRequest.checkoutRequestId,
+            merchantRequestId: providerRequest.merchantRequestId,
+          },
+        });
+        if (bound.count !== 1) throw new ConflictException('Provider identifiers could not be safely associated with this wallet deposit.');
+        await tx.paymentTransaction.updateMany({
+          where: { id: payment.id, status: PaymentStatus.PENDING },
+          data: { initiationPhase: 'PROVIDER_ACCEPTED' },
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      await this.prisma.paymentTransaction.updateMany({
+        where: { id: payment.id, status: PaymentStatus.PENDING },
+        data: { failureCode: 'INITIATION_OUTCOME_UNCERTAIN', initiationPhase: 'PROVIDER_IDS_NOT_PERSISTED' },
+      });
+      logger.warn(`Wallet STK identifiers could not be persisted for payment ${payment.internalReference} (errorType=${error instanceof Error ? error.constructor.name : 'Unknown'}).`);
+      return {
+        reference: payment.internalReference,
+        status: PaymentStatus.PENDING,
+        amountKes: dto.amountKes,
+        currency: 'KES',
+        message: 'Safaricom accepted the request but its identifiers could not be saved. The payment remains unresolved; do not submit another deposit.',
+      };
+    }
+    return {
+      reference: payment.internalReference,
+      status: PaymentStatus.PENDING,
+      amountKes: dto.amountKes,
+      currency: 'KES',
+      message: 'Check your phone for the M-Pesa prompt. Your wallet will be credited only after verified payment confirmation.',
     };
   }
 
@@ -186,7 +457,7 @@ export class PaymentService {
       throw new ServiceUnavailableException('Approved loan processing-fee policy is not configured.');
     }
 
-    const [user, application, revenueSetting] = await Promise.all([
+    const [user, application, revenueSetting, chargesSetting] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } }),
       this.prisma.loanApplication.findFirst({
         where: { id: dto.applicationId, userId },
@@ -213,6 +484,7 @@ export class PaymentService {
         },
       }),
       this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.charges_revenue_account' } }),
     ]);
     if (!user || !user.isActive) throw new ForbiddenException('This account cannot apply for a loan.');
     if (!application) throw new NotFoundException('Loan application was not found.');
@@ -255,7 +527,9 @@ export class PaymentService {
       throw new ConflictException('Only an unpaid draft application can begin processing-fee payment.');
     }
     const revenueCode = typeof revenueSetting?.value === 'string' ? revenueSetting.value : null;
-    if (!revenueCode) throw new ServiceUnavailableException('Loan processing-fee accounting is not configured.');
+    if (!revenueCode || (typeof chargesSetting?.value === 'string' && chargesSetting.value === revenueCode)) {
+      throw new ServiceUnavailableException('Separate loan processing-fee accounting is not configured.');
+    }
     const [clearingAccount, revenueAccount] = await Promise.all([
       this.prisma.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } }),
       this.prisma.ledgerAccount.findUnique({ where: { code: revenueCode } }),
@@ -566,13 +840,31 @@ export class PaymentService {
       return {
         ...customerPayment,
         status,
-        unresolved: payment.type === PaymentType.LOAN_PROCESSING_FEE && status === PaymentStatus.PENDING,
+        unresolved: (payment.type === PaymentType.LOAN_PROCESSING_FEE ||
+          payment.type === PaymentType.WALLET_DEPOSIT) && status === PaymentStatus.PENDING,
         providerResult: {
           code: resultCode,
           message: this.getCustomerPaymentMessage(status, resultCode),
         },
       };
     });
+  }
+
+  async getWalletDepositStatus(userId: string, reference: string) {
+    const payment = await this.prisma.paymentTransaction.findFirst({
+      where: { userId, type: PaymentType.WALLET_DEPOSIT, internalReference: reference },
+      select: {
+        internalReference: true,
+        amountKes: true,
+        currency: true,
+        status: true,
+        receiptReference: true,
+        confirmedAt: true,
+        createdAt: true,
+      },
+    });
+    if (!payment) throw new NotFoundException('Wallet deposit was not found.');
+    return payment;
   }
 
   async getUnresolvedLoanProcessingFeePayment(userId: string) {
@@ -649,7 +941,7 @@ export class PaymentService {
             };
     const rows = await this.prisma.paymentTransaction.findMany({
       where: {
-        type: { in: [PaymentType.ACTIVATION, PaymentType.LOAN_PROCESSING_FEE] },
+        type: { in: [PaymentType.ACTIVATION, PaymentType.LOAN_PROCESSING_FEE, PaymentType.WALLET_DEPOSIT] },
         ...inclusionFilter,
         ...(normalizedSearch ? {
           OR: [
@@ -719,7 +1011,8 @@ export class PaymentService {
         const latestOutcome = safeAttempts[0]?.outcome;
         const providerReviewRequired = safeAttempts.some((item) => PROVIDER_REVIEW_OUTCOMES.has(item.outcome));
         const isLegacyUnresolved = failureCode === 'MPESA_RESULT_4999';
-        const needsProviderIdentifiers = payment.type === PaymentType.LOAN_PROCESSING_FEE &&
+        const needsProviderIdentifiers =
+          (payment.type === PaymentType.LOAN_PROCESSING_FEE || payment.type === PaymentType.WALLET_DEPOSIT) &&
           payment.status === PaymentStatus.PENDING &&
           (failureCode === 'INITIATION_OUTCOME_UNCERTAIN' ||
             payment.initiationPhase === 'STK_REQUESTED' ||
@@ -872,10 +1165,11 @@ export class PaymentService {
           currentPayment.failureCode === 'MPESA_RESULT_4999' &&
           currentPayment.receiptReference === null;
         if (currentPayment.status !== PaymentStatus.PENDING && !isLegacyUnresolved) {
-          throw new ConflictException('Only unresolved activation or loan processing-fee payments can be reconciled.');
+          throw new ConflictException('Only unresolved activation, processing-fee, or wallet-deposit payments can be reconciled.');
         }
         if (submittedIdentifiers && (
-          currentPayment.type !== PaymentType.LOAN_PROCESSING_FEE ||
+          (currentPayment.type !== PaymentType.LOAN_PROCESSING_FEE &&
+            currentPayment.type !== PaymentType.WALLET_DEPOSIT) ||
           currentPayment.status !== PaymentStatus.PENDING ||
           (currentPayment.failureCode !== 'INITIATION_OUTCOME_UNCERTAIN' &&
             currentPayment.initiationPhase !== 'STK_REQUESTED' &&
@@ -883,7 +1177,7 @@ export class PaymentService {
           currentPayment.activationRequest?.checkoutRequestId !== null ||
           currentPayment.activationRequest?.merchantRequestId !== null
         )) {
-          throw new ConflictException('Safaricom identifiers can only be supplied for an uncertain processing-fee initiation with no stored identifiers.');
+          throw new ConflictException('Safaricom identifiers can only be supplied for an uncertain processing-fee or wallet-deposit initiation with no stored identifiers.');
         }
         const recentAttempt = await tx.paymentReconciliationAttempt.findFirst({
           where: {
@@ -1239,7 +1533,8 @@ export class PaymentService {
       if (evidenceAttempt.superadminId === superadminId) {
         throw new ConflictException('A different Superadmin must independently review the provider evidence.');
       }
-      if (payment.type !== PaymentType.LOAN_PROCESSING_FEE || payment.status !== PaymentStatus.PENDING ||
+      if ((payment.type !== PaymentType.LOAN_PROCESSING_FEE &&
+        payment.type !== PaymentType.WALLET_DEPOSIT) || payment.status !== PaymentStatus.PENDING ||
         (payment.failureCode !== 'INITIATION_OUTCOME_UNCERTAIN' &&
           payment.initiationPhase !== 'STK_REQUESTED' &&
           payment.initiationPhase !== 'PROVIDER_IDS_NOT_PERSISTED') ||
@@ -1807,8 +2102,12 @@ export class PaymentService {
     const processingFee = payment.type === PaymentType.LOAN_PROCESSING_FEE &&
       payment.amountKes === LOAN_PROCESSING_FEE_KES &&
       typeof request.loanApplicationId === 'string';
+    const walletDeposit = payment.type === PaymentType.WALLET_DEPOSIT &&
+      Number.isSafeInteger(payment.amountKes) &&
+      payment.amountKes > 0 &&
+      request.loanApplicationId === null;
     if (payment.id !== request.paymentTransactionId || payment.userId !== request.userId ||
-      payment.currency !== 'KES' || (!activationPayment && !processingFee)) {
+      payment.currency !== 'KES' || (!activationPayment && !processingFee && !walletDeposit)) {
       throw new ForbiddenException('Payment callback did not match a supported payment purpose and record.');
     }
   }
@@ -1897,11 +2196,21 @@ export class PaymentService {
     }
     const isActivationPayment = payment.type === PaymentType.ACTIVATION;
     const isLoanProcessingFee = payment.type === PaymentType.LOAN_PROCESSING_FEE;
+    const isWalletDeposit = payment.type === PaymentType.WALLET_DEPOSIT;
     let policy: ActivationPolicy | null = null;
     if (isConfirmed && isActivationPayment) {
       policy = this.parsePolicy(request.policySnapshot ?? undefined);
       if (!policy?.approved || /^draft(?:[-_. ]|$)/i.test(policy.termsVersion.trim())) {
         throw new ServiceUnavailableException('Activation accounting policy is unavailable.');
+      }
+    }
+    if (isConfirmed && isWalletDeposit) {
+      const depositPolicy = request.policySnapshot;
+      if (!depositPolicy || typeof depositPolicy !== 'object' || Array.isArray(depositPolicy) ||
+        depositPolicy.purpose !== 'WALLET_DEPOSIT' ||
+        depositPolicy.amountKes !== payment.amountKes ||
+        depositPolicy.currency !== 'KES') {
+        throw new ServiceUnavailableException('Wallet deposit payment purpose is unavailable.');
       }
     }
     if (isConfirmed && !callback && !isLegacyProcessingFeeRecovery) {
@@ -2068,11 +2377,34 @@ export class PaymentService {
             },
           });
         }
+        if (isConfirmed && isWalletDeposit) {
+          const walletAccount = await this.getOrCreateWalletAccount(tx, payment.userId);
+          const clearingAccount = await tx.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } });
+          if (!clearingAccount?.isActive || clearingAccount.currency !== 'KES' ||
+            clearingAccount.accountType !== LedgerAccountType.ASSET) {
+            throw new ServiceUnavailableException('Wallet deposit clearing account is unavailable.');
+          }
+          await this.ledger.postWithinTransaction(tx, {
+            idempotencyKey: `wallet-deposit:${payment.id}`,
+            transactionType: 'WALLET_DEPOSIT',
+            actorType: 'PROVIDER',
+            paymentId: payment.id,
+            reason: 'Verified M-Pesa wallet deposit',
+            lines: [
+              { accountId: clearingAccount.id, debitKes: payment.amountKes, creditKes: 0 },
+              { accountId: walletAccount.id, debitKes: 0, creditKes: payment.amountKes },
+            ],
+          });
+        }
         await tx.authAuditLog.create({
           data: {
             actorType: 'PROVIDER',
             actorId: 'MPESA_DARAJA',
-            action: isActivationPayment ? 'ACTIVATION_PAYMENT_RECONCILIATION' : 'LOAN_PROCESSING_FEE_RECONCILIATION',
+            action: isActivationPayment
+              ? 'ACTIVATION_PAYMENT_RECONCILIATION'
+              : isWalletDeposit
+                ? 'WALLET_DEPOSIT_RECONCILIATION'
+                : 'LOAN_PROCESSING_FEE_RECONCILIATION',
             outcome: targetStatus,
           },
         });
@@ -2140,15 +2472,20 @@ export class PaymentService {
 
   private validateSuccessfulCallback(
     callback: MpesaCallback,
-    payment: { amountKes: number; currency: string },
+    payment: { type: PaymentType; amountKes: number; currency: string },
     phoneNumberCiphertext: string | null,
   ): string {
     const receipt = this.getCallbackItem(callback, 'MpesaReceiptNumber');
     const amount = this.getCallbackItem(callback, 'Amount');
     const phoneNumber = this.getCallbackItem(callback, 'PhoneNumber');
+    const expectedAmount = payment.type === PaymentType.WALLET_DEPOSIT
+      ? payment.amountKes
+      : LOAN_PROCESSING_FEE_KES;
     if (
       payment.currency !== 'KES' ||
-      payment.amountKes !== LOAN_PROCESSING_FEE_KES ||
+      payment.amountKes !== expectedAmount ||
+      !Number.isSafeInteger(expectedAmount) ||
+      expectedAmount <= 0 ||
       typeof amount !== 'number' ||
       !Number.isSafeInteger(amount) ||
       amount !== payment.amountKes ||
@@ -2246,6 +2583,10 @@ export class PaymentService {
       }
       return account;
     }
+    return this.getOrCreateWalletAccount(tx, userId);
+  }
+
+  private async getOrCreateWalletAccount(tx: Prisma.TransactionClient, userId: string) {
     const code = `WALLET_${userId}`;
     const existing = await tx.ledgerAccount.findUnique({ where: { code } });
     if (existing) {
@@ -2260,6 +2601,48 @@ export class PaymentService {
     return tx.ledgerAccount.create({
       data: { code, name: 'Customer wallet', accountType: LedgerAccountType.LIABILITY, currency: 'KES', userId },
     });
+  }
+
+  private getWalletDepositLimits(): { minimumAmountKes: number; maximumAmountKes: number } | null {
+    const minimum = process.env.WALLET_DEPOSIT_MIN_KES;
+    const maximum = process.env.WALLET_DEPOSIT_MAX_KES;
+    if (!minimum || !maximum || !/^[1-9]\d*$/.test(minimum) || !/^[1-9]\d*$/.test(maximum)) return null;
+    const minimumAmountKes = Number(minimum);
+    const maximumAmountKes = Number(maximum);
+    if (!Number.isSafeInteger(minimumAmountKes) || !Number.isSafeInteger(maximumAmountKes) ||
+      minimumAmountKes > maximumAmountKes) return null;
+    return { minimumAmountKes, maximumAmountKes };
+  }
+
+  private assertWalletDepositReplay(
+    payment: {
+      id: string;
+      internalReference: string;
+      userId: string;
+      type: PaymentType;
+      amountKes: number;
+      currency: string;
+      status: PaymentStatus;
+      requestHash: string | null;
+    },
+    userId: string,
+    requestHash: string,
+  ) {
+    if (payment.userId !== userId || payment.type !== PaymentType.WALLET_DEPOSIT ||
+      payment.currency !== 'KES' || payment.requestHash !== requestHash) {
+      throw new ConflictException('The idempotency key has already been used.');
+    }
+    return {
+      reference: payment.internalReference,
+      status: payment.status,
+      amountKes: payment.amountKes,
+      currency: payment.currency,
+      message: payment.status === PaymentStatus.PENDING
+        ? 'This wallet deposit is still unresolved. Do not submit another payment while it is being checked.'
+        : payment.status === PaymentStatus.CONFIRMED
+          ? 'This wallet deposit has already been confirmed.'
+          : 'This wallet deposit attempt has already been recorded.',
+    };
   }
 
 }

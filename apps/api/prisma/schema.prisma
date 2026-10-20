@@ -68,6 +68,7 @@ enum PaymentStatus {
 enum PaymentType {
   ACTIVATION
   LOAN_PROCESSING_FEE
+  WALLET_DEPOSIT
   REPAYMENT
   DISBURSEMENT
   WITHDRAWAL
@@ -702,6 +703,8 @@ model Repayment {
   principalPaidKes     Int
   chargesPaidKes       Int
   amountKes            Int
+  outstandingAfterKes  Int?
+  loanStatusAfter      LoanStatus?
   createdAt            DateTime           @default(now())
   loan                 Loan               @relation(fields: [loanId], references: [id], onDelete: Restrict)
   schedule             RepaymentSchedule? @relation(fields: [scheduleId], references: [id], onDelete: Restrict)

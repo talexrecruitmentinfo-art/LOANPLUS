@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { IsEnum, IsString, Length, Matches } from 'class-validator';
 import { LedgerAccountType } from '@prisma/client';
 import { AuthenticatedRequest } from '../auth/request.types';
@@ -33,8 +33,19 @@ export class CustomerLedgerController {
   }
 
   @Get('transactions')
-  async listTransactions(@Req() request: AuthenticatedRequest) {
-    return { data: await this.ledger.listCustomerEntries(request.principal!.id) };
+  async listTransactions(
+    @Req() request: AuthenticatedRequest,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const parsedLimit = limit === undefined ? 25 : Number(limit);
+    if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+      throw new BadRequestException('Wallet transaction page size must be between 1 and 100.');
+    }
+    if (cursor !== undefined && (cursor.length < 1 || cursor.length > 40)) {
+      throw new BadRequestException('Wallet transaction cursor is invalid.');
+    }
+    return { data: await this.ledger.listCustomerEntries(request.principal!.id, cursor, parsedLimit) };
   }
 }
 

@@ -31,7 +31,28 @@ describe('M-Pesa payment callback reconciliation', () => {
   let nextTransactionError: Error | null;
   let paymentUpdateData: Record<string, unknown> | undefined;
   let callbackEventData: Record<string, unknown> | undefined;
-  let activationRequestRecord: Record<string, unknown>;
+  let activationRequestRecord: {
+    id: string;
+    paymentTransactionId: string;
+    userId: string;
+    callbackTokenHash: string;
+    checkoutRequestId: string | null;
+    merchantRequestId: string | null;
+    phoneNumberCiphertext: string | null;
+    expiresAt: Date;
+    policySnapshot: Prisma.JsonValue;
+    paymentTransaction: {
+      id: string;
+      internalReference: string;
+      userId: string;
+      type: PaymentType;
+      loanApplicationId: string | null;
+      amountKes: number;
+      currency: string;
+      status: 'PENDING' | 'CONFIRMED' | 'FAILED' | 'CANCELLED' | 'EXPIRED';
+      failureCode: string | null;
+    };
+  };
   let paymentService: PaymentService;
   let queryStkStatus: jest.Mock;
   let postLedger: jest.Mock;
@@ -171,7 +192,9 @@ describe('M-Pesa payment callback reconciliation', () => {
         findFirst: jest.fn(async () => ({ id: 'loan-application-id' })),
         updateMany: jest.fn(async () => ({ count: 1 })),
       },
-      systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
+      systemSetting: { findUnique: jest.fn(async ({ where }: { where: { key: string } }) => ({
+        value: where.key === 'loan.charges_revenue_account' ? 'LOAN_CHARGES_REVENUE' : 'LOAN_PROCESSING_FEES',
+      })) },
       user: { update: userUpdate },
       referral: { updateMany: jest.fn(async () => ({ count: 0 })) },
       authAuditLog: { create: jest.fn(async () => ({})) },
@@ -252,6 +275,102 @@ describe('M-Pesa payment callback reconciliation', () => {
     expect(paymentFailureCode).toBeNull();
     expect(postLedger).toHaveBeenCalledTimes(1);
     expect(userUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('credits a wallet deposit only once after matching callback amount, phone, IDs, and provider success', async () => {
+    const depositAmount = 1250;
+    const depositRequest = {
+      ...activationRequestRecord,
+      policySnapshot: { purpose: 'WALLET_DEPOSIT', amountKes: depositAmount, currency: 'KES' },
+      paymentTransaction: {
+        ...activationRequestRecord.paymentTransaction,
+        type: PaymentType.WALLET_DEPOSIT,
+        amountKes: depositAmount,
+      },
+    };
+    (prisma.activationPaymentRequest.findUnique as jest.Mock).mockResolvedValue(depositRequest);
+    const callback = successfulCallback({
+      CallbackMetadata: {
+        Item: [
+          { Name: 'Amount', Value: depositAmount },
+          { Name: 'MpesaReceiptNumber', Value: 'DEPOSITTEST1' },
+          { Name: 'PhoneNumber', Value: 254712345678 },
+        ],
+      },
+    });
+    await paymentService.handleMpesaCallback(callbackToken, callback);
+    await paymentService.handleMpesaCallback(callbackToken, callback);
+
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(postLedger).toHaveBeenCalledTimes(1);
+    expect(postLedger).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      transactionType: 'WALLET_DEPOSIT',
+      paymentId: 'payment-id',
+      lines: [
+        { accountId: 'clearing-account', debitKes: depositAmount, creditKes: 0 },
+        { accountId: 'wallet-account', debitKes: 0, creditKes: depositAmount },
+      ],
+    }));
+    expect(userUpdate).not.toHaveBeenCalled();
+  });
+
+  it('binds and settles a valid callback that arrives before the STK response identifiers are persisted', async () => {
+    const depositAmount = 1250;
+    const depositRequest = {
+      ...activationRequestRecord,
+      checkoutRequestId: null,
+      merchantRequestId: null,
+      policySnapshot: { purpose: 'WALLET_DEPOSIT', amountKes: depositAmount, currency: 'KES' },
+      paymentTransaction: {
+        ...activationRequestRecord.paymentTransaction,
+        type: PaymentType.WALLET_DEPOSIT,
+        amountKes: depositAmount,
+      },
+    };
+    (prisma.activationPaymentRequest.findUnique as jest.Mock).mockResolvedValue(depositRequest);
+    await paymentService.handleMpesaCallback(callbackToken, successfulCallback({
+      CallbackMetadata: {
+        Item: [
+          { Name: 'Amount', Value: depositAmount },
+          { Name: 'MpesaReceiptNumber', Value: 'EARLYCALLBACK1' },
+          { Name: 'PhoneNumber', Value: 254712345678 },
+        ],
+      },
+    }));
+
+    expect(queryStkStatus).toHaveBeenCalledWith(checkoutRequestId);
+    expect(transactionClient.activationPaymentRequest.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: { checkoutRequestId, merchantRequestId },
+    }));
+    expect(paymentStatus).toBe('CONFIRMED');
+    expect(postLedger).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      transactionType: 'WALLET_DEPOSIT',
+      paymentId: 'payment-id',
+    }));
+  });
+
+  it('does not credit a wallet deposit for an unsuccessful or mismatched callback', async () => {
+    const depositRequest = {
+      ...activationRequestRecord,
+      policySnapshot: { purpose: 'WALLET_DEPOSIT', amountKes: 1250, currency: 'KES' },
+      paymentTransaction: {
+        ...activationRequestRecord.paymentTransaction,
+        type: PaymentType.WALLET_DEPOSIT,
+        amountKes: 1250,
+      },
+    };
+    (prisma.activationPaymentRequest.findUnique as jest.Mock).mockResolvedValue(depositRequest);
+    providerResultCode = 1032;
+    await paymentService.handleMpesaCallback(callbackToken, {
+      Body: { stkCallback: {
+        CheckoutRequestID: checkoutRequestId,
+        MerchantRequestID: merchantRequestId,
+        ResultCode: 1032,
+        ResultDesc: 'Unsuccessful provider outcome.',
+      } },
+    });
+    expect(paymentStatus).toBe('PENDING');
+    expect(postLedger).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -403,7 +522,9 @@ describe('M-Pesa payment callback reconciliation', () => {
           })),
         },
         loan: { findFirst: jest.fn(async () => null) },
-        systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
+        systemSetting: { findUnique: jest.fn(async ({ where }: { where: { key: string } }) => ({
+          value: where.key === 'loan.charges_revenue_account' ? 'LOAN_CHARGES_REVENUE' : 'LOAN_PROCESSING_FEES',
+        })) },
         ledgerAccount: { findUnique: jest.fn(async ({ where }: { where: { code: string } }) => ({
           id: where.code,
           isActive: true,
@@ -541,7 +662,9 @@ describe('M-Pesa payment callback reconciliation', () => {
               })),
           })),
         },
-        systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
+        systemSetting: { findUnique: jest.fn(async ({ where }: { where: { key: string } }) => ({
+          value: where.key === 'loan.charges_revenue_account' ? 'LOAN_CHARGES_REVENUE' : 'LOAN_PROCESSING_FEES',
+        })) },
         ledgerAccount: { findUnique: jest.fn(async ({ where }: { where: { code: string } }) => ({
           id: where.code,
           isActive: true,
@@ -820,7 +943,9 @@ describe('M-Pesa payment callback reconciliation', () => {
             processingFeePayments: [],
           })),
         },
-        systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
+        systemSetting: { findUnique: jest.fn(async ({ where }: { where: { key: string } }) => ({
+          value: where.key === 'loan.charges_revenue_account' ? 'LOAN_CHARGES_REVENUE' : 'LOAN_PROCESSING_FEES',
+        })) },
         ledgerAccount: { findUnique: jest.fn(async ({ where }: { where: { code: string } }) => ({
           id: where.code,
           isActive: true,
@@ -914,7 +1039,9 @@ describe('M-Pesa payment callback reconciliation', () => {
             processingFeePayments: [],
           })),
         },
-        systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
+        systemSetting: { findUnique: jest.fn(async ({ where }: { where: { key: string } }) => ({
+          value: where.key === 'loan.charges_revenue_account' ? 'LOAN_CHARGES_REVENUE' : 'LOAN_PROCESSING_FEES',
+        })) },
         ledgerAccount: { findUnique: jest.fn(async ({ where }: { where: { code: string } }) => ({
           id: where.code,
           isActive: true,
@@ -1012,7 +1139,9 @@ describe('M-Pesa payment callback reconciliation', () => {
             processingFeePayments: [],
           })),
         },
-        systemSetting: { findUnique: jest.fn(async () => ({ value: 'LOAN_PROCESSING_FEES' })) },
+        systemSetting: { findUnique: jest.fn(async ({ where }: { where: { key: string } }) => ({
+          value: where.key === 'loan.charges_revenue_account' ? 'LOAN_CHARGES_REVENUE' : 'LOAN_PROCESSING_FEES',
+        })) },
         ledgerAccount: { findUnique: jest.fn(async ({ where }: { where: { code: string } }) => ({
           id: where.code,
           isActive: true,
@@ -1725,8 +1854,8 @@ describe('M-Pesa payment callback reconciliation', () => {
     ['ownership', 'userId', 'different-user'],
     ['currency', 'currency', 'USD'],
   ] as const)('rejects a successful callback with mismatched payment %s', async (_field, field, value) => {
-    const linkedPayment = activationRequestRecord.paymentTransaction as Record<string, string>;
-    linkedPayment[field] = value;
+    if (field === 'userId') activationRequestRecord.paymentTransaction.userId = value;
+    else activationRequestRecord.paymentTransaction.currency = value;
 
     await expect(paymentService.handleMpesaCallback(callbackToken, successfulCallback()))
       .rejects.toBeInstanceOf(ForbiddenException);

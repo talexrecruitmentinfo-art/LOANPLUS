@@ -2,7 +2,7 @@ import { Body, Controller, ForbiddenException, Get, Headers, Param, Post, Req, U
 import { Throttle } from '@nestjs/throttler';
 import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard } from '../auth/session.guard';
-import { InitiateLoanProcessingFeeDto } from './payment.dto';
+import { InitiateLoanProcessingFeeDto, WalletDepositDto } from './payment.dto';
 import { PaymentService } from './payment.service';
 
 function assertSameOrigin(request: AuthenticatedRequest): void {
@@ -40,6 +40,32 @@ export class PaymentController {
     return {
       data: await this.payments.initiateLoanProcessingFee(request.principal!.id, dto, idempotencyKey),
     };
+  }
+
+  @Get('wallet-deposit-quote')
+  async getWalletDepositQuote() {
+    return { data: await this.payments.getWalletDepositQuote() };
+  }
+
+  @Post('wallet-deposits')
+  @UseGuards(CustomerSessionGuard)
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  async initiateWalletDeposit(
+    @Body() dto: WalletDepositDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    assertSameOrigin(request);
+    return { data: await this.payments.initiateWalletDeposit(request.principal!.id, dto, idempotencyKey) };
+  }
+
+  @Get('wallet-deposits/:reference')
+  @UseGuards(CustomerSessionGuard)
+  async getWalletDepositStatus(
+    @Param('reference') reference: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return { data: await this.payments.getWalletDepositStatus(request.principal!.id, reference) };
   }
 
   @Get()

@@ -44,6 +44,7 @@ export class AdminService {
       openSupportTickets,
       pendingLegacyProcessing,
       verifiedPaymentTotals,
+      confirmedWalletDepositTotals,
       walletLiabilityEntries,
       recentActivity,
     ] = await Promise.all([
@@ -75,6 +76,14 @@ export class AdminService {
         },
         _sum: { amountKes: true },
       }),
+      this.prisma.paymentTransaction.aggregate({
+        where: {
+          type: PaymentType.WALLET_DEPOSIT,
+          status: PaymentStatus.CONFIRMED,
+          currency: 'KES',
+        },
+        _sum: { amountKes: true },
+      }),
       this.prisma.ledgerEntry.aggregate({
         where: {
           account: { userId: { not: null }, accountType: 'LIABILITY', currency: 'KES', isActive: true },
@@ -102,6 +111,7 @@ export class AdminService {
           failed: failedPayments - pendingLegacyProcessing,
         },
         verifiedPaymentsKes: verifiedPaymentTotals._sum.amountKes ?? 0,
+        confirmedWalletDepositsKes: confirmedWalletDepositTotals._sum.amountKes ?? 0,
         walletLiabilitiesKes: (walletLiabilityEntries._sum.creditKes ?? 0) - (walletLiabilityEntries._sum.debitKes ?? 0),
         loanApplications: { pending: submittedApplications, approved: approvedApplications, rejected: rejectedApplications },
         loans: { disbursed: disbursedLoans, overdue: overdueLoans, repaid: repaidLoans },
@@ -246,6 +256,9 @@ export class AdminService {
               merchantRequestId: true,
               callbackEvents: { select: { providerResultCode: true, providerReceiptReference: true, receivedAt: true }, orderBy: { receivedAt: 'desc' }, take: 5 },
             },
+          },
+          ledgerTransaction: {
+            select: { internalReference: true, transactionType: true, status: true },
           },
         },
         orderBy: [{ createdAt: 'desc' }, { internalReference: 'desc' }],

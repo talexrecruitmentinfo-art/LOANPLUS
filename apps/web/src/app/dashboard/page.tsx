@@ -19,6 +19,7 @@ interface LoanApplication {
   product: { name: string };
 }
 interface LedgerEntry { id: string; debitKes: number; creditKes: number; createdAt: string; transaction: { internalReference: string; transactionType: string; status: string } }
+interface LedgerPage { items: LedgerEntry[]; nextCursor: string | null }
 interface PaymentAttempt { internalReference: string; type: string; amountKes: number; currency: string; status: string; createdAt: string; providerResult: { message: string } }
 interface Product {
   id: string;
@@ -86,7 +87,7 @@ export default function DashboardPage() {
         const [walletResult, applicationsResult, entriesResult, paymentsResult, productsResult] = await Promise.allSettled([
           apiRequest<Wallet>('/wallet', { cache: 'no-store' }),
           apiRequest<LoanApplication[]>('/loans/applications', { cache: 'no-store' }),
-          apiRequest<LedgerEntry[]>('/wallet/transactions', { cache: 'no-store' }),
+          apiRequest<LedgerPage>('/wallet/transactions?limit=25', { cache: 'no-store' }),
           apiRequest<PaymentAttempt[]>('/payments', { cache: 'no-store' }),
           apiRequest<Product[]>('/loans/products', { cache: 'no-store' }),
         ]);
@@ -95,7 +96,7 @@ export default function DashboardPage() {
         else setError('Your wallet balance could not be refreshed.');
         if (applicationsResult.status === 'fulfilled') setApplications(applicationsResult.value);
         else setError((current) => current || 'Loan application status could not be loaded.');
-        if (entriesResult.status === 'fulfilled') setRecentEntries(entriesResult.value.slice(0, 4));
+        if (entriesResult.status === 'fulfilled') setRecentEntries(entriesResult.value.items.slice(0, 4));
         else setError((current) => current || 'Recent wallet activity could not be loaded.');
         if (paymentsResult.status === 'fulfilled') setPaymentAttempts(paymentsResult.value.slice(0, 3));
         else setError((current) => current || 'Payment status could not be loaded.');
@@ -141,10 +142,10 @@ export default function DashboardPage() {
       {!wallet && <p className="dashboard-retry"><Link href="/wallet">Open wallet to retry balance</Link></p>}
       <section className="dashboard-quick-actions" aria-label="Quick actions">
         <Link className="dashboard-action" href="/loans"><span aria-hidden="true">↗</span><b>Apply for a loan</b></Link>
-        <button className="dashboard-action" type="button" disabled aria-label="Deposit unavailable: wallet deposits are not enabled"><span aria-hidden="true">＋</span><b>Deposit</b></button>
+        <Link className="dashboard-action" href="/wallet"><span aria-hidden="true">＋</span><b>Deposit or repay</b></Link>
         <button className="dashboard-action" type="button" disabled aria-label="Send Money unavailable: internal transfers are not enabled"><span aria-hidden="true">⇄</span><b>Send Money</b></button>
         <button className="dashboard-action" type="button" disabled aria-label="Withdraw unavailable: payouts are not enabled"><span aria-hidden="true">↗</span><b>Withdraw</b></button>
-        <p>Deposits, internal transfers, and withdrawals are not yet available.</p>
+        <p>Wallet deposits and loan repayments are available when their accounting and provider configuration is complete. Internal transfers and withdrawals remain unavailable.</p>
       </section>
       <section className="dashboard-products" aria-labelledby="dashboard-products-title">
         <div className="dashboard-section-heading"><h2 id="dashboard-products-title">Loan products</h2><Link href="/loans">View all <span aria-hidden="true">›</span></Link></div>

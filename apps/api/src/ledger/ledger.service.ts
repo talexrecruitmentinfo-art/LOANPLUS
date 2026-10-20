@@ -141,23 +141,55 @@ export class LedgerService {
   }
 
   async getCustomerWallet(userId: string) {
-    const entries = await this.prisma.ledgerEntry.findMany({
-      where: {
-        account: { userId, accountType: LedgerAccountType.LIABILITY, currency: 'KES', isActive: true },
-        transaction: { status: 'POSTED' },
-      },
-      select: { debitKes: true, creditKes: true },
-    });
+    const [entries, pendingDeposits] = await Promise.all([
+      this.prisma.ledgerEntry.findMany({
+        where: {
+          account: {
+            code: `WALLET_${userId}`,
+            userId,
+            accountType: LedgerAccountType.LIABILITY,
+            currency: 'KES',
+            isActive: true,
+          },
+          transaction: { status: 'POSTED' },
+        },
+        select: { debitKes: true, creditKes: true },
+      }),
+      this.prisma.paymentTransaction.aggregate({
+        where: { userId, type: 'WALLET_DEPOSIT', status: 'PENDING', currency: 'KES' },
+        _sum: { amountKes: true },
+      }),
+    ]);
     const balanceKes = entries.reduce((balance, entry) => balance + entry.creditKes - entry.debitKes, 0);
-    if (!Number.isSafeInteger(balanceKes) || balanceKes < 0) {
+    const pendingDepositsKes = pendingDeposits._sum.amountKes ?? 0;
+    if (!Number.isSafeInteger(balanceKes) || balanceKes < 0 ||
+      !Number.isSafeInteger(pendingDepositsKes) || pendingDepositsKes < 0) {
       throw new ConflictException('The customer ledger balance requires reconciliation.');
     }
-    return { balanceKes, currency: 'KES' };
+    return {
+      balanceKes,
+      pendingDepositsKes,
+      currency: 'KES',
+    };
   }
 
-  async listCustomerEntries(userId: string) {
-    return this.prisma.ledgerEntry.findMany({
-      where: { account: { userId, currency: 'KES' } },
+  async listCustomerEntries(userId: string, cursor?: string, requestedLimit = 25) {
+    const limit = Math.min(Math.max(Math.floor(requestedLimit), 1), 100);
+    const walletAccount = {
+      code: `WALLET_${userId}`,
+      userId,
+      accountType: LedgerAccountType.LIABILITY,
+      currency: 'KES',
+    };
+    if (cursor) {
+      const anchor = await this.prisma.ledgerEntry.findFirst({
+        where: { id: cursor, account: walletAccount },
+        select: { id: true },
+      });
+      if (!anchor) throw new BadRequestException('Wallet transaction cursor is invalid.');
+    }
+    const rows = await this.prisma.ledgerEntry.findMany({
+      where: { account: walletAccount },
       select: {
         id: true,
         debitKes: true,
@@ -166,9 +198,16 @@ export class LedgerService {
         account: { select: { code: true, name: true } },
         transaction: { select: { internalReference: true, transactionType: true, status: true } },
       },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    return {
+      items,
+      nextCursor: hasMore ? items.at(-1)?.id ?? null : null,
+    };
   }
 
   private validateLines(lines: JournalLineInput[]): void {

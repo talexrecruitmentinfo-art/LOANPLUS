@@ -33,12 +33,20 @@ interface ProcessingFeeReadiness {
   unavailableReasons: string[];
 }
 
+interface LoanChargeRevenueSettings {
+  revenueAccountCode: string | null;
+  accountingReady: boolean;
+  unavailableReasons: string[];
+}
+
 export default function AdminSettingsPage() {
   const router = useRouter();
   const [accounts, setAccounts] = useState<LedgerAccount[]>([]);
   const [processingFee, setProcessingFee] = useState<ProcessingFeeSettings | null>(null);
+  const [loanCharges, setLoanCharges] = useState<LoanChargeRevenueSettings | null>(null);
   const [paymentReadiness, setPaymentReadiness] = useState<ProcessingFeeReadiness | null>(null);
   const [revenueAccountCode, setRevenueAccountCode] = useState('');
+  const [loanChargesRevenueCode, setLoanChargesRevenueCode] = useState('');
   const [newAccountCode, setNewAccountCode] = useState('');
   const [newAccountName, setNewAccountName] = useState('');
   const [newAccountType, setNewAccountType] = useState('ASSET');
@@ -49,14 +57,17 @@ export default function AdminSettingsPage() {
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
-    const [settings, nextAccounts, readiness] = await Promise.all([
+    const [settings, nextAccounts, readiness, chargeSettings] = await Promise.all([
       apiRequest<ProcessingFeeSettings>('/admin/loans/processing-fee-settings'),
       apiRequest<LedgerAccount[]>('/admin/ledger/accounts'),
       apiRequest<ProcessingFeeReadiness>('/payments/loan-processing-fee-quote'),
+      apiRequest<LoanChargeRevenueSettings>('/admin/loans/loan-charges-settings'),
     ]);
     setProcessingFee(settings);
+    setLoanCharges(chargeSettings);
     setPaymentReadiness(readiness);
     setRevenueAccountCode(settings.revenueAccountCode ?? '');
+    setLoanChargesRevenueCode(chargeSettings.revenueAccountCode ?? '');
     setAccounts(nextAccounts);
   }
 
@@ -109,8 +120,30 @@ export default function AdminSettingsPage() {
     }
   }
 
+  async function saveLoanChargeRevenueAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const updated = await apiRequest<LoanChargeRevenueSettings>('/admin/loans/loan-charges-settings', {
+        method: 'PATCH',
+        body: JSON.stringify({ revenueAccountCode: loanChargesRevenueCode, reason: configurationReason }),
+      });
+      setLoanCharges(updated);
+      setConfigurationReason('');
+      setNotice('Loan-charges revenue account saved and audited.');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Loan-charge accounting could not be configured.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const revenueAccounts = accounts.filter((account) =>
     account.isActive && account.currency === 'KES' && account.accountType === 'REVENUE');
+  const processingFeeRevenueAccounts = revenueAccounts.filter((account) => account.code !== loanCharges?.revenueAccountCode);
+  const loanChargesRevenueAccounts = revenueAccounts.filter((account) => account.code !== processingFee?.revenueAccountCode);
   const clearingReady = accounts.some((account) =>
     account.code === 'MPESA_CLEARING' && account.isActive && account.currency === 'KES' && account.accountType === 'ASSET');
 
@@ -159,10 +192,27 @@ export default function AdminSettingsPage() {
         <form className="product-config-form" onSubmit={saveProcessingFeeAccount}>
           <label>Processing-fee revenue account<select value={revenueAccountCode} onChange={(event) => setRevenueAccountCode(event.target.value)} required>
             <option value="">Choose an active revenue account</option>
-            {revenueAccounts.map((account) => <option value={account.code} key={account.id}>{account.code} · {account.name}</option>)}
+            {processingFeeRevenueAccounts.map((account) => <option value={account.code} key={account.id}>{account.code} · {account.name}</option>)}
           </select></label>
           <label>Configuration reason<textarea value={configurationReason} onChange={(event) => setConfigurationReason(event.target.value)} minLength={10} maxLength={500} rows={2} required /></label>
-          <button className="button" disabled={busy || !clearingReady || revenueAccounts.length === 0}>Save accounting destination <span aria-hidden="true">↗</span></button>
+          <button className="button" disabled={busy || !clearingReady || processingFeeRevenueAccounts.length === 0}>Save accounting destination <span aria-hidden="true">↗</span></button>
+        </form>
+      </section>
+      <section className="admin-workspace">
+        <div className="admin-workspace-heading">
+          <div><p className="eyebrow">LOAN REPAYMENTS</p><h2>Charges accounting</h2></div>
+          <span>{loanCharges ? loanCharges.accountingReady ? 'Accounting ready' : 'Accounting incomplete' : 'Loading'}</span>
+        </div>
+        <p className="settings-copy">Wallet repayments are applied to outstanding loan charges first. Charges credit this separate revenue account; principal reduces <code>LOAN_RECEIVABLE</code>. This account must not be the processing-fee revenue account.</p>
+        {loanCharges?.unavailableReasons.map((reason) => <p className="form-error" role="status" key={reason}>{reason}</p>)}
+        <form className="product-config-form" onSubmit={saveLoanChargeRevenueAccount}>
+          <label>Loan-charges revenue account<select value={loanChargesRevenueCode} onChange={(event) => setLoanChargesRevenueCode(event.target.value)} required>
+            <option value="">Choose a separate active revenue account</option>
+            {loanChargesRevenueAccounts.map((account) =>
+              <option value={account.code} key={account.id}>{account.code} · {account.name}</option>)}
+          </select></label>
+          <label>Configuration reason<textarea value={configurationReason} onChange={(event) => setConfigurationReason(event.target.value)} minLength={10} maxLength={500} rows={2} required /></label>
+          <button className="button" disabled={busy || !loanChargesRevenueCode || loanChargesRevenueAccounts.length === 0}>Save charges destination <span aria-hidden="true">↗</span></button>
         </form>
       </section>
       <PlatformSettingsPanel />

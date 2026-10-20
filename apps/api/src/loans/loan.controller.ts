@@ -1,7 +1,21 @@
 import { Body, Controller, Get, Headers, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import { ForbiddenException } from '@nestjs/common';
 import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard, SuperadminSessionGuard } from '../auth/session.guard';
-import { ConfigureLoanProcessingFeeDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
+import { ConfigureLoanChargeRevenueDto, ConfigureLoanProcessingFeeDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
+import { WalletRepaymentDto } from '../payments/payment.dto';
+
+function assertSameOrigin(request: AuthenticatedRequest): void {
+  const expected = new URL(process.env.WEB_ORIGIN ?? 'http://localhost:3000').origin;
+  const origin = request.headers.origin;
+  if (!origin) return;
+  try {
+    if (new URL(origin).origin !== expected) throw new ForbiddenException('Request origin rejected.');
+  } catch {
+    throw new ForbiddenException('Request origin rejected.');
+  }
+}
 import { LoanService } from './loan.service';
 
 @Controller('loans')
@@ -28,6 +42,47 @@ export class CustomerLoanController {
   async listOwnApplications(@Req() request: AuthenticatedRequest) {
     return { data: await this.loans.listMyApplications(request.principal!.id) };
   }
+
+  @Get('repayments/eligible')
+  @UseGuards(CustomerSessionGuard)
+  async listEligibleRepayments(@Req() request: AuthenticatedRequest) {
+    return { data: await this.loans.listMyEligibleRepayments(request.principal!.id) };
+  }
+
+  @Get('repayments/readiness')
+  async getWalletRepaymentReadiness() {
+    return { data: await this.loans.getWalletRepaymentReadiness() };
+  }
+
+  @Post(':id/repayments')
+  @UseGuards(CustomerSessionGuard)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async repayFromWallet(
+    @Param('id') id: string,
+    @Body() dto: WalletRepaymentDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    assertSameOrigin(request);
+    return {
+      data: await this.loans.repayWithWallet(
+        request.principal!.id,
+        id,
+        dto.amountKes,
+        dto.confirmed,
+        idempotencyKey,
+      ),
+    };
+  }
+
+  @Get('repayments/:reference')
+  @UseGuards(CustomerSessionGuard)
+  async getRepaymentReceipt(
+    @Param('reference') reference: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return { data: await this.loans.getMyWalletRepaymentReceipt(request.principal!.id, reference) };
+  }
 }
 
 @Controller('admin/loans')
@@ -52,6 +107,26 @@ export class AdminLoanController {
   ) {
     return {
       data: await this.loans.configureProcessingFeeRevenueAccount(
+        dto.revenueAccountCode,
+        dto.reason,
+        request.principal!.id,
+        request.ip,
+      ),
+    };
+  }
+
+  @Get('loan-charges-settings')
+  async getLoanChargeRevenueSettings() {
+    return { data: await this.loans.getLoanChargeRevenueSettings() };
+  }
+
+  @Patch('loan-charges-settings')
+  async configureLoanChargeRevenue(
+    @Body() dto: ConfigureLoanChargeRevenueDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return {
+      data: await this.loans.configureLoanChargeRevenueAccount(
         dto.revenueAccountCode,
         dto.reason,
         request.principal!.id,

@@ -781,7 +781,7 @@ describe('PaymentService provider reconciliation', () => {
 
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
-        type: { in: [PaymentType.ACTIVATION, PaymentType.LOAN_PROCESSING_FEE] },
+        type: { in: [PaymentType.ACTIVATION, PaymentType.LOAN_PROCESSING_FEE, PaymentType.WALLET_DEPOSIT] },
         status: 'PENDING',
         reconciliationAttempts: {
           some: {

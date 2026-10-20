@@ -43,7 +43,7 @@ describe('ledger database integration', () => {
         select: { id: true },
       }),
       prisma.ledgerAccount.create({
-        data: { code: `TEST_WALLET_${randomBytes(4).toString('hex')}`, name: 'Test customer wallet', accountType: 'LIABILITY', userId },
+        data: { code: `WALLET_${userId}`, name: 'Test customer wallet', accountType: 'LIABILITY', userId },
         select: { id: true },
       }),
     ]);
@@ -76,7 +76,11 @@ describe('ledger database integration', () => {
     const replay = await ledger.postBalancedTransaction(input);
     expect(first.id).toBe(replay.id);
     expect(first.entries).toHaveLength(2);
-    expect(await ledger.getCustomerWallet(userId)).toEqual({ balanceKes: 100, currency: 'KES' });
+    expect(await ledger.getCustomerWallet(userId)).toEqual({
+      balanceKes: 100,
+      pendingDepositsKes: 0,
+      currency: 'KES',
+    });
     await expect(ledger.postBalancedTransaction({
       ...input,
       reason: 'Different data under the same key.',

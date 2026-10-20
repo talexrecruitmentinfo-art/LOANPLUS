@@ -94,6 +94,7 @@ describe('AdminService financial and account views', () => {
       ]) },
     ]);
     expect(query.select).toHaveProperty('activationRequest.select.callbackEvents');
+    expect(query.select).toHaveProperty('ledgerTransaction.select.internalReference', true);
     expect(query.select).not.toHaveProperty('activationRequest.select.payload');
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ skip: 0, take: 25 }));
   });

@@ -1,14 +1,38 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
 import { formatMoney, PLATFORM_CURRENCY } from '@/lib/currency';
 
 interface Wallet {
   balanceKes: number;
+  pendingDepositsKes: number;
   currency: string;
+}
+
+interface WalletDepositQuote {
+  currency: string;
+  minimumAmountKes: number | null;
+  maximumAmountKes: number | null;
+  depositAvailable: boolean;
+  unavailableReasons: string[];
+}
+
+interface EligibleLoan {
+  id: string;
+  status: string;
+  amountDueKes: number;
+  principalDueKes: number;
+  chargesDueKes: number;
+  currency: string;
+  dueAt: string | null;
+}
+
+interface WalletRepaymentReadiness {
+  repaymentAvailable: boolean;
+  unavailableReasons: string[];
 }
 
 interface LedgerEntry {
@@ -20,6 +44,11 @@ interface LedgerEntry {
   transaction: { internalReference: string; transactionType: string; status: string };
 }
 
+interface LedgerPage {
+  items: LedgerEntry[];
+  nextCursor: string | null;
+}
+
 interface PaymentRecord {
   internalReference: string;
   type: string;
@@ -27,6 +56,7 @@ interface PaymentRecord {
   currency: string;
   status: string;
   receiptReference: string | null;
+  unresolved?: boolean;
   createdAt: string;
   providerResult: { code: number | null; message: string };
 }
@@ -35,22 +65,38 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
   const router = useRouter();
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [entries, setEntries] = useState<LedgerEntry[]>([]);
+  const [nextEntryCursor, setNextEntryCursor] = useState<string | null>(null);
+  const [loadingMoreEntries, setLoadingMoreEntries] = useState(false);
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [depositQuote, setDepositQuote] = useState<WalletDepositQuote | null>(null);
+  const [eligibleLoans, setEligibleLoans] = useState<EligibleLoan[] | null>(null);
+  const [repaymentReadiness, setRepaymentReadiness] = useState<WalletRepaymentReadiness | null>(null);
+  const [serviceErrors, setServiceErrors] = useState<string[]>([]);
+  const [depositAmount, setDepositAmount] = useState('');
+  const [mpesaPhoneNumber, setMpesaPhoneNumber] = useState('');
+  const [selectedLoanId, setSelectedLoanId] = useState('');
+  const [repaymentAmount, setRepaymentAmount] = useState('');
+  const [walletActionBusy, setWalletActionBusy] = useState(false);
+  const [walletActionMessage, setWalletActionMessage] = useState('');
+  const [walletActionError, setWalletActionError] = useState('');
+  const [walletStatusVerified, setWalletStatusVerified] = useState(false);
   const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
     const requestId = ++refreshSequence.current;
     setRefreshing(true);
+    setLoadingMoreEntries(false);
+    if (view === 'wallet') setWalletStatusVerified(false);
     setError('');
     try {
       const [nextWallet, nextEntries, nextPayments] = await Promise.all([
         apiRequest<Wallet>('/wallet', { cache: 'no-store' }),
-        apiRequest<LedgerEntry[]>('/wallet/transactions', { cache: 'no-store' }),
+        apiRequest<LedgerPage>('/wallet/transactions?limit=25', { cache: 'no-store' }),
         apiRequest<PaymentRecord[]>('/payments', { cache: 'no-store' }),
       ]);
       if (requestId !== refreshSequence.current) return;
@@ -58,8 +104,40 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         throw new Error('The wallet currency does not match the supported platform currency.');
       }
       setWallet(nextWallet);
-      setEntries(nextEntries);
+      setEntries(nextEntries.items);
+      setNextEntryCursor(nextEntries.nextCursor);
       setPayments(nextPayments);
+      if (view === 'wallet') {
+        const [quoteResult, loansResult, readinessResult] = await Promise.allSettled([
+          apiRequest<WalletDepositQuote>('/payments/wallet-deposit-quote', { cache: 'no-store' }),
+          apiRequest<EligibleLoan[]>('/loans/repayments/eligible', { cache: 'no-store' }),
+          apiRequest<WalletRepaymentReadiness>('/loans/repayments/readiness', { cache: 'no-store' }),
+        ]);
+        if (requestId !== refreshSequence.current) return;
+        const errors: string[] = [];
+        if (quoteResult.status === 'fulfilled') setDepositQuote(quoteResult.value);
+        else {
+          setDepositQuote(null);
+          errors.push(quoteResult.reason instanceof Error ? quoteResult.reason.message : 'Deposit availability could not be checked.');
+        }
+        if (loansResult.status === 'fulfilled') setEligibleLoans(loansResult.value);
+        else {
+          setEligibleLoans(null);
+          errors.push(loansResult.reason instanceof Error ? loansResult.reason.message : 'Eligible loans could not be loaded.');
+        }
+        if (readinessResult.status === 'fulfilled') setRepaymentReadiness(readinessResult.value);
+        else {
+          setRepaymentReadiness(null);
+          errors.push(readinessResult.reason instanceof Error ? readinessResult.reason.message : 'Wallet repayment availability could not be checked.');
+        }
+        setServiceErrors(errors);
+        setWalletStatusVerified(quoteResult.status === 'fulfilled');
+        if (loansResult.status === 'fulfilled' && !loansResult.value.some((loan) => loan.id === selectedLoanId)) {
+          const nextLoan = loansResult.value[0];
+          setSelectedLoanId(nextLoan?.id ?? '');
+          setRepaymentAmount(nextLoan ? String(nextLoan.amountDueKes) : '');
+        }
+      }
     } catch (reason) {
       if (requestId !== refreshSequence.current) return;
       if (reason instanceof Error && reason.message.includes('Authentication required')) {
@@ -72,7 +150,28 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         setRefreshing(false);
       }
     }
-  }, [router]);
+  }, [router, selectedLoanId, view]);
+
+  const loadMoreEntries = useCallback(async () => {
+    if (!nextEntryCursor || loadingMoreEntries) return;
+    const requestId = refreshSequence.current;
+    setLoadingMoreEntries(true);
+    try {
+      const page = await apiRequest<LedgerPage>(
+        `/wallet/transactions?limit=25&cursor=${encodeURIComponent(nextEntryCursor)}`,
+        { cache: 'no-store' },
+      );
+      if (requestId !== refreshSequence.current) return;
+      setEntries((current) => [...current, ...page.items]);
+      setNextEntryCursor(page.nextCursor);
+    } catch (reason) {
+      if (requestId === refreshSequence.current) {
+        setError(reason instanceof Error ? reason.message : 'More wallet transactions could not be loaded.');
+      }
+    } finally {
+      if (requestId === refreshSequence.current) setLoadingMoreEntries(false);
+    }
+  }, [loadingMoreEntries, nextEntryCursor]);
 
   useEffect(() => {
     void refresh();
@@ -92,6 +191,69 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
 
   const title = view === 'wallet' ? 'Your wallet.' : 'Account activity.';
   const visibleEntries = view === 'wallet' ? filteredEntries.slice(0, 6) : filteredEntries;
+  const selectedLoan = eligibleLoans?.find((loan) => loan.id === selectedLoanId);
+  const unresolvedDeposit = payments.some((payment) =>
+    payment.type === 'WALLET_DEPOSIT' && (payment.status === 'PENDING' || payment.unresolved));
+
+  useEffect(() => {
+    if (view !== 'wallet' || !unresolvedDeposit) return;
+    const interval = window.setInterval(() => void refresh(), 5_000);
+    return () => window.clearInterval(interval);
+  }, [refresh, unresolvedDeposit, view]);
+
+  async function submitDeposit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const amountKes = Number(depositAmount);
+    if (!Number.isSafeInteger(amountKes) || amountKes <= 0 || !depositQuote?.depositAvailable) return;
+    if (!window.confirm(`Confirm an M-Pesa wallet deposit of ${formatMoney(amountKes)}?`)) return;
+    setWalletActionBusy(true);
+    setWalletActionError('');
+    setWalletActionMessage('');
+    try {
+      const result = await apiRequest<{ reference: string; status: string; message: string }>('/payments/wallet-deposits', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify({ amountKes, mpesaPhoneNumber }),
+      });
+      setWalletActionMessage(`${result.message} Reference: ${result.reference} · ${result.status}.`);
+      await refresh();
+    } catch (reason) {
+      setWalletActionError(reason instanceof Error ? reason.message : 'The wallet deposit could not be started.');
+    } finally {
+      setWalletActionBusy(false);
+    }
+  }
+
+  async function submitRepayment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const amountKes = Number(repaymentAmount);
+    if (!selectedLoan || !Number.isSafeInteger(amountKes) || amountKes <= 0 ||
+      amountKes > selectedLoan.amountDueKes || !repaymentReadiness?.repaymentAvailable) return;
+    if (!window.confirm(`Confirm a wallet repayment of ${formatMoney(amountKes)} to loan ${selectedLoan.id}?`)) return;
+    setWalletActionBusy(true);
+    setWalletActionError('');
+    setWalletActionMessage('');
+    try {
+      const receipt = await apiRequest<{
+        reference: string;
+        amountKes: number;
+        outstandingKes: number;
+        status: string;
+      }>(`/loans/${encodeURIComponent(selectedLoan.id)}/repayments`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify({ amountKes, confirmed: true }),
+      });
+      setWalletActionMessage(
+        `Repayment receipt ${receipt.reference}: ${formatMoney(receipt.amountKes)} applied. Remaining due ${formatMoney(receipt.outstandingKes)} · ${receipt.status}.`,
+      );
+      await refresh();
+    } catch (reason) {
+      setWalletActionError(reason instanceof Error ? reason.message : 'The wallet repayment could not be completed.');
+    } finally {
+      setWalletActionBusy(false);
+    }
+  }
 
   return (
     <main className="dashboard-page customer-ledger-page">
@@ -109,17 +271,58 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         <section className="customer-balance-band" aria-live="polite">
           <span>Available balance</span>
           <strong>{wallet ? formatMoney(wallet.balanceKes) : loading ? 'Loading…' : 'Unavailable'}</strong>
+          <span>Pending deposits: {wallet ? formatMoney(wallet.pendingDepositsKes) : loading ? 'Loading…' : 'Unavailable'}</span>
           <small>Available in {PLATFORM_CURRENCY.name} · {PLATFORM_CURRENCY.code}</small>
         </section>
       )}
       {view === 'wallet' && <section className="wallet-actions" aria-label="Wallet services">
-        <h2>Wallet services</h2>
-        <div>
-          <button type="button" disabled aria-label="Deposit unavailable: M-Pesa wallet deposits are not enabled">Deposit</button>
-          <button type="button" disabled aria-label="Send Money unavailable: internal wallet transfers are not enabled">Send Money</button>
-          <button type="button" disabled aria-label="Withdrawal unavailable: an authorized payout integration is not enabled">Withdraw</button>
-        </div>
-        <p>Deposits, internal transfers, and M-Pesa withdrawals are not available yet. Your displayed balance remains the posted ledger balance.</p>
+        <h2>Deposit with M-Pesa</h2>
+        {unresolvedDeposit && <p className="form-error" role="alert">A previous wallet deposit is unresolved. Refresh its status and wait for reconciliation before starting another deposit.</p>}
+        {depositQuote?.unavailableReasons.map((reason) => <p className="form-error" role="status" key={reason}>{reason}</p>)}
+        {serviceErrors.map((reason) => <p className="form-error" role="alert" key={reason}>{reason}</p>)}
+        <form className="wallet-action-form" onSubmit={submitDeposit}>
+          <label>Deposit amount (KES)
+            <input type="number" min={depositQuote?.minimumAmountKes ?? undefined} max={depositQuote?.maximumAmountKes ?? undefined} step="1" value={depositAmount} onChange={(event) => setDepositAmount(event.target.value)} required />
+          </label>
+          {depositQuote && <small>
+            {depositQuote.minimumAmountKes !== null && depositQuote.maximumAmountKes !== null
+              ? `Allowed amount: ${formatMoney(depositQuote.minimumAmountKes)}–${formatMoney(depositQuote.maximumAmountKes)}.`
+              : 'Deposit limits are not configured.'}
+          </small>}
+          <label>M-Pesa phone number
+            <input type="tel" inputMode="tel" autoComplete="tel" value={mpesaPhoneNumber} onChange={(event) => setMpesaPhoneNumber(event.target.value)} placeholder="+2547…" required />
+          </label>
+          <button className="button" type="submit" disabled={walletActionBusy || loading || !walletStatusVerified || unresolvedDeposit || !depositQuote?.depositAvailable}>
+            {walletActionBusy ? 'Starting…' : 'Continue to M-Pesa'}
+          </button>
+        </form>
+        <p>Your balance is credited only after verified M-Pesa confirmation. If a request is unresolved, do not submit another deposit.</p>
+        <h2>Repay a loan from your wallet</h2>
+        {repaymentReadiness?.unavailableReasons.map((reason) => <p className="form-error" role="status" key={reason}>{reason}</p>)}
+        {eligibleLoans?.length === 0 && <p>No disbursed loan is currently eligible for wallet repayment.</p>}
+        {eligibleLoans && eligibleLoans.length > 0 && selectedLoan && (
+          <form className="wallet-action-form" onSubmit={submitRepayment}>
+            <label>Loan<select value={selectedLoanId} onChange={(event) => {
+              const loan = eligibleLoans.find((item) => item.id === event.target.value);
+              setSelectedLoanId(event.target.value);
+              setRepaymentAmount(loan ? String(loan.amountDueKes) : '');
+            }}>
+              {eligibleLoans.map((loan) => <option key={loan.id} value={loan.id}>
+                {loan.id} · {loan.status.replaceAll('_', ' ')} · due {formatMoney(loan.amountDueKes)}
+              </option>)}
+            </select></label>
+            <p>Amount due {formatMoney(selectedLoan.amountDueKes)} · available wallet balance {formatMoney(wallet?.balanceKes ?? 0)}.</p>
+            <label>Repayment amount (KES)
+              <input type="number" min="1" max={selectedLoan.amountDueKes} step="1" value={repaymentAmount} onChange={(event) => setRepaymentAmount(event.target.value)} required />
+            </label>
+            <p>Repayments are applied to outstanding charges first, then principal. Partial repayments are allowed.</p>
+            <button className="button" type="submit" disabled={walletActionBusy || loading || !walletStatusVerified || eligibleLoans === null || !repaymentReadiness?.repaymentAvailable || !wallet || Number(repaymentAmount) > wallet.balanceKes}>
+              {walletActionBusy ? 'Processing…' : 'Review and repay'}
+            </button>
+          </form>
+        )}
+        {walletActionMessage && <p className="wallet-action-success" role="status">{walletActionMessage}</p>}
+        {walletActionError && <p className="form-error" role="alert">{walletActionError}</p>}
       </section>}
       {view === 'transactions' && (
         <section className="customer-filter-row" aria-label="Filter account activity">
@@ -166,6 +369,11 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
             </article>
           );
         })}
+        {view === 'transactions' && nextEntryCursor && (
+          <button className="quiet-button" type="button" disabled={loadingMoreEntries || refreshing} onClick={() => void loadMoreEntries()}>
+            {loadingMoreEntries ? 'Loading more…' : 'Load more transactions'}
+          </button>
+        )}
       </section>
       <section className="customer-payment-attempts" aria-label="Payment attempts">
         <h2>Payment attempts</h2>

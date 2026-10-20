@@ -108,6 +108,17 @@ export class ConfigureLoanProcessingFeeDto {
   reason!: string;
 }
 
+export class ConfigureLoanChargeRevenueDto {
+  @IsString()
+  @Length(3, 40)
+  @Matches(/^[A-Z][A-Z0-9_]{2,39}$/)
+  revenueAccountCode!: string;
+
+  @IsString()
+  @Length(10, 500)
+  reason!: string;
+}
+
 export class ConfirmManualDisbursementDto {
   @IsString()
   @Length(6, 100)

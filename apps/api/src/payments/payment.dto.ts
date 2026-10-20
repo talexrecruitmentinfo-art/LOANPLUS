@@ -1,4 +1,4 @@
-import { Equals, IsString, Length, Matches } from 'class-validator';
+import { Equals, IsInt, IsString, Length, Matches, Min } from 'class-validator';
 
 export class InitiateLoanProcessingFeeDto {
   @IsString()
@@ -12,4 +12,24 @@ export class InitiateLoanProcessingFeeDto {
   @Length(9, 16)
   @Matches(/^\+?[\d ()-]{9,16}$/)
   mpesaPhoneNumber!: string;
+}
+
+export class WalletDepositDto {
+  @IsInt()
+  @Min(1)
+  amountKes!: number;
+
+  @IsString()
+  @Length(9, 16)
+  @Matches(/^\+?[\d ()-]{9,16}$/)
+  mpesaPhoneNumber!: string;
+}
+
+export class WalletRepaymentDto {
+  @IsInt()
+  @Min(1)
+  amountKes!: number;
+
+  @Equals(true)
+  confirmed!: true;
 }

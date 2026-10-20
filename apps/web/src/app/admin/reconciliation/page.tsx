@@ -213,7 +213,7 @@ export default function AdminReconciliationPage() {
       <section className="reconciliation-queue" aria-live="polite">
         {loading ? <p>Loading reconciliation queue…</p> : items.length === 0 ? <p className="empty-copy">No unresolved payments match these filters.</p> : items.map((payment) => (
           <article key={payment.id}>
-            <div className="reconciliation-header"><div><b>{payment.internalReference}</b><small>{payment.type === 'LOAN_PROCESSING_FEE' ? 'Loan Processing Fee' : 'Historical activation payment'} · {payment.reconciliationStatus.replaceAll('_', ' ')}{payment.initiationPhase ? ` · ${payment.initiationPhase.replaceAll('_', ' ')}` : ''}</small></div><span className="status-label status-pending">{payment.reconciliationStatus.replaceAll('_', ' ')}</span></div>
+            <div className="reconciliation-header"><div><b>{payment.internalReference}</b><small>{payment.type === 'LOAN_PROCESSING_FEE' ? 'Loan Processing Fee' : payment.type === 'WALLET_DEPOSIT' ? 'Wallet Deposit' : 'Historical activation payment'} · {payment.reconciliationStatus.replaceAll('_', ' ')}{payment.initiationPhase ? ` · ${payment.initiationPhase.replaceAll('_', ' ')}` : ''}</small></div><span className="status-label status-pending">{payment.reconciliationStatus.replaceAll('_', ' ')}</span></div>
             <dl>
               <div><dt>Reason in queue</dt><dd>{payment.reasonForInclusion === 'LEGACY_UNRESOLVED_4999'
                 ? 'Legacy 4999 result remains unresolved regardless of age.'

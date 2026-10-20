@@ -214,8 +214,14 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
 .dashboard-home>.dashboard-empty{margin-top:12px}
 .wallet-actions{max-width:960px;margin:16px auto 0;padding:18px 20px;border:1px solid var(--line);border-radius:14px;background:#fff}
 .wallet-actions h2{margin:0 0 12px;font-size:17px}
-.wallet-actions>div{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
-.wallet-actions button{min-height:44px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#f3f6f2;color:#65736a;font-size:11px;font-weight:700;cursor:not-allowed}
+.wallet-actions h2:not(:first-child){margin-top:24px}
+.wallet-action-form{max-width:480px;display:grid;gap:10px}
+.wallet-action-form label{display:grid;gap:6px;font-size:12px;font-weight:700}
+.wallet-action-form input,.wallet-action-form select{width:100%;min-height:44px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);font:inherit}
+.wallet-action-form .button{min-height:44px;cursor:pointer}
+.wallet-action-form .button:disabled{cursor:not-allowed}
+.wallet-action-success{padding:12px;border:1px solid #b8d6bf;border-radius:9px;background:#f0f8f2;color:#285c37;font-weight:700}
+.wallet-actions small{color:var(--muted);font-size:11px}
 .wallet-actions p{margin:11px 0 0;color:var(--muted);font-size:11px;line-height:1.55}
 .trust-page{padding-bottom:calc(100px + env(safe-area-inset-bottom))}
 .trust-card-list{max-width:960px;margin:0 auto;padding:0 24px;display:grid;gap:9px}
@@ -240,7 +246,6 @@ a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,te
   .dashboard-shortcuts{grid-template-columns:1fr}
   .wallet-actions,.trust-error,.trust-loading{width:calc(100% - 28px)}
   .wallet-actions{padding:15px}
-  .wallet-actions>div{grid-template-columns:1fr}
   .trust-card-list{width:100%;padding-inline:14px}
   .trust-card{padding:13px;grid-template-columns:34px minmax(0,1fr);gap:9px}
   .trust-card-icon{width:34px;height:34px}

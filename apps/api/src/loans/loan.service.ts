@@ -7,7 +7,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { IdentityStatus, LedgerAccountType, LoanApplicationStatus, LoanStatus, PaymentStatus, PaymentType, Prisma } from '@prisma/client';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { normalizeKenyaPhone } from '../auth/security.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
@@ -49,6 +49,376 @@ export class LoanService {
       },
       orderBy: { name: 'asc' },
     });
+  }
+
+  async listMyEligibleRepayments(userId: string) {
+    const loans = await this.prisma.loan.findMany({
+      where: {
+        userId,
+        status: { in: [LoanStatus.DISBURSED, LoanStatus.REPAYMENT_IN_PROGRESS, LoanStatus.OVERDUE] },
+        disbursedAt: { not: null },
+      },
+      select: {
+        id: true,
+        status: true,
+        principalKes: true,
+        chargesKes: true,
+        outstandingKes: true,
+        totalRepayableKes: true,
+        repaymentSchedules: {
+          select: { dueAt: true },
+          orderBy: { sequence: 'asc' },
+          take: 1,
+        },
+        repayments: { select: { principalPaidKes: true, chargesPaidKes: true } },
+      },
+      orderBy: { disbursedAt: 'asc' },
+    });
+    return loans.map((loan) => {
+      const principalPaidKes = loan.repayments.reduce((total, repayment) => total + repayment.principalPaidKes, 0);
+      const chargesPaidKes = loan.repayments.reduce((total, repayment) => total + repayment.chargesPaidKes, 0);
+      const principalDueKes = loan.principalKes - principalPaidKes;
+      const chargesDueKes = loan.chargesKes - chargesPaidKes;
+      if (!Number.isSafeInteger(principalDueKes) || !Number.isSafeInteger(chargesDueKes) ||
+        principalDueKes < 0 || chargesDueKes < 0 ||
+        principalDueKes + chargesDueKes !== loan.outstandingKes ||
+        loan.principalKes + loan.chargesKes !== loan.totalRepayableKes) {
+        throw new ConflictException('A loan balance requires reconciliation before repayment.');
+      }
+      return {
+        id: loan.id,
+        status: loan.status,
+        amountDueKes: loan.outstandingKes,
+        principalDueKes,
+        chargesDueKes,
+        currency: 'KES',
+        dueAt: loan.repaymentSchedules[0]?.dueAt ?? null,
+      };
+    }).filter((loan) => loan.amountDueKes > 0);
+  }
+
+  async getLoanChargeRevenueSettings() {
+    const [setting, processingFeeSetting] = await Promise.all([
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.charges_revenue_account' } }),
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
+    ]);
+    const revenueAccountCode = typeof setting?.value === 'string' ? setting.value : null;
+    const processingFeeCode = typeof processingFeeSetting?.value === 'string' ? processingFeeSetting.value : null;
+    const revenue = revenueAccountCode
+      ? await this.prisma.ledgerAccount.findUnique({ where: { code: revenueAccountCode } })
+      : null;
+    const ready = Boolean(revenue?.isActive && revenue.currency === 'KES' &&
+      revenue.accountType === LedgerAccountType.REVENUE && revenueAccountCode !== processingFeeCode);
+    return {
+      revenueAccountCode,
+      accountingReady: ready,
+      unavailableReasons: ready ? [] : [
+        revenueAccountCode
+          ? 'Select an active KES loan-charges revenue account that is separate from processing-fee revenue.'
+          : 'A loan-charges revenue account has not been selected.',
+      ],
+    };
+  }
+
+  async getWalletRepaymentReadiness() {
+    const [chargeSettings, receivable] = await Promise.all([
+      this.getLoanChargeRevenueSettings(),
+      this.prisma.ledgerAccount.findUnique({
+        where: { code: 'LOAN_RECEIVABLE' },
+        select: { isActive: true, currency: true, accountType: true },
+      }),
+    ]);
+    const unavailableReasons = [...chargeSettings.unavailableReasons];
+    if (!receivable?.isActive || receivable.currency !== 'KES' ||
+      receivable.accountType !== LedgerAccountType.ASSET) {
+      unavailableReasons.push('An active KES loan-receivable asset account is required.');
+    }
+    return { repaymentAvailable: unavailableReasons.length === 0, unavailableReasons };
+  }
+
+  async configureLoanChargeRevenueAccount(accountCode: string, reason: string, reviewerId: string, ipAddress?: string) {
+    const normalizedCode = accountCode.trim();
+    const [account, processingFeeSetting] = await Promise.all([
+      this.prisma.ledgerAccount.findUnique({ where: { code: normalizedCode } }),
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
+    ]);
+    if (!account || !account.isActive || account.currency !== 'KES' ||
+      account.accountType !== LedgerAccountType.REVENUE ||
+      (typeof processingFeeSetting?.value === 'string' && processingFeeSetting.value === normalizedCode)) {
+      throw new UnprocessableEntityException('Select an active KES revenue account separate from processing-fee revenue.');
+    }
+    await this.prisma.$transaction(async (tx) => {
+      await tx.systemSetting.upsert({
+        where: { key: 'loan.charges_revenue_account' },
+        create: { key: 'loan.charges_revenue_account', value: normalizedCode, updatedById: reviewerId },
+        update: { value: normalizedCode, updatedById: reviewerId },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId: reviewerId,
+          action: 'LOAN_CHARGES_REVENUE_ACCOUNT_CONFIGURED',
+          subjectType: 'SYSTEM_SETTING',
+          subjectId: normalizedCode,
+          outcome: 'SUCCESS',
+          reason: reason.trim(),
+          ipAddress: ipAddress?.slice(0, 64),
+        },
+      });
+    });
+    return this.getLoanChargeRevenueSettings();
+  }
+
+  async repayWithWallet(userId: string, loanId: string, amountKes: number, confirmed: boolean, idempotencyKey?: string) {
+    if (confirmed !== true) throw new BadRequestException('Review and confirm the loan repayment before submitting it.');
+    if (!Number.isSafeInteger(amountKes) || amountKes <= 0) {
+      throw new BadRequestException('Enter a positive whole-KSh repayment amount.');
+    }
+    if (!idempotencyKey || !/^[a-zA-Z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+      throw new BadRequestException('A valid Idempotency-Key header is required.');
+    }
+    const scopedKey = `wallet-repayment:${createHash('sha256').update(`${userId}:${idempotencyKey}`).digest('hex')}`;
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify({ userId, loanId, amountKes, currency: 'KES' }))
+      .digest('hex');
+    const existing = await this.prisma.paymentTransaction.findUnique({
+      where: { idempotencyKey: scopedKey },
+      include: { repayments: { include: { loan: { select: { id: true, userId: true, outstandingKes: true, status: true } } } } },
+    });
+    if (existing) return this.walletRepaymentReplay(existing, userId, requestHash);
+
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const raced = await tx.paymentTransaction.findUnique({
+          where: { idempotencyKey: scopedKey },
+          include: { repayments: { include: { loan: { select: { id: true, userId: true, outstandingKes: true, status: true } } } } },
+        });
+        if (raced) return this.walletRepaymentReplay(raced, userId, requestHash);
+
+        const loan = await tx.loan.findFirst({
+          where: {
+            id: loanId,
+            userId,
+            status: { in: [LoanStatus.DISBURSED, LoanStatus.REPAYMENT_IN_PROGRESS, LoanStatus.OVERDUE] },
+            disbursedAt: { not: null },
+          },
+          include: {
+            repayments: { select: { principalPaidKes: true, chargesPaidKes: true } },
+            repaymentSchedules: { orderBy: { sequence: 'asc' }, take: 1 },
+          },
+        });
+        if (!loan) throw new NotFoundException('An eligible disbursed loan was not found.');
+        if (!loan.repaymentSchedules[0]) throw new ConflictException('The loan repayment schedule is unavailable.');
+        const principalPaidKes = loan.repayments.reduce((total, repayment) => total + repayment.principalPaidKes, 0);
+        const chargesPaidKes = loan.repayments.reduce((total, repayment) => total + repayment.chargesPaidKes, 0);
+        const principalDueKes = loan.principalKes - principalPaidKes;
+        const chargesDueKes = loan.chargesKes - chargesPaidKes;
+        if (!Number.isSafeInteger(principalDueKes) || !Number.isSafeInteger(chargesDueKes) ||
+          principalDueKes < 0 || chargesDueKes < 0 ||
+          principalDueKes + chargesDueKes !== loan.outstandingKes ||
+          loan.principalKes + loan.chargesKes !== loan.totalRepayableKes ||
+          loan.outstandingKes <= 0) {
+          throw new ConflictException('The loan balance requires reconciliation before repayment.');
+        }
+        if (amountKes > loan.outstandingKes) {
+          throw new BadRequestException('The repayment cannot exceed the current amount due.');
+        }
+        const [walletAccount, receivableAccount, chargesSetting, feeSetting] = await Promise.all([
+          tx.ledgerAccount.findUnique({ where: { code: `WALLET_${userId}` } }),
+          tx.ledgerAccount.findUnique({ where: { code: 'LOAN_RECEIVABLE' } }),
+          tx.systemSetting.findUnique({ where: { key: 'loan.charges_revenue_account' } }),
+          tx.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
+        ]);
+        if (!walletAccount || walletAccount.userId !== userId ||
+          walletAccount.accountType !== LedgerAccountType.LIABILITY ||
+          walletAccount.currency !== 'KES' || !walletAccount.isActive) {
+          throw new ConflictException('The customer wallet account is unavailable.');
+        }
+        const revenueCode = typeof chargesSetting?.value === 'string' ? chargesSetting.value : null;
+        const feeRevenueCode = typeof feeSetting?.value === 'string' ? feeSetting.value : null;
+        const chargesRevenueAccount = revenueCode
+          ? await tx.ledgerAccount.findUnique({ where: { code: revenueCode } })
+          : null;
+        if (!receivableAccount?.isActive || receivableAccount.currency !== 'KES' ||
+          receivableAccount.accountType !== LedgerAccountType.ASSET ||
+          !chargesRevenueAccount?.isActive || chargesRevenueAccount.currency !== 'KES' ||
+          chargesRevenueAccount.accountType !== LedgerAccountType.REVENUE ||
+          revenueCode === feeRevenueCode) {
+          throw new ConflictException('Separate KES loan-receivable and loan-charges revenue accounts must be configured.');
+        }
+        const walletEntries = await tx.ledgerEntry.aggregate({
+          where: { ledgerAccountId: walletAccount.id, transaction: { status: 'POSTED' } },
+          _sum: { creditKes: true, debitKes: true },
+        });
+        const walletBalanceKes = (walletEntries._sum.creditKes ?? 0) - (walletEntries._sum.debitKes ?? 0);
+        if (!Number.isSafeInteger(walletBalanceKes) || walletBalanceKes < amountKes) {
+          throw new ConflictException('The available wallet balance is insufficient for this repayment.');
+        }
+
+        const chargesPaidNow = Math.min(amountKes, chargesDueKes);
+        const principalPaidNow = amountKes - chargesPaidNow;
+        const nextOutstandingKes = loan.outstandingKes - amountKes;
+        const nextStatus = nextOutstandingKes === 0
+          ? LoanStatus.REPAID
+          : loan.status === LoanStatus.OVERDUE
+            ? LoanStatus.OVERDUE
+            : LoanStatus.REPAYMENT_IN_PROGRESS;
+        const now = new Date();
+        const payment = await tx.paymentTransaction.create({
+          data: {
+            internalReference: `LPWR${randomBytes(16).toString('hex').toUpperCase()}`,
+            idempotencyKey: scopedKey,
+            requestHash,
+            userId,
+            type: PaymentType.REPAYMENT,
+            amountKes,
+            currency: 'KES',
+            status: PaymentStatus.CONFIRMED,
+            provider: 'INTERNAL_WALLET',
+            confirmedAt: now,
+          },
+          select: { id: true, internalReference: true },
+        });
+        const repayment = await tx.repayment.create({
+          data: {
+            loanId: loan.id,
+            scheduleId: loan.repaymentSchedules[0].id,
+            paymentTransactionId: payment.id,
+            principalPaidKes: principalPaidNow,
+            chargesPaidKes: chargesPaidNow,
+            amountKes,
+            outstandingAfterKes: nextOutstandingKes,
+            loanStatusAfter: nextStatus,
+          },
+        });
+        const updated = await tx.loan.updateMany({
+          where: {
+            id: loan.id,
+            userId,
+            outstandingKes: loan.outstandingKes,
+            status: { in: [LoanStatus.DISBURSED, LoanStatus.REPAYMENT_IN_PROGRESS, LoanStatus.OVERDUE] },
+          },
+          data: {
+            outstandingKes: nextOutstandingKes,
+            status: nextStatus,
+            ...(nextOutstandingKes === 0 ? { repaidAt: now } : {}),
+          },
+        });
+        if (updated.count !== 1) throw new ConflictException('The loan balance changed while this repayment was being processed.');
+        await this.ledger.postWithinTransaction(tx, {
+          idempotencyKey: `wallet-loan-repayment:${payment.id}`,
+          transactionType: 'WALLET_LOAN_REPAYMENT',
+          actorType: 'CUSTOMER',
+          actorId: userId,
+          paymentId: payment.id,
+          reason: `Wallet repayment for loan ${loan.id}`,
+          lines: [
+            { accountId: walletAccount.id, debitKes: amountKes, creditKes: 0 },
+            ...(principalPaidNow > 0
+              ? [{ accountId: receivableAccount.id, debitKes: 0, creditKes: principalPaidNow }]
+              : []),
+            ...(chargesPaidNow > 0
+              ? [{ accountId: chargesRevenueAccount.id, debitKes: 0, creditKes: chargesPaidNow }]
+              : []),
+          ],
+        });
+        return {
+          reference: payment.internalReference,
+          loanId: loan.id,
+          amountKes,
+          principalPaidKes: principalPaidNow,
+          chargesPaidKes: chargesPaidNow,
+          outstandingKes: nextOutstandingKes,
+          status: nextStatus,
+          currency: 'KES',
+          createdAt: repayment.createdAt,
+        };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && (error.code === 'P2002' || error.code === 'P2034')) {
+        const duplicate = await this.prisma.paymentTransaction.findUnique({
+          where: { idempotencyKey: scopedKey },
+          include: { repayments: { include: { loan: { select: { id: true, userId: true, outstandingKes: true, status: true } } } } },
+        });
+        if (duplicate) return this.walletRepaymentReplay(duplicate, userId, requestHash);
+        if (error.code === 'P2034') {
+          throw new ConflictException('Another wallet transaction changed the available balance. Refresh and try again.');
+        }
+      }
+      throw error;
+    }
+  }
+
+  async getMyWalletRepaymentReceipt(userId: string, reference: string) {
+    const payment = await this.prisma.paymentTransaction.findFirst({
+      where: {
+        userId,
+        internalReference: reference,
+        type: PaymentType.REPAYMENT,
+        provider: 'INTERNAL_WALLET',
+      },
+      include: { repayments: { include: { loan: { select: { id: true, userId: true, outstandingKes: true, status: true } } } } },
+    });
+    if (!payment || payment.repayments.length !== 1) throw new NotFoundException('Wallet repayment receipt was not found.');
+    const repayment = payment.repayments[0];
+    if (repayment.outstandingAfterKes === null || repayment.loanStatusAfter === null) {
+      throw new ConflictException('The repayment receipt requires reconciliation.');
+    }
+    return {
+      reference: payment.internalReference,
+      loanId: repayment.loanId,
+      amountKes: repayment.amountKes,
+      principalPaidKes: repayment.principalPaidKes,
+      chargesPaidKes: repayment.chargesPaidKes,
+      outstandingKes: repayment.outstandingAfterKes,
+      status: repayment.loanStatusAfter,
+      currency: payment.currency,
+      createdAt: repayment.createdAt,
+    };
+  }
+
+  private walletRepaymentReplay(
+    payment: {
+      userId: string;
+      type: PaymentType;
+      provider: string;
+      requestHash: string | null;
+      internalReference: string;
+      currency: string;
+      repayments: Array<{
+        loanId: string;
+        amountKes: number;
+        principalPaidKes: number;
+        chargesPaidKes: number;
+        outstandingAfterKes: number | null;
+        loanStatusAfter: LoanStatus | null;
+        createdAt: Date;
+        loan: { id: string; userId: string; outstandingKes: number; status: LoanStatus };
+      }>;
+    },
+    userId: string,
+    requestHash: string,
+  ) {
+    if (payment.userId !== userId || payment.type !== PaymentType.REPAYMENT ||
+      payment.provider !== 'INTERNAL_WALLET' || payment.currency !== 'KES' ||
+      payment.requestHash !== requestHash || payment.repayments.length !== 1 ||
+      payment.repayments[0].loan.userId !== userId ||
+      payment.repayments[0].loanId !== payment.repayments[0].loan.id ||
+      payment.repayments[0].outstandingAfterKes === null ||
+      payment.repayments[0].loanStatusAfter === null) {
+      throw new ConflictException('The idempotency key has already been used.');
+    }
+    const repayment = payment.repayments[0];
+    return {
+      reference: payment.internalReference,
+      loanId: repayment.loanId,
+      amountKes: repayment.amountKes,
+      principalPaidKes: repayment.principalPaidKes,
+      chargesPaidKes: repayment.chargesPaidKes,
+      outstandingKes: repayment.outstandingAfterKes,
+      status: repayment.loanStatusAfter,
+      currency: payment.currency,
+      createdAt: repayment.createdAt,
+    };
   }
 
   listProductsForAdmin() {
@@ -348,23 +718,29 @@ export class LoanService {
   }
 
   async getProcessingFeeSettings() {
-    const [setting, clearing] = await Promise.all([
+    const [setting, clearing, chargesSetting] = await Promise.all([
       this.prisma.systemSetting.findUnique({ where: { key: 'loan.processing_fee_revenue_account' } }),
       this.prisma.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } }),
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.charges_revenue_account' } }),
     ]);
     const revenueAccountCode = typeof setting?.value === 'string' ? setting.value : null;
+    const chargesRevenueCode = typeof chargesSetting?.value === 'string' ? chargesSetting.value : null;
     const revenue = revenueAccountCode
       ? await this.prisma.ledgerAccount.findUnique({ where: { code: revenueAccountCode } })
       : null;
     const policy = getLoanProcessingFeePolicy();
     const unavailableReasons: string[] = [];
     const clearingReady = Boolean(clearing?.isActive && clearing.currency === 'KES' && clearing.accountType === LedgerAccountType.ASSET);
-    const revenueReady = Boolean(revenue?.isActive && revenue.currency === 'KES' && revenue.accountType === LedgerAccountType.REVENUE);
+    const revenueReady = Boolean(revenue?.isActive && revenue.currency === 'KES' &&
+      revenue.accountType === LedgerAccountType.REVENUE && revenueAccountCode !== chargesRevenueCode);
     if (policy.status !== 'CONFIGURED') unavailableReasons.push('Approved processing-fee policy approval, version, or disclosure is not configured.');
     if (!clearingReady) {
       unavailableReasons.push('An active KES asset account with code MPESA_CLEARING is required.');
     }
     if (!revenueAccountCode) unavailableReasons.push('A processing-fee revenue account has not been selected.');
+    else if (revenueAccountCode === chargesRevenueCode) {
+      unavailableReasons.push('Processing-fee and loan-charges revenue must use separate ledger accounts.');
+    }
     else if (!revenueReady) {
       unavailableReasons.push('The selected processing-fee destination must be an active KES revenue account.');
     }
@@ -380,11 +756,15 @@ export class LoanService {
 
   async configureProcessingFeeRevenueAccount(accountCode: string, reason: string, reviewerId: string, ipAddress?: string) {
     const normalizedCode = accountCode.trim();
-    const account = await this.prisma.ledgerAccount.findUnique({ where: { code: normalizedCode } });
+    const [account, chargesSetting] = await Promise.all([
+      this.prisma.ledgerAccount.findUnique({ where: { code: normalizedCode } }),
+      this.prisma.systemSetting.findUnique({ where: { key: 'loan.charges_revenue_account' } }),
+    ]);
     const clearing = await this.prisma.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } });
     if (!account || !account.isActive || account.currency !== 'KES' || account.accountType !== 'REVENUE' ||
+      (typeof chargesSetting?.value === 'string' && chargesSetting.value === normalizedCode) ||
       !clearing || !clearing.isActive || clearing.currency !== 'KES' || clearing.accountType !== 'ASSET') {
-      throw new UnprocessableEntityException('An active KES revenue account and M-Pesa clearing account are required.');
+      throw new UnprocessableEntityException('Select an active KES processing-fee revenue account separate from loan charges, and an active M-Pesa clearing account.');
     }
     await this.prisma.$transaction(async (tx) => {
       await tx.systemSetting.upsert({

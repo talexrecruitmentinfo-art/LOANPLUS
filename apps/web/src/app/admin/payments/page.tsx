@@ -23,6 +23,7 @@ interface MonitoredPayment {
     merchantRequestId: string | null;
     callbackEvents: Array<{ providerResultCode: string | null; providerReceiptReference: string | null; receivedAt: string }>;
   };
+  ledgerTransaction: null | { internalReference: string; transactionType: string; status: string };
 }
 
 interface PaymentPage {
@@ -113,7 +114,7 @@ export default function AdminPaymentsPage() {
           <option value="ALL">All statuses</option><option value="PENDING">Pending / unresolved</option><option value="CONFIRMED">Confirmed</option><option value="FAILED">Failed</option><option value="CANCELLED">Cancelled</option><option value="EXPIRED">Expired</option><option value="REVERSED">Reversed</option>
         </select></label>
         <label>Payment type<select value={type} onChange={(event) => selectType(event.target.value)}>
-          <option value="ALL">All payment types</option><option value="ACTIVATION">Historical activation</option><option value="LOAN_PROCESSING_FEE">Loan processing fee</option><option value="REPAYMENT">Repayment</option><option value="DISBURSEMENT">Disbursement</option><option value="WITHDRAWAL">Withdrawal</option><option value="REFUND">Refund</option>
+          <option value="ALL">All payment types</option><option value="ACTIVATION">Historical activation</option><option value="LOAN_PROCESSING_FEE">Loan processing fee</option><option value="WALLET_DEPOSIT">Wallet deposit</option><option value="REPAYMENT">Repayment</option><option value="DISBURSEMENT">Disbursement</option><option value="WITHDRAWAL">Withdrawal</option><option value="REFUND">Refund</option>
         </select></label>
         <label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
         <label>To<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
@@ -145,7 +146,7 @@ export default function AdminPaymentsPage() {
                     <details>
                       <summary>Details</summary>
                       <div>
-                        <dl><div><dt>Customer</dt><dd>{payment.user.fullName} · {payment.user.email}</dd></div><div><dt>Internal reference</dt><dd>{payment.internalReference}</dd></div><div><dt>Checkout ID</dt><dd>{payment.activationRequest?.checkoutRequestId ?? 'Not recorded'}</dd></div><div><dt>Merchant ID</dt><dd>{payment.activationRequest?.merchantRequestId ?? 'Not recorded'}</dd></div><div><dt>Provider reference</dt><dd>{payment.providerReference ?? 'Not recorded'}</dd></div><div><dt>Verified receipt</dt><dd>{payment.receiptReference ?? 'Not verified'}</dd></div><div><dt>Stored result</dt><dd>{payment.failureCode ?? 'None'}</dd></div><div><dt>Confirmed at</dt><dd>{payment.confirmedAt ? new Date(payment.confirmedAt).toLocaleString('en-KE') : 'Not confirmed'}</dd></div></dl>
+                        <dl><div><dt>Customer</dt><dd>{payment.user.fullName} · {payment.user.email}</dd></div><div><dt>Internal reference</dt><dd>{payment.internalReference}</dd></div><div><dt>Checkout ID</dt><dd>{payment.activationRequest?.checkoutRequestId ?? 'Not recorded'}</dd></div><div><dt>Merchant ID</dt><dd>{payment.activationRequest?.merchantRequestId ?? 'Not recorded'}</dd></div><div><dt>Provider reference</dt><dd>{payment.providerReference ?? 'Not recorded'}</dd></div><div><dt>Verified receipt</dt><dd>{payment.receiptReference ?? 'Not verified'}</dd></div><div><dt>Ledger journal</dt><dd>{payment.ledgerTransaction ? `${payment.ledgerTransaction.internalReference} · ${payment.ledgerTransaction.status}` : 'Not posted'}</dd></div><div><dt>Stored result</dt><dd>{payment.failureCode ?? 'None'}</dd></div><div><dt>Confirmed at</dt><dd>{payment.confirmedAt ? new Date(payment.confirmedAt).toLocaleString('en-KE') : 'Not confirmed'}</dd></div></dl>
                         <div className="admin-callback-history"><b>Callback history</b>{payment.activationRequest?.callbackEvents.length ? payment.activationRequest.callbackEvents.map((event, index) => <small key={`${event.receivedAt}-${index}`}>Result {event.providerResultCode ?? 'unknown'} · receipt {event.providerReceiptReference ? 'recorded' : 'not present'} · {new Date(event.receivedAt).toLocaleString('en-KE')}</small>) : <small>No callback event recorded.</small>}</div>
                         {unresolvedLegacy && <p className="settings-copy">This historical FAILED / MPESA_RESULT_4999 record is unresolved, not a verified failure. Confirm the provider outcome before any retry.</p>}
                       </div>

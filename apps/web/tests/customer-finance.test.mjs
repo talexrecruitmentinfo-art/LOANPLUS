@@ -21,16 +21,24 @@ const paymentService = await readFile(new URL('../../api/src/payments/payment.se
 
 test('wallet and transactions are loaded from authenticated ledger endpoints without cached reads', () => {
   assert.match(wallet, /apiRequest<Wallet>\('\/wallet', \{ cache: 'no-store' \}\)/);
-  assert.match(wallet, /apiRequest<LedgerEntry\[]>\('\/wallet\/transactions', \{ cache: 'no-store' \}\)/);
+  assert.match(wallet, /apiRequest<LedgerPage>\('\/wallet\/transactions\?limit=25', \{ cache: 'no-store' \}\)/);
   assert.match(wallet, /apiRequest<PaymentRecord\[]>\('\/payments', \{ cache: 'no-store' \}\)/);
+  assert.match(wallet, /apiRequest<WalletDepositQuote>\('\/payments\/wallet-deposit-quote'/);
+  assert.match(wallet, /apiRequest<EligibleLoan\[]>\('\/loans\/repayments\/eligible'/);
+  assert.match(wallet, /\/payments\/wallet-deposits/);
+  assert.match(wallet, /\/repayments`/);
   assert.match(wallet, /Payment attempts/);
   assert.match(wallet, /entry\.transaction\.internalReference/);
   assert.match(wallet, /entry\.transaction\.status/);
+  assert.match(wallet, /apiRequest<LedgerPage>\('\/wallet\/transactions\?limit=25/);
   assert.match(wallet, /const refreshSequence = useRef\(0\)/);
   assert.match(wallet, /if \(requestId !== refreshSequence\.current\) return/);
-  assert.match(wallet, /Deposit unavailable: M-Pesa wallet deposits are not enabled/);
-  assert.match(wallet, /Send Money unavailable: internal wallet transfers are not enabled/);
-  assert.match(wallet, /Withdrawal unavailable: an authorized payout integration is not enabled/);
+  assert.match(wallet, /pendingDepositsKes/);
+  assert.match(wallet, /do not submit another deposit/);
+  assert.match(wallet, /wallet repayment/);
+  assert.match(wallet, /Load more transactions/);
+  assert.match(wallet, /Confirm an M-Pesa wallet deposit/);
+  assert.match(wallet, /Confirm a wallet repayment/);
 });
 
 test('Trust Centre uses authenticated identity and backend fee status, with real policy and support links', () => {
@@ -45,7 +53,7 @@ test('Trust Centre uses authenticated identity and backend fee status, with real
 });
 
 test('home shows authenticated recent activity and keeps the overview available when wallet data fails', () => {
-  assert.match(dashboard, /apiRequest<LedgerEntry\[]>\('\/wallet\/transactions', \{ cache: 'no-store' \}\)/);
+  assert.match(dashboard, /apiRequest<LedgerPage>\('\/wallet\/transactions\?limit=25', \{ cache: 'no-store' \}\)/);
   assert.match(dashboard, /apiRequest<PaymentAttempt\[]>\('\/payments', \{ cache: 'no-store' \}\)/);
   assert.match(dashboard, /apiRequest<Product\[]>\('\/loans\/products', \{ cache: 'no-store' \}\)/);
   assert.match(dashboard, /No available loan products/);
@@ -53,7 +61,8 @@ test('home shows authenticated recent activity and keeps the overview available 
   assert.match(dashboard, /Retry/);
   assert.match(dashboard, /\/loans\?productId=\$\{encodeURIComponent\(item\.id\)\}/);
   assert.match(dashboard, /wallet \? formatKes\(wallet\.balanceKes\) : 'Unavailable'/);
-  assert.match(dashboard, /Deposit unavailable: wallet deposits are not enabled/);
+  assert.match(dashboard, /href="\/wallet"/);
+  assert.match(dashboard, /Deposit or repay/);
   assert.match(dashboard, /Send Money unavailable: internal transfers are not enabled/);
   assert.match(dashboard, /Withdraw unavailable: payouts are not enabled/);
   assert.doesNotMatch(dashboard, /if \(!wallet\) return/);
@@ -65,6 +74,12 @@ test('reconciliation page filters server-side and excludes customer identity fro
   assert.match(reconciliation, /query\.set\('category', queueCategory\)/);
   assert.match(reconciliation, /reasonForInclusion/);
   assert.doesNotMatch(reconciliation, /payment\.user\.(fullName|email)/);
+});
+
+test('admin payment monitoring filters wallet deposits and displays their ledger journal reference', async () => {
+  const adminPayments = await readFile(new URL('../src/app/admin/payments/page.tsx', import.meta.url), 'utf8');
+  assert.match(adminPayments, /value="WALLET_DEPOSIT">Wallet deposit/);
+  assert.match(adminPayments, /payment\.ledgerTransaction\.internalReference/);
 });
 
 test('profile is server-backed and uses only existing security and support actions', () => {
