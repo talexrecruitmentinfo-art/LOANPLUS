@@ -4,7 +4,7 @@ import { IsBoolean, IsDateString, IsIn, IsOptional, IsString, Length, MaxLength,
 import { Throttle } from '@nestjs/throttler';
 import type { AuthenticatedRequest } from '../auth/request.types';
 import { AuthService } from '../auth/auth.service';
-import { SuperadminSessionGuard } from '../auth/session.guard';
+import { AllowStaffRoles, SuperadminSessionGuard } from '../auth/session.guard';
 import { AdminService } from './admin.service';
 
 class UpdateCustomerStatusDto {
@@ -222,6 +222,7 @@ export class AdminController {
   }
 
   @Get('payments')
+  @AllowStaffRoles('STAFF_FINANCE')
   async listPayments(
     @Query('search') search?: string,
     @Query('status') status?: string,

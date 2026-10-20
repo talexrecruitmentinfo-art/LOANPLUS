@@ -375,21 +375,26 @@ export class AuthService {
   async requestSuperadminOtp(dto: SuperadminPasswordDto, ipAddress?: string): Promise<{ challengeId: string }> {
     const email = normalizeEmail(dto.email);
     const configuredEmail = process.env.SUPERADMIN_EMAIL ? normalizeEmail(process.env.SUPERADMIN_EMAIL) : '';
-    if (!configuredEmail) logger.error('Required Superadmin setting SUPERADMIN_EMAIL is missing.');
-    const admin = configuredEmail ? await this.prisma.superadminUser.findUnique({ where: { email } }) : null;
+    const admin = await this.prisma.superadminUser.findUnique({ where: { email } });
+    if (!configuredEmail && admin?.role === 'SUPERADMIN') {
+      logger.error('Required Superadmin setting SUPERADMIN_EMAIL is missing.');
+    }
     const passwordMatches = await bcrypt.compare(dto.password, admin?.passwordHash ?? DUMMY_PASSWORD_HASH);
+    const isStaff = admin?.role === 'STAFF_SUPPORT' || admin?.role === 'STAFF_FINANCE' ||
+      admin?.role === 'STAFF_OPERATIONS';
+    const isDesignatedSuperadmin = !!configuredEmail && admin?.role === 'SUPERADMIN' && email === configuredEmail;
     if (
       !admin ||
-      email !== configuredEmail ||
-      admin.role !== 'SUPERADMIN' ||
+      (!isDesignatedSuperadmin && !isStaff) ||
       !admin.isActive ||
       !admin.emailVerifiedAt ||
       !passwordMatches
     ) {
       await this.recordAdminAudit(admin?.id, 'LOGIN_PASSWORD', 'FAILURE', ipAddress);
-      await this.recordAuthAudit('SUPERADMIN', admin?.id, 'LOGIN_PASSWORD', 'FAILURE', ipAddress);
+      await this.recordAuthAudit(isStaff ? 'STAFF' : 'SUPERADMIN', admin?.id, 'LOGIN_PASSWORD', 'FAILURE', ipAddress);
       throw new UnauthorizedException('Email or password is incorrect.');
     }
+    const actorType = isStaff ? 'STAFF' : 'SUPERADMIN';
 
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     const now = new Date();
@@ -416,13 +421,13 @@ export class AuthService {
         data: { invalidatedAt: new Date() },
       });
       await this.recordAdminAudit(admin.id, 'OTP_DELIVERY', 'FAILURE', ipAddress);
-      await this.recordAuthAudit('SUPERADMIN', admin.id, 'OTP_DELIVERY', 'FAILURE', ipAddress);
+      await this.recordAuthAudit(actorType, admin.id, 'OTP_DELIVERY', 'FAILURE', ipAddress);
       logger.error('Superadmin OTP email delivery failed (email provider unavailable).');
       throw new ServiceUnavailableException('Administrator verification is unavailable.');
     }
 
     await this.recordAdminAudit(admin.id, 'OTP_REQUEST', 'SUCCESS', ipAddress);
-    await this.recordAuthAudit('SUPERADMIN', admin.id, 'OTP_REQUEST', 'SUCCESS', ipAddress);
+    await this.recordAuthAudit(actorType, admin.id, 'OTP_REQUEST', 'SUCCESS', ipAddress);
     return { challengeId: challenge.id };
   }
 
@@ -445,14 +450,17 @@ export class AuthService {
     const hashesMatch = timingSafeEqual(Buffer.from(suppliedHash, 'hex'), Buffer.from(challenge.otpHash, 'hex'));
     const challengeValid = !challenge.consumedAt && !challenge.invalidatedAt && challenge.expiresAt > now &&
       challenge.attempts < OTP_MAX_ATTEMPTS && challenge.superadmin.isActive &&
-      challenge.superadmin.emailVerifiedAt !== null && challenge.superadmin.role === 'SUPERADMIN';
+      challenge.superadmin.emailVerifiedAt !== null &&
+      (challenge.superadmin.role === 'SUPERADMIN' || challenge.superadmin.role === 'STAFF_SUPPORT' ||
+        challenge.superadmin.role === 'STAFF_FINANCE' || challenge.superadmin.role === 'STAFF_OPERATIONS');
+    const actorType = challenge.superadmin.role === 'SUPERADMIN' ? 'SUPERADMIN' : 'STAFF';
     if (!challengeValid || !hashesMatch) {
       await this.prisma.superadminOtpChallenge.updateMany({
         where: { id: challenge.id, consumedAt: null, invalidatedAt: null, attempts: { lt: OTP_MAX_ATTEMPTS } },
         data: { attempts: { increment: 1 } },
       });
       await this.recordAdminAudit(challenge.superadminId, 'OTP_VERIFY', 'FAILURE', ipAddress);
-      await this.recordAuthAudit('SUPERADMIN', challenge.superadminId, 'OTP_VERIFY', 'FAILURE', ipAddress);
+      await this.recordAuthAudit(actorType, challenge.superadminId, 'OTP_VERIFY', 'FAILURE', ipAddress);
       throw new UnauthorizedException('Verification code is invalid or expired.');
     }
 
@@ -481,10 +489,17 @@ export class AuthService {
         data: { superadminId: challenge.superadminId, action: 'LOGIN_OTP', outcome: 'SUCCESS', ipAddress },
       });
       await tx.authAuditLog.create({
-        data: { actorType: 'SUPERADMIN', actorId: challenge.superadminId, action: 'LOGIN_OTP', outcome: 'SUCCESS', ipAddress },
+        data: { actorType, actorId: challenge.superadminId, action: 'LOGIN_OTP', outcome: 'SUCCESS', ipAddress },
       });
     });
-    return { token, principal: { id: challenge.superadmin.id, role: 'SUPERADMIN', email: challenge.superadmin.email } };
+    return {
+      token,
+      principal: {
+        id: challenge.superadmin.id,
+        role: challenge.superadmin.role,
+        email: challenge.superadmin.email,
+      },
+    };
   }
 
   async logoutSuperadmin(sessionHash: string, ipAddress?: string): Promise<void> {

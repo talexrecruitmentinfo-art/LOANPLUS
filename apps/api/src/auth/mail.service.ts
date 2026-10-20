@@ -23,6 +23,22 @@ export class MailService {
     );
   }
 
+  async sendStaffInvitation(recipient: string, token: string): Promise<void> {
+    const origin = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
+    const setupUrl = new URL('/admin/staff-setup', origin);
+    setupUrl.searchParams.set('token', token);
+    await this.sendEmail(
+      recipient,
+      'Set up your LoanPlus staff account',
+      [
+        'A LoanPlus administrator invited you to set up a staff account.',
+        `Use this single-use link within 24 hours: ${setupUrl.toString()}`,
+        'After setup, sign in with your work email and password. A fresh email verification code is required each time.',
+        'If you were not expecting this invitation, contact your LoanPlus administrator.',
+      ].join('\n'),
+    );
+  }
+
   async sendSystemIncidentAlert(
     recipient: string,
     incident: { id: string; title: string; severity: string; component: string; description: string },

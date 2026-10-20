@@ -1,6 +1,12 @@
 import { Injectable, UnprocessableEntityException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+  MAX_WALLET_DEPOSIT_AMOUNT_KES,
+  MPESA_CLEARING_ACCOUNT_CODE,
+  WALLET_DEPOSIT_SETTING_KEY,
+} from '../payments/wallet-deposit.config';
 
 const CURRENCY_SETTING_KEY = 'platform.currency.display';
 const INSTALL_SETTING_KEY = 'platform.pwa.installation';
@@ -28,6 +34,32 @@ export interface ReconciliationThresholdRecord {
   updatedAt: Date | null;
   updatedById: string | null;
   updatedByEmail: string | null;
+}
+
+export interface WalletDepositConfiguration {
+  minimumAmountKes: number | null;
+  maximumAmountKes: number | null;
+  productApproved: boolean;
+  approvalReference: string | null;
+  approvalEvidence: string | null;
+  customerWalletLiabilityAccountCode: string;
+  mpesaClearingAccountCode: string;
+  configurationReason: string | null;
+  updatedAt: Date | null;
+  updatedById: string | null;
+  updatedByEmail: string | null;
+  ready: boolean;
+  unavailableReasons: string[];
+  history: Array<{
+    id: string;
+    actorId: string | null;
+    actorEmail: string | null;
+    createdAt: Date;
+    reason: string | null;
+    changedFields: string[];
+    before: Prisma.JsonValue | null;
+    after: Prisma.JsonValue | null;
+  }>;
 }
 
 @Injectable()
@@ -167,6 +199,183 @@ export class PlatformSettingsService {
     };
   }
 
+  async getWalletDepositConfiguration(): Promise<WalletDepositConfiguration> {
+    const [setting, liability, clearing, history] = await Promise.all([
+      this.prisma.systemSetting.findUnique({
+        where: { key: WALLET_DEPOSIT_SETTING_KEY },
+        include: { updatedBy: { select: { email: true } } },
+      }),
+      this.prisma.ledgerAccount.findUnique({
+        where: { code: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE },
+        select: { isActive: true, currency: true, accountType: true },
+      }),
+      this.prisma.ledgerAccount.findUnique({
+        where: { code: MPESA_CLEARING_ACCOUNT_CODE },
+        select: { isActive: true, currency: true, accountType: true },
+      }),
+      this.prisma.adminAuditLog.findMany({
+        where: { subjectType: 'SYSTEM_SETTING', subjectId: WALLET_DEPOSIT_SETTING_KEY },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        include: { superadmin: { select: { email: true } } },
+      }),
+    ]);
+    const value = setting?.value;
+    const record = value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, Prisma.JsonValue>
+      : {};
+    const minimumAmountKes = this.validStoredDepositAmount(record.minimumAmountKes) ? record.minimumAmountKes : null;
+    const maximumAmountKes = this.validStoredDepositAmount(record.maximumAmountKes) ? record.maximumAmountKes : null;
+    const productApproved = record.productApproved === true &&
+      typeof record.approvalReference === 'string' && record.approvalReference.trim().length > 0;
+    const unavailableReasons: string[] = [];
+    if (minimumAmountKes === null || maximumAmountKes === null || minimumAmountKes > maximumAmountKes) {
+      unavailableReasons.push('Approved wallet-deposit limits are not configured.');
+    }
+    if (!productApproved) {
+      unavailableReasons.push('Wallet deposits are awaiting verified Safaricom production-product approval.');
+    }
+    if (!liability?.isActive || liability.currency !== 'KES' || liability.accountType !== 'LIABILITY') {
+      unavailableReasons.push('The required active KES customer-wallet liability account is unavailable.');
+    }
+    if (!clearing?.isActive || clearing.currency !== 'KES' || clearing.accountType !== 'ASSET') {
+      unavailableReasons.push('The required active KES M-Pesa clearing account is unavailable.');
+    }
+    return {
+      minimumAmountKes,
+      maximumAmountKes,
+      productApproved,
+      approvalReference: typeof record.approvalReference === 'string' ? record.approvalReference : null,
+      approvalEvidence: typeof record.approvalEvidence === 'string' ? record.approvalEvidence : null,
+      customerWalletLiabilityAccountCode: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+      mpesaClearingAccountCode: MPESA_CLEARING_ACCOUNT_CODE,
+      configurationReason: typeof record.configurationReason === 'string' ? record.configurationReason : null,
+      updatedAt: setting?.updatedAt ?? null,
+      updatedById: setting?.updatedById ?? null,
+      updatedByEmail: setting?.updatedBy?.email ?? null,
+      ready: unavailableReasons.length === 0,
+      unavailableReasons,
+      history: history.map((event) => {
+        const details = event.details && typeof event.details === 'object' && !Array.isArray(event.details)
+          ? event.details as Record<string, Prisma.JsonValue>
+          : {};
+        return {
+          id: event.id,
+          actorId: event.superadminId,
+          actorEmail: event.superadmin?.email ?? null,
+          createdAt: event.createdAt,
+          reason: event.reason,
+          changedFields: Array.isArray(details.changedFields)
+            ? details.changedFields.filter((field): field is string => typeof field === 'string')
+            : [],
+          before: details.before ?? null,
+          after: details.after ?? null,
+        };
+      }),
+    };
+  }
+
+  async updateWalletDepositConfiguration(
+    input: {
+      minimumAmountKes: number;
+      maximumAmountKes: number;
+      productApproved: boolean;
+      approvalReference?: string;
+      approvalEvidence?: string;
+      customerWalletLiabilityAccountCode: string;
+      mpesaClearingAccountCode: string;
+      reason: string;
+    },
+    superadminId: string,
+    ipAddress?: string,
+  ): Promise<WalletDepositConfiguration> {
+    const reason = this.validateReason(input.reason);
+    if (!this.validStoredDepositAmount(input.minimumAmountKes) ||
+      !this.validStoredDepositAmount(input.maximumAmountKes) ||
+      input.minimumAmountKes > input.maximumAmountKes) {
+      throw new UnprocessableEntityException(
+        'Wallet deposit limits must be positive whole-KSh amounts and the minimum must not exceed the maximum.',
+      );
+    }
+    if (input.customerWalletLiabilityAccountCode !== CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE ||
+      input.mpesaClearingAccountCode !== MPESA_CLEARING_ACCOUNT_CODE) {
+      throw new UnprocessableEntityException('Wallet deposits must use the designated customer-wallet liability and M-Pesa clearing accounts.');
+    }
+    if (input.productApproved &&
+      (!input.approvalReference?.trim() || input.approvalReference.trim().length > 120)) {
+      throw new UnprocessableEntityException('A verified Safaricom production approval reference is required before enabling wallet deposits.');
+    }
+    if (input.approvalEvidence && input.approvalEvidence.trim().length > 500) {
+      throw new UnprocessableEntityException('Approval evidence must not exceed 500 characters.');
+    }
+
+    const [liability, clearing] = await Promise.all([
+      this.prisma.ledgerAccount.findUnique({
+        where: { code: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE },
+        select: { isActive: true, currency: true, accountType: true },
+      }),
+      this.prisma.ledgerAccount.findUnique({
+        where: { code: MPESA_CLEARING_ACCOUNT_CODE },
+        select: { isActive: true, currency: true, accountType: true },
+      }),
+    ]);
+    if (!liability?.isActive || liability.currency !== 'KES' || liability.accountType !== 'LIABILITY') {
+      throw new UnprocessableEntityException('An active KES CUSTOMER_WALLET_LIABILITY liability account is required.');
+    }
+    if (!clearing?.isActive || clearing.currency !== 'KES' || clearing.accountType !== 'ASSET') {
+      throw new UnprocessableEntityException('An active KES MPESA_CLEARING asset account is required.');
+    }
+
+    const next: Record<string, Prisma.JsonValue> = {
+      minimumAmountKes: input.minimumAmountKes,
+      maximumAmountKes: input.maximumAmountKes,
+      productApproved: input.productApproved,
+      approvalReference: input.productApproved ? input.approvalReference!.trim() : null,
+      approvalEvidence: input.productApproved ? input.approvalEvidence?.trim() || null : null,
+      customerWalletLiabilityAccountCode: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+      mpesaClearingAccountCode: MPESA_CLEARING_ACCOUNT_CODE,
+      configurationReason: reason,
+    };
+    await this.prisma.$transaction(async (tx) => {
+      const previousSetting = await tx.systemSetting.findUnique({
+        where: { key: WALLET_DEPOSIT_SETTING_KEY },
+        select: { value: true },
+      });
+      const previous = previousSetting?.value && typeof previousSetting.value === 'object' &&
+        !Array.isArray(previousSetting.value)
+        ? previousSetting.value as Record<string, Prisma.JsonValue>
+        : {};
+      const changedFields = Object.keys(next).filter((field) =>
+        JSON.stringify(previous[field] ?? null) !== JSON.stringify(next[field] ?? null));
+      await tx.systemSetting.upsert({
+        where: { key: WALLET_DEPOSIT_SETTING_KEY },
+        create: {
+          key: WALLET_DEPOSIT_SETTING_KEY,
+          value: next as Prisma.InputJsonValue,
+          updatedById: superadminId,
+        },
+        update: { value: next as Prisma.InputJsonValue, updatedById: superadminId },
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          superadminId,
+          action: 'WALLET_DEPOSIT_CONFIGURATION_UPDATE',
+          subjectType: 'SYSTEM_SETTING',
+          subjectId: WALLET_DEPOSIT_SETTING_KEY,
+          outcome: 'SUCCESS',
+          reason,
+          details: {
+            changedFields,
+            before: previous as Prisma.InputJsonValue,
+            after: next as Prisma.InputJsonValue,
+          },
+          ipAddress: ipAddress?.slice(0, 64),
+        },
+      });
+    });
+    return this.getWalletDepositConfiguration();
+  }
+
   async updateReconciliationThreshold(
     pendingThresholdMinutes: number,
     reason: string,
@@ -216,5 +425,10 @@ export class PlatformSettingsService {
       throw new UnprocessableEntityException('A settings change reason must be 10 to 500 non-whitespace characters.');
     }
     return trimmed;
+  }
+
+  private validStoredDepositAmount(value: unknown): value is number {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 &&
+      value <= MAX_WALLET_DEPOSIT_AMOUNT_KES;
   }
 }

@@ -8,6 +8,10 @@ const customers = await readFile(new URL('../src/app/admin/customers/page.tsx', 
 const audit = await readFile(new URL('../src/app/admin/audit/page.tsx', import.meta.url), 'utf8');
 const payments = await readFile(new URL('../src/app/admin/payments/page.tsx', import.meta.url), 'utf8');
 const reconciliation = await readFile(new URL('../src/app/admin/reconciliation/page.tsx', import.meta.url), 'utf8');
+const staff = await readFile(new URL('../src/app/admin/staff/page.tsx', import.meta.url), 'utf8');
+const staffSetup = await readFile(new URL('../src/app/admin/staff-setup/page.tsx', import.meta.url), 'utf8');
+const settings = await readFile(new URL('../src/app/admin/settings/page.tsx', import.meta.url), 'utf8');
+const walletDepositSettings = await readFile(new URL('../src/components/wallet-deposit-settings.tsx', import.meta.url), 'utf8');
 const styles = await readFile(new URL('../src/app/admin.css', import.meta.url), 'utf8');
 const adminController = await readFile(new URL('../../api/src/admin/admin.controller.ts', import.meta.url), 'utf8');
 const adminService = await readFile(new URL('../../api/src/admin/admin.service.ts', import.meta.url), 'utf8');
@@ -21,6 +25,17 @@ test('Admin portal uses a responsive, Admin-scoped shell and preserves the dedic
   assert.match(styles, /@media\(max-width:760px\)/);
   assert.match(styles, /\.admin-app-shell>\.admin-app-nav/);
   assert.match(styles, /:focus-visible/);
+});
+
+test('wallet-deposit configuration and staff accounts use the existing Superadmin admin surfaces', () => {
+  assert.match(shell, /href: '\/admin\/staff'.*group: 'ADMINISTRATION & SECURITY'.*roles: \['SUPERADMIN'\]/);
+  assert.match(staff, /Create Staff Account/);
+  assert.match(staff, /\/admin\/staff\/\$\{encodeURIComponent\(member\.id\)\}\/role/);
+  assert.match(staffSetup, /\/admin\/staff\/invitations\/setup/);
+  assert.match(settings, /<WalletDepositSettings/);
+  assert.match(walletDepositSettings, /Save wallet deposit configuration/);
+  assert.match(walletDepositSettings, /verified Safaricom production approval reference/);
+  assert.match(walletDepositSettings, /Configuration audit history/);
 });
 
 test('system health uses persisted Superadmin observations with explicit unknown, stale, and failure states', () => {

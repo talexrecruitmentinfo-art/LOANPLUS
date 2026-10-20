@@ -5,7 +5,7 @@ const logger = new Logger('AuthSecurity');
 
 export interface AuthPrincipal {
   id: string;
-  role: 'NORMAL_USER' | 'SUPERADMIN';
+  role: 'NORMAL_USER' | 'SUPERADMIN' | 'STAFF_SUPPORT' | 'STAFF_FINANCE' | 'STAFF_OPERATIONS';
   email: string;
   phone?: string;
   fullName?: string;

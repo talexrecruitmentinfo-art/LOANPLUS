@@ -3,7 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { SuperadminOtpDto, SuperadminPasswordDto } from './auth.dto';
-import { SuperadminSessionGuard } from './session.guard';
+import { AllowStaffRoles, SuperadminSessionGuard } from './session.guard';
 import type { AuthenticatedRequest } from './request.types';
 import { hashToken } from './security.util';
 
@@ -57,6 +57,7 @@ export class SuperadminAuthController {
 
   @Get('me')
   @UseGuards(SuperadminSessionGuard)
+  @AllowStaffRoles('STAFF_SUPPORT', 'STAFF_FINANCE', 'STAFF_OPERATIONS')
   getCurrentSuperadmin(@Req() request: AuthenticatedRequest) {
     const principal = request.principal!;
     return { data: { id: principal.id, role: principal.role, email: principal.email } };

@@ -1,9 +1,20 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  ForbiddenException,
+  Injectable,
+  SetMetadata,
+  UnauthorizedException,
+} from '@nestjs/common';
 import type { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
-import { hashToken, type AuthPrincipal } from './security.util';
+import { hashToken, normalizeEmail, type AuthPrincipal } from './security.util';
 
 type AuthenticatedRequest = Request & { principal?: AuthPrincipal };
+const STAFF_ROLE_METADATA = 'staff-allowed-roles';
+
+export const AllowStaffRoles = (...roles: Array<'STAFF_SUPPORT' | 'STAFF_FINANCE' | 'STAFF_OPERATIONS'>) =>
+  SetMetadata(STAFF_ROLE_METADATA, roles);
 
 @Injectable()
 export class CustomerSessionGuard implements CanActivate {
@@ -44,8 +55,20 @@ export class SuperadminSessionGuard implements CanActivate {
       },
       include: { superadmin: { select: { id: true, role: true, email: true } } },
     });
-    if (!session || session.superadmin.role !== 'SUPERADMIN') {
+    if (!session) {
       throw new UnauthorizedException('Authentication required.');
+    }
+    if (session.superadmin.role === 'SUPERADMIN') {
+      const configuredEmail = process.env.SUPERADMIN_EMAIL;
+      if (!configuredEmail || normalizeEmail(session.superadmin.email) !== normalizeEmail(configuredEmail)) {
+        throw new ForbiddenException('This account is not the designated Superadmin.');
+      }
+    }
+    const allowedStaffRoles = Reflect.getMetadata(STAFF_ROLE_METADATA, context.getHandler()) as
+      Array<'STAFF_SUPPORT' | 'STAFF_FINANCE' | 'STAFF_OPERATIONS'> | undefined;
+    if (session.superadmin.role !== 'SUPERADMIN' &&
+      !(allowedStaffRoles ?? []).includes(session.superadmin.role as 'STAFF_SUPPORT' | 'STAFF_FINANCE' | 'STAFF_OPERATIONS')) {
+      throw new ForbiddenException('This account does not have permission to perform this action.');
     }
     request.principal = { ...session.superadmin, sessionHash };
     return true;

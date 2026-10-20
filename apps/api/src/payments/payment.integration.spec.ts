@@ -6,6 +6,11 @@ import { LoanService } from '../loans/loan.service';
 import { InitiateLoanProcessingFeeDto, WalletDepositDto } from './payment.dto';
 import { MpesaService } from './mpesa.service';
 import { PaymentService } from './payment.service';
+import {
+  CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+  MPESA_CLEARING_ACCOUNT_CODE,
+  WALLET_DEPOSIT_SETTING_KEY,
+} from './wallet-deposit.config';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const databaseTest = databaseUrl ? it : it.skip;
@@ -49,9 +54,6 @@ describe('loan processing-fee payment database integration', () => {
     process.env.LOAN_PROCESSING_FEE_POLICY_VERSION = 'test-approved-v1';
     process.env.LOAN_PROCESSING_FEE_POLICY_DISCLOSURE =
       'Test-only approved processing-fee policy for isolated integration verification.';
-    process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED = 'true';
-    process.env.WALLET_DEPOSIT_MIN_KES = '100';
-    process.env.WALLET_DEPOSIT_MAX_KES = '100000';
     const parsedUrl = new URL(databaseUrl);
     if (!['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname) || !parsedUrl.pathname.endsWith('_test')) {
       throw new Error('TEST_DATABASE_URL must point to a local database whose name ends in _test.');
@@ -73,7 +75,15 @@ describe('loan processing-fee payment database integration', () => {
     adminId = admin.id;
     const accounts = await Promise.all([
       prisma.ledgerAccount.create({
-        data: { code: 'MPESA_CLEARING', name: 'Test M-Pesa clearing', accountType: 'ASSET' },
+        data: { code: MPESA_CLEARING_ACCOUNT_CODE, name: 'Test M-Pesa clearing', accountType: 'ASSET' },
+        select: { id: true },
+      }),
+      prisma.ledgerAccount.create({
+        data: {
+          code: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+          name: 'Test customer wallet liability',
+          accountType: 'LIABILITY',
+        },
         select: { id: true },
       }),
       prisma.ledgerAccount.create({
@@ -82,6 +92,31 @@ describe('loan processing-fee payment database integration', () => {
       }),
     ]);
     accountIds = accounts.map((account) => account.id);
+    await prisma.systemSetting.upsert({
+      where: { key: WALLET_DEPOSIT_SETTING_KEY },
+      create: {
+        key: WALLET_DEPOSIT_SETTING_KEY,
+        value: {
+          minimumAmountKes: 100,
+          maximumAmountKes: 100000,
+          productApproved: true,
+          approvalReference: 'ISOLATED-TEST-ONLY',
+          customerWalletLiabilityAccountCode: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+          mpesaClearingAccountCode: MPESA_CLEARING_ACCOUNT_CODE,
+          configurationReason: 'Configure isolated wallet-deposit integration-test policy only.',
+        },
+        updatedById: adminId,
+      },
+      update: { value: {
+        minimumAmountKes: 100,
+        maximumAmountKes: 100000,
+        productApproved: true,
+        approvalReference: 'ISOLATED-TEST-ONLY',
+        customerWalletLiabilityAccountCode: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+        mpesaClearingAccountCode: MPESA_CLEARING_ACCOUNT_CODE,
+        configurationReason: 'Configure isolated wallet-deposit integration-test policy only.',
+      }, updatedById: adminId },
+    });
     const user = await prisma.user.create({
       data: {
         fullName: 'Processing Fee Test Customer',
@@ -138,6 +173,7 @@ describe('loan processing-fee payment database integration', () => {
       await prisma.ledgerAccount.deleteMany({ where: { userId } });
       await prisma.ledgerAccount.deleteMany({ where: { id: { in: accountIds } } });
       await prisma.systemSetting.deleteMany({ where: { key: 'loan.processing_fee_revenue_account' } });
+      await prisma.systemSetting.deleteMany({ where: { key: WALLET_DEPOSIT_SETTING_KEY } });
       await prisma.authAuditLog.deleteMany({ where: { actorId: userId } });
       await prisma.user.deleteMany({ where: { id: userId } });
     }

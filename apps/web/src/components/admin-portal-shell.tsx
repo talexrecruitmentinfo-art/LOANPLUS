@@ -5,18 +5,19 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState, type ReactNode } from 'react';
 import { apiRequest } from '@/lib/api';
 
-const navigation = [
+const navigation: Array<{ href: string; label: string; group: string; icon: string; roles?: string[] }> = [
   { href: '/admin', label: 'Overview', group: 'OPERATIONS', icon: '◫' },
-  { href: '/admin/customers', label: 'Customers', group: 'OPERATIONS', icon: '♙' },
-  { href: '/admin/loans', label: 'Loans & review', group: 'OPERATIONS', icon: '▤' },
-  { href: '/admin/disbursements', label: 'Disbursements', group: 'OPERATIONS', icon: '↗' },
-  { href: '/admin/payments', label: 'Payments', group: 'FINANCE', icon: '▣' },
-  { href: '/admin/reconciliation', label: 'Reconciliation', group: 'FINANCE', icon: '◎' },
-  { href: '/admin/system-health', label: 'System health', group: 'FINANCE', icon: '⌁' },
-  { href: '/admin/website', label: 'Website', group: 'MANAGEMENT', icon: '⌘' },
-  { href: '/admin/support', label: 'Support', group: 'MANAGEMENT', icon: '?' },
-  { href: '/admin/audit', label: 'Audit log', group: 'GOVERNANCE', icon: '≡' },
-  { href: '/admin/settings', label: 'Settings', group: 'GOVERNANCE', icon: '⚙' },
+  { href: '/admin/customers', label: 'Customers', group: 'OPERATIONS', icon: '♙', roles: ['SUPERADMIN'] },
+  { href: '/admin/loans', label: 'Loans & review', group: 'OPERATIONS', icon: '▤', roles: ['SUPERADMIN', 'STAFF_OPERATIONS'] },
+  { href: '/admin/disbursements', label: 'Disbursements', group: 'OPERATIONS', icon: '↗', roles: ['SUPERADMIN'] },
+  { href: '/admin/payments', label: 'Payments', group: 'FINANCE', icon: '▣', roles: ['SUPERADMIN', 'STAFF_FINANCE'] },
+  { href: '/admin/reconciliation', label: 'Reconciliation', group: 'FINANCE', icon: '◎', roles: ['SUPERADMIN', 'STAFF_FINANCE'] },
+  { href: '/admin/system-health', label: 'System health', group: 'FINANCE', icon: '⌁', roles: ['SUPERADMIN'] },
+  { href: '/admin/website', label: 'Website', group: 'MANAGEMENT', icon: '⌘', roles: ['SUPERADMIN'] },
+  { href: '/admin/support', label: 'Support', group: 'MANAGEMENT', icon: '?', roles: ['SUPERADMIN', 'STAFF_SUPPORT'] },
+  { href: '/admin/audit', label: 'Audit log', group: 'GOVERNANCE', icon: '≡', roles: ['SUPERADMIN'] },
+  { href: '/admin/settings', label: 'Settings', group: 'GOVERNANCE', icon: '⚙', roles: ['SUPERADMIN'] },
+  { href: '/admin/staff', label: 'Staff Accounts', group: 'ADMINISTRATION & SECURITY', icon: '♙', roles: ['SUPERADMIN'] },
 ];
 
 export default function AdminPortalShell({ children }: { children: ReactNode }) {
@@ -24,10 +25,22 @@ export default function AdminPortalShell({ children }: { children: ReactNode }) 
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [logoutError, setLogoutError] = useState('');
+  const [adminRole, setAdminRole] = useState<string | null>(null);
 
   useEffect(() => setMenuOpen(false), [pathname]);
+  useEffect(() => {
+    if (pathname === '/admin/login' || pathname === '/admin/staff-setup' || adminRole) return;
+    apiRequest<{ role: string }>('/admin/auth/me', { cache: 'no-store' }).then((identity) => {
+      setAdminRole(identity.role);
+    }).catch((reason) => {
+      if (reason instanceof Error && reason.message.includes('Authentication required')) {
+        router.replace('/admin/login');
+      }
+    });
+  }, [adminRole, pathname, router]);
 
   if (pathname === '/admin/login') return children;
+  if (pathname === '/admin/staff-setup') return children;
 
   async function logout() {
     setLogoutError('');
@@ -39,10 +52,11 @@ export default function AdminPortalShell({ children }: { children: ReactNode }) 
     }
   }
 
-  const activeItem = navigation.find((item) => item.href !== '/admin' && pathname.startsWith(`${item.href}/`))
-    ?? navigation.find((item) => item.href === pathname)
-    ?? navigation[0];
-  const groups = [...new Set(navigation.map((item) => item.group))];
+  const visibleNavigation = navigation.filter((item) => !item.roles || !adminRole || item.roles.includes(adminRole));
+  const activeItem = visibleNavigation.find((item) => item.href !== '/admin' && pathname.startsWith(`${item.href}/`))
+    ?? visibleNavigation.find((item) => item.href === pathname)
+    ?? visibleNavigation[0];
+  const groups = [...new Set(visibleNavigation.map((item) => item.group))];
 
   return (
     <div className="admin-portal">
@@ -55,7 +69,7 @@ export default function AdminPortalShell({ children }: { children: ReactNode }) 
           {groups.map((group) => (
             <div className="admin-nav-group" key={group}>
               <span className="admin-nav-group-title">{group}</span>
-              {navigation.filter((item) => item.group === group).map((item) => {
+              {visibleNavigation.filter((item) => item.group === group).map((item) => {
                 const active = item.href === '/admin'
                   ? pathname === item.href
                   : pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -71,7 +85,7 @@ export default function AdminPortalShell({ children }: { children: ReactNode }) 
         </nav>
         <div className="admin-sidebar-footer">
           <span className="admin-session-indicator" aria-hidden="true" />
-          <span><b>OTP-protected access</b><small>Superadmin sign-in</small></span>
+          <span><b>OTP-protected access</b><small>{adminRole === 'SUPERADMIN' ? 'Superadmin sign-in' : 'Staff sign-in'}</small></span>
         </div>
       </aside>
       {menuOpen && <button className="admin-sidebar-backdrop" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
@@ -88,7 +102,7 @@ export default function AdminPortalShell({ children }: { children: ReactNode }) 
           </button>
           <div className="admin-breadcrumb"><span>Administration</span><b aria-hidden="true">/</b><strong>{activeItem.label}</strong></div>
           <div className="admin-topbar-actions">
-            <span className="admin-access-badge">SUPERADMIN</span>
+            <span className="admin-access-badge">{adminRole?.replaceAll('_', ' ') ?? 'ADMIN'}</span>
             <button className="admin-logout-button" type="button" onClick={() => void logout()}>Log out</button>
           </div>
         </header>

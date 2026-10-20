@@ -6,12 +6,14 @@ import type { LedgerService } from '../ledger/ledger.service';
 import { MpesaService, StkPushInitiationError } from './mpesa.service';
 import { WalletDepositDto } from './payment.dto';
 import { PaymentService } from './payment.service';
+import {
+  CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+  MPESA_CLEARING_ACCOUNT_CODE,
+  WALLET_DEPOSIT_SETTING_KEY,
+} from './wallet-deposit.config';
 
 describe('M-Pesa wallet deposit initiation', () => {
   const environment = {
-    walletMin: process.env.WALLET_DEPOSIT_MIN_KES,
-    walletMax: process.env.WALLET_DEPOSIT_MAX_KES,
-    productApproved: process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED,
     encryptionKey: process.env.ID_ENCRYPTION_KEY_BASE64,
     callbackUrl: process.env.MPESA_CALLBACK_URL,
   };
@@ -22,9 +24,6 @@ describe('M-Pesa wallet deposit initiation', () => {
   let activationRequestUpdate: jest.Mock;
 
   beforeEach(() => {
-    process.env.WALLET_DEPOSIT_MIN_KES = '100';
-    process.env.WALLET_DEPOSIT_MAX_KES = '20000';
-    process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED = 'true';
     process.env.ID_ENCRYPTION_KEY_BASE64 = randomBytes(32).toString('base64');
     process.env.MPESA_CALLBACK_URL = 'https://api.example.test/api/v1/payments/mpesa/callback';
     payment = null;
@@ -66,12 +65,24 @@ describe('M-Pesa wallet deposit initiation', () => {
       },
       user: { findUnique: jest.fn(async () => ({ isActive: true })) },
       ledgerAccount: {
-        findUnique: jest.fn(async () => ({
-          id: 'mpesa-clearing-id',
+        findUnique: jest.fn(async ({ where }: { where: { code: string } }) => ({
+          id: where.code,
           isActive: true,
           currency: 'KES',
-          accountType: 'ASSET',
+          accountType: where.code === MPESA_CLEARING_ACCOUNT_CODE ? 'ASSET' : 'LIABILITY',
         })),
+      },
+      systemSetting: {
+        findUnique: jest.fn(async ({ where }: { where: { key: string } }) => where.key === WALLET_DEPOSIT_SETTING_KEY
+          ? { value: {
+            minimumAmountKes: 100,
+            maximumAmountKes: 20000,
+            productApproved: true,
+            approvalReference: 'TEST-APPROVAL-REFERENCE',
+            customerWalletLiabilityAccountCode: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+            mpesaClearingAccountCode: MPESA_CLEARING_ACCOUNT_CODE,
+          } }
+          : null),
       },
       $transaction: jest.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
         callback(transactionClient)),
@@ -84,12 +95,6 @@ describe('M-Pesa wallet deposit initiation', () => {
   });
 
   afterEach(() => {
-    if (environment.walletMin === undefined) delete process.env.WALLET_DEPOSIT_MIN_KES;
-    else process.env.WALLET_DEPOSIT_MIN_KES = environment.walletMin;
-    if (environment.walletMax === undefined) delete process.env.WALLET_DEPOSIT_MAX_KES;
-    else process.env.WALLET_DEPOSIT_MAX_KES = environment.walletMax;
-    if (environment.productApproved === undefined) delete process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED;
-    else process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED = environment.productApproved;
     if (environment.encryptionKey === undefined) delete process.env.ID_ENCRYPTION_KEY_BASE64;
     else process.env.ID_ENCRYPTION_KEY_BASE64 = environment.encryptionKey;
     if (environment.callbackUrl === undefined) delete process.env.MPESA_CALLBACK_URL;
@@ -138,6 +143,16 @@ describe('M-Pesa wallet deposit initiation', () => {
       paymentTransaction: { findUnique: jest.fn(async () => null) },
       user: { findUnique: jest.fn(async () => ({ isActive: false })) },
       ledgerAccount: { findUnique: jest.fn(async () => ({ isActive: true, currency: 'KES', accountType: 'ASSET' })) },
+      systemSetting: {
+        findUnique: jest.fn(async () => ({ value: {
+          minimumAmountKes: 100,
+          maximumAmountKes: 20000,
+          productApproved: true,
+          approvalReference: 'TEST-APPROVAL-REFERENCE',
+          customerWalletLiabilityAccountCode: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+          mpesaClearingAccountCode: MPESA_CLEARING_ACCOUNT_CODE,
+        } })),
+      },
     } as unknown as PrismaService;
     const inactiveService = new PaymentService(
       inactivePrisma,
@@ -146,6 +161,64 @@ describe('M-Pesa wallet deposit initiation', () => {
     );
     await expect(inactiveService.initiateWalletDeposit('customer-id', depositRequest(), 'wallet-deposit-key-inactive'))
       .rejects.toBeInstanceOf(ForbiddenException);
+    expect(stkRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([100, 20000])('allows an authorized boundary amount of %s KES', async (amountKes) => {
+    await service.initiateWalletDeposit('customer-id', {
+      ...depositRequest(),
+      amountKes,
+    }, `wallet-deposit-boundary-${amountKes}`);
+    expect(stkRequest).toHaveBeenCalledTimes(1);
+    expect(stkRequest).toHaveBeenCalledWith(expect.objectContaining({ amountKes }), expect.any(Function));
+  });
+
+  it.each([
+    [99, 'outside the configured wallet limits'],
+    [20001, 'outside the configured wallet limits'],
+    [2_147_483_648, 'positive whole-KSh'],
+  ])('rejects amount-specific quotes outside approved limits (%s KES)', async (amountKes, message) => {
+    await expect(service.getWalletDepositQuote(amountKes)).rejects.toThrow(
+      message,
+    );
+  });
+
+  it('accepts an amount-specific quote at both approved boundaries', async () => {
+    await expect(service.getWalletDepositQuote(100)).resolves.toMatchObject({
+      currency: 'KES',
+      minimumAmountKes: 100,
+      maximumAmountKes: 20000,
+      depositAvailable: true,
+    });
+    await expect(service.getWalletDepositQuote(20000)).resolves.toMatchObject({
+      depositAvailable: true,
+    });
+  });
+
+  it('rejects initiation when saved limits or production approval are absent', async () => {
+    const configurationMissing = new PaymentService({
+      systemSetting: { findUnique: jest.fn(async () => null) },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+    await expect(configurationMissing.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(),
+      'wallet-deposit-missing-config',
+    )).rejects.toThrow('Approved wallet-deposit amount limits are not configured.');
+
+    const approvalMissing = new PaymentService({
+      systemSetting: { findUnique: jest.fn(async () => ({ value: {
+        minimumAmountKes: 100,
+        maximumAmountKes: 20000,
+        productApproved: false,
+        customerWalletLiabilityAccountCode: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+        mpesaClearingAccountCode: MPESA_CLEARING_ACCOUNT_CODE,
+      } })) },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+    await expect(approvalMissing.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(),
+      'wallet-deposit-unapproved-product',
+    )).rejects.toThrow('confirmed for customer wallet deposits');
     expect(stkRequest).not.toHaveBeenCalled();
   });
 

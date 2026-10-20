@@ -228,11 +228,20 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
     event.preventDefault();
     const amountKes = Number(depositAmount);
     if (!Number.isSafeInteger(amountKes) || amountKes <= 0 || !depositQuote?.depositAvailable) return;
+    if (amountKes < (depositQuote.minimumAmountKes ?? Number.POSITIVE_INFINITY) ||
+      amountKes > (depositQuote.maximumAmountKes ?? 0)) {
+      setWalletActionError('Enter an amount within the approved wallet deposit limits.');
+      return;
+    }
     if (!window.confirm(`Confirm an M-Pesa wallet deposit of ${formatMoney(amountKes)}?`)) return;
     setWalletActionBusy(true);
     setWalletActionError('');
     setWalletActionMessage('');
     try {
+      await apiRequest<WalletDepositQuote>(
+        `/payments/wallet-deposit-quote?amountKes=${encodeURIComponent(amountKes)}`,
+        { cache: 'no-store' },
+      );
       const result = await apiRequest<{ reference: string; status: string; message: string }>('/payments/wallet-deposits', {
         method: 'POST',
         headers: { 'Idempotency-Key': crypto.randomUUID() },
@@ -313,6 +322,15 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
           <div><h2>Deposit with M-Pesa</h2><p>Wallet funds are added after verified payment confirmation.</p></div>
           <button className="button" type="button" aria-expanded={depositFormOpen} aria-controls="wallet-deposit-form" onClick={() => setDepositFormOpen(true)}>Deposit</button>
         </div>
+        <p className={depositQuote?.depositAvailable ? 'wallet-action-success' : 'form-error'} role="status">
+          {!walletStatusVerified
+            ? 'Checking whether wallet deposits are available…'
+            : depositQuote?.depositAvailable
+              ? `Deposits are available${depositQuote.minimumAmountKes !== null && depositQuote.maximumAmountKes !== null
+                ? ` from ${formatMoney(depositQuote.minimumAmountKes)} to ${formatMoney(depositQuote.maximumAmountKes)}`
+                : ''}.`
+              : 'Wallet deposits are currently unavailable. Review the status below for details.'}
+        </p>
         {depositReference && <p className="wallet-deposit-pending" role="status">
           {trackedDeposit?.status === 'PENDING' || !trackedDeposit
             ? `Pending Safaricom confirmation · Reference ${depositReference}. Your wallet balance will update after verified success.`
@@ -336,7 +354,7 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
               <input type="number" min={depositQuote?.minimumAmountKes ?? undefined} max={depositQuote?.maximumAmountKes ?? undefined} step="1" value={depositAmount} onChange={(event) => setDepositAmount(event.target.value)} required />
             </label>
             <label>M-Pesa phone number
-              <input type="tel" inputMode="tel" autoComplete="tel" value={mpesaPhoneNumber} onChange={(event) => setMpesaPhoneNumber(event.target.value)} placeholder="+2547…" required />
+              <input type="tel" inputMode="tel" autoComplete="tel" value={mpesaPhoneNumber} onChange={(event) => setMpesaPhoneNumber(event.target.value)} placeholder="+2547…" pattern="\+?[\d ()-]{9,16}" title="Enter a valid Kenyan M-Pesa phone number" required />
             </label>
             <div className="wallet-deposit-actions">
               <button className="button" type="submit" disabled={walletActionBusy || loading || !walletStatusVerified || unresolvedDeposit || !depositQuote?.depositAvailable}>

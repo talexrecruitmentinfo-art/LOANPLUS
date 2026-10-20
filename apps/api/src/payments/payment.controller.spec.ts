@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import { PaymentController } from './payment.controller';
 import { PaymentService } from './payment.service';
 import { LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
@@ -39,6 +40,17 @@ describe('PaymentController', () => {
     await expect(controller.getLoanProcessingFeeQuote()).resolves.toEqual({
       data: quote,
     });
+  });
+
+  it('passes valid amount-specific wallet quotes to the server validator', async () => {
+    const getWalletDepositQuote = jest.fn(async (amountKes?: number) => ({ amountKes }));
+    const controller = new PaymentController({ getWalletDepositQuote } as unknown as PaymentService);
+
+    await expect(controller.getWalletDepositQuote('500')).resolves.toEqual({ data: { amountKes: 500 } });
+    expect(getWalletDepositQuote).toHaveBeenCalledWith(500);
+    await expect(controller.getWalletDepositQuote('10.5')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(controller.getWalletDepositQuote('0')).rejects.toBeInstanceOf(BadRequestException);
+    expect(getWalletDepositQuote).toHaveBeenCalledTimes(1);
   });
 
   it('returns the authenticated customer unresolved-fee status and guards the endpoint', async () => {

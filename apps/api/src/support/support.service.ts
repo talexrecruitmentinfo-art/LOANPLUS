@@ -54,14 +54,20 @@ export class SupportService {
     });
   }
 
-  async replyToTicket(ticketId: string, dto: ReplySupportTicketDto, adminId: string, ipAddress?: string) {
+  async replyToTicket(
+    ticketId: string,
+    dto: ReplySupportTicketDto,
+    adminId: string,
+    ipAddress?: string,
+    authorType: 'SUPERADMIN' | 'STAFF' = 'SUPERADMIN',
+  ) {
     const ticket = await this.prisma.supportTicket.findUnique({ where: { id: ticketId }, select: { id: true } });
     if (!ticket) throw new NotFoundException('Support ticket was not found.');
     const transitionAllowed = dto.status !== SupportTicketStatus.OPEN;
     if (!transitionAllowed) throw new ConflictException('A replied ticket cannot be reopened through this action.');
     return this.prisma.$transaction(async (tx) => {
       await tx.supportMessage.create({
-        data: { ticketId, authorType: 'SUPERADMIN', authorId: adminId, message: dto.message.trim() },
+        data: { ticketId, authorType, authorId: adminId, message: dto.message.trim() },
       });
       const updated = await tx.supportTicket.update({
         where: { id: ticketId },

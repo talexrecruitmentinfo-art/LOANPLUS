@@ -6,10 +6,19 @@ import { AdminPlatformSettingsController, CustomerPlatformController } from './p
 import { PlatformSettingsService } from './platform-settings.service';
 import { AdminSystemHealthController } from './system-health.controller';
 import { SystemHealthService } from './system-health.service';
+import { StaffAccountsController, StaffInvitationSetupController } from './staff-accounts.controller';
+import { StaffAccountsService } from './staff-accounts.service';
 
 @Module({
   imports: [AuthModule],
-  controllers: [AdminController, AdminPlatformSettingsController, CustomerPlatformController, AdminSystemHealthController],
-  providers: [AdminService, PlatformSettingsService, SystemHealthService],
+  controllers: [
+    AdminController,
+    AdminPlatformSettingsController,
+    CustomerPlatformController,
+    AdminSystemHealthController,
+    StaffAccountsController,
+    StaffInvitationSetupController,
+  ],
+  providers: [AdminService, PlatformSettingsService, SystemHealthService, StaffAccountsService],
 })
 export class AdminModule {}

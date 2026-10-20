@@ -76,6 +76,9 @@ test('wallet deposit form stays closed until requested and never reports success
   const cancelStart = wallet.indexOf('function cancelDepositForm', submitStart);
   const submitDeposit = wallet.slice(submitStart, cancelStart);
   assert.doesNotMatch(submitDeposit, /setWalletActionMessage\((?!'')/);
+  assert.match(submitDeposit, /wallet-deposit-quote\?amountKes=/);
+  assert.ok(submitDeposit.indexOf('wallet-deposit-quote?amountKes=') <
+    submitDeposit.indexOf("'/payments/wallet-deposits'"));
   const cancelHandler = wallet.match(/function cancelDepositForm\(\) \{([\s\S]*?)\n  \}/)?.[1] ?? '';
   assert.match(cancelHandler, /setDepositAmount\(''\)/);
   assert.match(cancelHandler, /setMpesaPhoneNumber\(''\)/);

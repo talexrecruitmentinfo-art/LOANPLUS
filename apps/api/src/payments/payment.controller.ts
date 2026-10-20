@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Get, Headers, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AuthenticatedRequest } from '../auth/request.types';
 import { CustomerSessionGuard } from '../auth/session.guard';
@@ -43,8 +43,16 @@ export class PaymentController {
   }
 
   @Get('wallet-deposit-quote')
-  async getWalletDepositQuote() {
-    return { data: await this.payments.getWalletDepositQuote() };
+  async getWalletDepositQuote(@Query('amountKes') amountKes?: string) {
+    if (amountKes === undefined) return { data: await this.payments.getWalletDepositQuote() };
+    if (!/^[1-9]\d*$/.test(amountKes)) {
+      throw new BadRequestException('Enter a positive whole-KSh deposit amount.');
+    }
+    const amount = Number(amountKes);
+    if (!Number.isSafeInteger(amount)) {
+      throw new BadRequestException('Enter a positive whole-KSh deposit amount.');
+    }
+    return { data: await this.payments.getWalletDepositQuote(amount) };
   }
 
   @Post('wallet-deposits')

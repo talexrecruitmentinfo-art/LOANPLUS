@@ -306,7 +306,8 @@ describe('Superadmin email OTP authentication flow', () => {
     authenticatedRequest.cookies = { lp_admin_session: token };
     const authenticatedContext = {
       switchToHttp: () => ({ getRequest: () => authenticatedRequest }),
-    } as ExecutionContext;
+      getHandler: () => SuperadminAuthController.prototype.getCurrentSuperadmin,
+    } as unknown as ExecutionContext;
     expect(await guard.canActivate(authenticatedContext)).toBe(true);
     expect(authenticatedRequest.principal).toMatchObject({ id: admin.id, role: 'SUPERADMIN' });
     expect(controller.getCurrentSuperadmin(authenticatedRequest)).toMatchObject({

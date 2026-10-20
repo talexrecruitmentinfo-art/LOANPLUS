@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
 import PlatformSettingsPanel from '@/components/platform-settings-panel';
+import WalletDepositSettings from '@/components/wallet-deposit-settings';
 
 interface LedgerAccount {
   id: string;
@@ -215,6 +216,7 @@ export default function AdminSettingsPage() {
           <button className="button" disabled={busy || !loanChargesRevenueCode || loanChargesRevenueAccounts.length === 0}>Save charges destination <span aria-hidden="true">↗</span></button>
         </form>
       </section>
+      <WalletDepositSettings />
       <PlatformSettingsPanel />
     </main>
   );

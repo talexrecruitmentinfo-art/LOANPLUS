@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, Param, Patch, Post, Req, UseGuards } fr
 import { Throttle } from '@nestjs/throttler';
 import { ForbiddenException } from '@nestjs/common';
 import { AuthenticatedRequest } from '../auth/request.types';
-import { CustomerSessionGuard, SuperadminSessionGuard } from '../auth/session.guard';
+import { AllowStaffRoles, CustomerSessionGuard, SuperadminSessionGuard } from '../auth/session.guard';
 import { ConfigureLoanChargeRevenueDto, ConfigureLoanProcessingFeeDto, ConfirmManualDisbursementDto, CreateLoanApplicationDto, CreateLoanProductDto, ReviewLoanApplicationDto, UpdateLoanProductDto } from './loan.dto';
 import { WalletRepaymentDto } from '../payments/payment.dto';
 
@@ -150,6 +150,7 @@ export class AdminLoanController {
   }
 
   @Get('applications')
+  @AllowStaffRoles('STAFF_OPERATIONS')
   async listApplications() {
     return { data: await this.loans.listApplicationsForReview() };
   }

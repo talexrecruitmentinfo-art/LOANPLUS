@@ -24,6 +24,12 @@ import { InitiateLoanProcessingFeeDto, WalletDepositDto } from './payment.dto';
 import { buildMpesaCallbackUrl } from './mpesa-callback-url';
 import { getLoanProcessingFeePolicy, LOAN_PROCESSING_FEE_KES } from './processing-fee.constants';
 import { OUTSTANDING_LOAN_STATUSES } from '../loans/loan-eligibility.constants';
+import {
+  CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE,
+  MAX_WALLET_DEPOSIT_AMOUNT_KES,
+  MPESA_CLEARING_ACCOUNT_CODE,
+  WALLET_DEPOSIT_SETTING_KEY,
+} from './wallet-deposit.config';
 
 interface ActivationPolicy {
   approved: boolean;
@@ -148,22 +154,32 @@ export class PaymentService {
     };
   }
 
-  async getWalletDepositQuote() {
-    const limits = this.getWalletDepositLimits();
-    const clearingAccount = await this.prisma.ledgerAccount.findUnique({
-      where: { code: 'MPESA_CLEARING' },
-      select: { isActive: true, currency: true, accountType: true },
-    });
+  async getWalletDepositQuote(amountKes?: number) {
+    const [configuration, clearingAccount, walletLiability] = await Promise.all([
+      this.getWalletDepositConfiguration(),
+      this.prisma.ledgerAccount.findUnique({
+        where: { code: MPESA_CLEARING_ACCOUNT_CODE },
+        select: { isActive: true, currency: true, accountType: true },
+      }),
+      this.prisma.ledgerAccount.findUnique({
+        where: { code: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE },
+        select: { isActive: true, currency: true, accountType: true },
+      }),
+    ]);
     const unavailableReasons: string[] = [];
-    if (!limits) {
+    if (!configuration.limits) {
       unavailableReasons.push('Approved wallet-deposit minimum and maximum amounts are not configured.');
     }
-    if (process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED !== 'true') {
-      unavailableReasons.push('The configured M-Pesa business product has not been confirmed for customer wallet deposits.');
+    if (!configuration.productApproved) {
+      unavailableReasons.push('Wallet deposits are awaiting verified Safaricom production-product approval.');
     }
     if (!clearingAccount?.isActive || clearingAccount.currency !== 'KES' ||
       clearingAccount.accountType !== LedgerAccountType.ASSET) {
       unavailableReasons.push('An active KES M-Pesa clearing asset account is required.');
+    }
+    if (!walletLiability?.isActive || walletLiability.currency !== 'KES' ||
+      walletLiability.accountType !== LedgerAccountType.LIABILITY) {
+      unavailableReasons.push('An active KES customer-wallet liability account is required.');
     }
     try {
       this.mpesa.assertConfiguredForPayments();
@@ -177,10 +193,22 @@ export class PaymentService {
         unavailableReasons.push(Array.isArray(message) ? message.join(' ') : String(message));
       } else unavailableReasons.push(error.message);
     }
+    if (amountKes !== undefined) {
+      if (!Number.isSafeInteger(amountKes) || amountKes <= 0 || amountKes > MAX_WALLET_DEPOSIT_AMOUNT_KES) {
+        throw new BadRequestException('Enter a positive whole-KSh deposit amount.');
+      }
+      if (unavailableReasons.length > 0 || !configuration.limits) {
+        throw new ServiceUnavailableException('Wallet deposits are currently unavailable.');
+      }
+      if (amountKes < configuration.limits.minimumAmountKes ||
+        amountKes > configuration.limits.maximumAmountKes) {
+        throw new BadRequestException('The deposit amount is outside the configured wallet limits.');
+      }
+    }
     return {
       currency: 'KES',
-      minimumAmountKes: limits?.minimumAmountKes ?? null,
-      maximumAmountKes: limits?.maximumAmountKes ?? null,
+      minimumAmountKes: configuration.limits?.minimumAmountKes ?? null,
+      maximumAmountKes: configuration.limits?.maximumAmountKes ?? null,
       depositAvailable: unavailableReasons.length === 0,
       unavailableReasons,
     };
@@ -194,12 +222,13 @@ export class PaymentService {
     if (!Number.isSafeInteger(dto.amountKes) || dto.amountKes <= 0) {
       throw new BadRequestException('Enter a positive whole-KSh deposit amount.');
     }
-    if (process.env.WALLET_DEPOSIT_MPESA_PRODUCT_APPROVED !== 'true') {
-      throw new ServiceUnavailableException('The configured M-Pesa business product has not been confirmed for customer wallet deposits.');
-    }
-    const limits = this.getWalletDepositLimits();
+    const configuration = await this.getWalletDepositConfiguration();
+    const limits = configuration.limits;
     if (!limits) {
       throw new ServiceUnavailableException('Approved wallet-deposit amount limits are not configured.');
+    }
+    if (!configuration.productApproved) {
+      throw new ServiceUnavailableException('The configured M-Pesa business product has not been confirmed for customer wallet deposits.');
     }
     if (dto.amountKes < limits.minimumAmountKes || dto.amountKes > limits.maximumAmountKes) {
       throw new BadRequestException('The deposit amount is outside the configured wallet limits.');
@@ -215,14 +244,19 @@ export class PaymentService {
     const existing = await this.prisma.paymentTransaction.findUnique({ where: { idempotencyKey: scopedKey } });
     if (existing) return this.assertWalletDepositReplay(existing, userId, requestHash);
 
-    const [user, clearingAccount] = await Promise.all([
+    const [user, clearingAccount, walletLiability] = await Promise.all([
       this.prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } }),
-      this.prisma.ledgerAccount.findUnique({ where: { code: 'MPESA_CLEARING' } }),
+      this.prisma.ledgerAccount.findUnique({ where: { code: MPESA_CLEARING_ACCOUNT_CODE } }),
+      this.prisma.ledgerAccount.findUnique({ where: { code: CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE } }),
     ]);
     if (!user?.isActive) throw new ForbiddenException('This account cannot initiate a wallet deposit.');
     if (!clearingAccount?.isActive || clearingAccount.currency !== 'KES' ||
       clearingAccount.accountType !== LedgerAccountType.ASSET) {
       throw new ServiceUnavailableException('Wallet deposit clearing account is unavailable.');
+    }
+    if (!walletLiability?.isActive || walletLiability.currency !== 'KES' ||
+      walletLiability.accountType !== LedgerAccountType.LIABILITY) {
+      throw new ServiceUnavailableException('Wallet deposit liability account is unavailable.');
     }
     this.mpesa.assertConfiguredForPayments();
     const callbackToken = randomBytes(32).toString('base64url');
@@ -405,7 +439,7 @@ export class PaymentService {
         amountKes: dto.amountKes,
         currency: 'KES',
         message: 'Safaricom accepted the request but its identifiers could not be saved. The payment remains unresolved; do not submit another deposit.',
-      };
+      }
     }
     return {
       reference: payment.internalReference,
@@ -2650,15 +2684,37 @@ export class PaymentService {
     });
   }
 
-  private getWalletDepositLimits(): { minimumAmountKes: number; maximumAmountKes: number } | null {
-    const minimum = process.env.WALLET_DEPOSIT_MIN_KES;
-    const maximum = process.env.WALLET_DEPOSIT_MAX_KES;
-    if (!minimum || !maximum || !/^[1-9]\d*$/.test(minimum) || !/^[1-9]\d*$/.test(maximum)) return null;
-    const minimumAmountKes = Number(minimum);
-    const maximumAmountKes = Number(maximum);
-    if (!Number.isSafeInteger(minimumAmountKes) || !Number.isSafeInteger(maximumAmountKes) ||
-      minimumAmountKes > maximumAmountKes) return null;
-    return { minimumAmountKes, maximumAmountKes };
+  private async getWalletDepositConfiguration(): Promise<{
+    limits: { minimumAmountKes: number; maximumAmountKes: number } | null;
+    productApproved: boolean;
+  }> {
+    const setting = await this.prisma.systemSetting.findUnique({
+      where: { key: WALLET_DEPOSIT_SETTING_KEY },
+      select: { value: true },
+    });
+    const value = setting?.value;
+    const record = value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, Prisma.JsonValue>
+      : {};
+    const isValidAmount = (amount: Prisma.JsonValue | undefined): amount is number =>
+      typeof amount === 'number' && Number.isSafeInteger(amount) &&
+      amount > 0 && amount <= MAX_WALLET_DEPOSIT_AMOUNT_KES;
+    const minimumAmountKes = isValidAmount(record.minimumAmountKes) ? record.minimumAmountKes : null;
+    const maximumAmountKes = isValidAmount(record.maximumAmountKes) ? record.maximumAmountKes : null;
+    const accountMappingReady =
+      record.customerWalletLiabilityAccountCode === CUSTOMER_WALLET_LIABILITY_ACCOUNT_CODE &&
+      record.mpesaClearingAccountCode === MPESA_CLEARING_ACCOUNT_CODE;
+    const limits = minimumAmountKes !== null && maximumAmountKes !== null &&
+      minimumAmountKes <= maximumAmountKes && accountMappingReady
+      ? { minimumAmountKes, maximumAmountKes }
+      : null;
+    return {
+      limits,
+      productApproved: record.productApproved === true &&
+        typeof record.approvalReference === 'string' &&
+        record.approvalReference.trim().length > 0 &&
+        accountMappingReady,
+    };
   }
 
   private assertWalletDepositReplay(

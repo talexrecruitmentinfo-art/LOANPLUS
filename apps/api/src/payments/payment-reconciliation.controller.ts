@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers
 import { Throttle } from '@nestjs/throttler';
 import { Equals, IsBoolean, IsIn, IsOptional, IsString, Length, Matches } from 'class-validator';
 import type { AuthenticatedRequest } from '../auth/request.types';
-import { SuperadminSessionGuard } from '../auth/session.guard';
+import { AllowStaffRoles, SuperadminSessionGuard } from '../auth/session.guard';
 import { PaymentService, type ReconciliationQueueCategory } from './payment.service';
 
 class ReconcilePaymentDto {
@@ -73,6 +73,7 @@ export class PaymentReconciliationController {
   constructor(private readonly payments: PaymentService) {}
 
   @Get()
+  @AllowStaffRoles('STAFF_FINANCE')
   async list(
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,

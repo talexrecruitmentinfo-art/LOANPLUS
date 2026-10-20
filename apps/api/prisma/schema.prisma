@@ -11,6 +11,9 @@ datasource db {
 enum Role {
   NORMAL_USER
   SUPERADMIN
+  STAFF_SUPPORT
+  STAFF_FINANCE
+  STAFF_OPERATIONS
 }
 
 enum IdentityStatus {
@@ -195,6 +198,8 @@ model SuperadminUser {
   id                            String                         @id @default(cuid())
   role                          Role                           @default(SUPERADMIN)
   email                         String                         @unique @db.VarChar(254)
+  fullName                      String?                        @db.VarChar(160)
+  phone                         String?                        @db.VarChar(16)
   passwordHash                  String                         @db.VarChar(100)
   isActive                      Boolean                        @default(true)
   emailVerifiedAt               DateTime?
@@ -209,8 +214,27 @@ model SuperadminUser {
   publishedWebsiteRevisions     WebsiteContentRevision[]       @relation("WebsiteRevisionPublisher")
   loanDisbursements             LoanDisbursement[]
   paymentReconciliationAttempts PaymentReconciliationAttempt[]
+  receivedStaffInvitations      StaffInvitation[]              @relation("StaffInvitationRecipient")
+  sentStaffInvitations          StaffInvitation[]              @relation("StaffInvitationIssuer")
 
   @@map("superadmin_users")
+}
+
+model StaffInvitation {
+  id             String         @id @default(cuid())
+  staffUserId    String
+  invitedById    String
+  tokenHash      String         @unique @db.VarChar(64)
+  expiresAt      DateTime
+  usedAt         DateTime?
+  invalidatedAt  DateTime?
+  createdAt      DateTime       @default(now())
+  staffUser      SuperadminUser @relation("StaffInvitationRecipient", fields: [staffUserId], references: [id], onDelete: Restrict)
+  invitedBy      SuperadminUser @relation("StaffInvitationIssuer", fields: [invitedById], references: [id], onDelete: Restrict)
+
+  @@index([staffUserId, createdAt])
+  @@index([expiresAt])
+  @@map("staff_invitations")
 }
 
 model SuperadminOtpChallenge {

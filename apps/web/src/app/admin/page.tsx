@@ -36,24 +36,35 @@ export default function AdminPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError('');
-    const [adminResult, dashboardResult] = await Promise.allSettled([
-      apiRequest<Admin>('/admin/auth/me', { cache: 'no-store' }),
-      apiRequest<DashboardData>('/admin/dashboard', { cache: 'no-store' }),
-    ]);
-    if (adminResult.status === 'rejected') {
-      if (adminResult.reason instanceof Error && adminResult.reason.message.includes('Authentication required')) {
+    let currentAdmin: Admin;
+    try {
+      currentAdmin = await apiRequest<Admin>('/admin/auth/me', { cache: 'no-store' });
+    } catch (cause) {
+      if (cause instanceof Error && cause.message.includes('Authentication required')) {
         router.replace('/admin/login');
       } else {
-        setError(adminResult.reason instanceof Error ? adminResult.reason.message : 'Administrator access could not be verified.');
+        setError(cause instanceof Error ? cause.message : 'Administrator access could not be verified.');
       }
-    } else {
-      setAdmin(adminResult.value);
+      setAdmin(null);
+      setLoading(false);
+      return;
     }
-    if (dashboardResult.status === 'fulfilled') {
-      setDashboard(dashboardResult.value);
-    } else {
+    setAdmin(currentAdmin);
+    if (currentAdmin.role !== 'SUPERADMIN') {
+      const destination = {
+        STAFF_SUPPORT: '/admin/support',
+        STAFF_FINANCE: '/admin/payments',
+        STAFF_OPERATIONS: '/admin/loans',
+      }[currentAdmin.role] ?? '/admin/login';
+      router.replace(destination);
+      setLoading(false);
+      return;
+    }
+    try {
+      setDashboard(await apiRequest<DashboardData>('/admin/dashboard', { cache: 'no-store' }));
+    } catch (cause) {
       setDashboard(null);
-      setError(dashboardResult.reason instanceof Error ? dashboardResult.reason.message : 'Dashboard data could not be loaded.');
+      setError(cause instanceof Error ? cause.message : 'Dashboard data could not be loaded.');
     }
     setLoading(false);
   }, [router]);
