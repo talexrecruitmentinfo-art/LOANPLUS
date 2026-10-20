@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   pollWalletDepositStatus,
+  shouldClearWalletDepositTracking,
   WALLET_DEPOSIT_POLL_INTERVAL_MS,
   WALLET_DEPOSIT_POLL_WINDOW_MS,
 } from '../src/lib/wallet-deposit-polling.mjs';
@@ -95,10 +96,36 @@ test('status request failures stop the automatic loop so the customer can retry 
   assert.equal(requests, 1);
 });
 
+test('page refresh clears local timeout tracking when backend reports a terminal or released deposit', () => {
+  assert.equal(shouldClearWalletDepositTracking({
+    reference: 'LPD_CONFIRMED',
+    paymentStatus: 'CONFIRMED',
+    canInitiateNewDeposit: false,
+  }), true);
+  assert.equal(shouldClearWalletDepositTracking({
+    reference: 'LPD_FAILED',
+    paymentStatus: 'FAILED',
+    canInitiateNewDeposit: false,
+  }), true);
+  assert.equal(shouldClearWalletDepositTracking({
+    reference: 'LPD_OLD',
+    paymentStatus: 'PENDING',
+    canInitiateNewDeposit: true,
+  }), true);
+  assert.equal(shouldClearWalletDepositTracking({
+    reference: 'LPD_PENDING',
+    paymentStatus: 'PENDING',
+    canInitiateNewDeposit: false,
+  }), false);
+});
+
 test('component follows backend retry eligibility and guards unresolved deposit status checks', () => {
   assert.match(walletComponent, /payments\s*\.filter\(\(payment\) => payment\.type === 'WALLET_DEPOSIT'/);
   assert.match(walletComponent, /apiRequest<WalletDepositEligibility>\([\s\S]*?\/payments\/wallet-deposit-eligibility/);
   assert.match(walletComponent, /depositEligibility\?\.canInitiateNewDeposit !== true/);
+  assert.match(walletComponent, /shouldClearWalletDepositTracking/);
+  assert.match(walletComponent, /setDepositPollingTimedOut\(false\)/);
+  assert.match(walletComponent, /Request payment reconciliation/);
   assert.doesNotMatch(walletComponent, /Boolean\(unresolvedDepositRecord\)/);
   assert.doesNotMatch(walletComponent, /walletActionBusyRef\.current \|\| unresolvedDeposit \|\| statusCheckBusy\.current/);
   assert.match(walletComponent, /checkDepositStatus\(selectedDepositReference\)/);

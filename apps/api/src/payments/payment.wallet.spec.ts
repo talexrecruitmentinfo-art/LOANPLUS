@@ -163,7 +163,7 @@ describe('M-Pesa wallet deposit initiation', () => {
     unresolvedPayment = {
       id: 'existing-payment',
       internalReference: 'LPDF2A72DD1F0B7231E1B2FF524CA050A7D',
-      amountKes: 500,
+      amountKes: 65,
       currency: 'KES',
       status: 'PENDING',
       createdAt: new Date(),
@@ -174,10 +174,105 @@ describe('M-Pesa wallet deposit initiation', () => {
       canInitiateNewDeposit: false,
       pendingDeposit: {
         reference: 'LPDF2A72DD1F0B7231E1B2FF524CA050A7D',
+        amountKes: 65,
         status: 'PENDING',
       },
     });
     expect(unresolvedPayment).toMatchObject({ status: 'PENDING' });
+  });
+
+  it('keeps a legacy 4999 deposit ineligible and exposes it as pending without rewriting it', async () => {
+    unresolvedPayment = {
+      id: 'legacy-unresolved-payment',
+      internalReference: 'LPD_LEGACY_4999',
+      amountKes: 65,
+      currency: 'KES',
+      status: 'FAILED',
+      failureCode: 'MPESA_RESULT_4999',
+      receiptReference: null,
+      createdAt: new Date(),
+    };
+
+    await expect(service.getWalletDepositEligibility('customer-id')).resolves.toMatchObject({
+      canInitiateNewDeposit: false,
+      pendingDeposit: { reference: 'LPD_LEGACY_4999', status: 'PENDING' },
+    });
+    const initiation = await service.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(),
+      'wallet-deposit-legacy-4999',
+    );
+    expect(initiation).toMatchObject({ reference: 'LPD_LEGACY_4999', status: 'PENDING' });
+    expect(unresolvedPayment).toMatchObject({ status: 'FAILED', failureCode: 'MPESA_RESULT_4999' });
+    expect(stkRequest).not.toHaveBeenCalled();
+  });
+
+  it('keeps failed deposits with missing or unknown evidence unresolved without rewriting them', async () => {
+    unresolvedPayment = {
+      id: 'legacy-unknown-payment',
+      internalReference: 'LPD_LEGACY_UNKNOWN',
+      amountKes: 65,
+      currency: 'KES',
+      status: 'FAILED',
+      failureCode: null,
+      receiptReference: null,
+      createdAt: new Date(),
+    };
+
+    await expect(service.getWalletDepositEligibility('customer-id')).resolves.toMatchObject({
+      canInitiateNewDeposit: false,
+      pendingDeposit: { reference: 'LPD_LEGACY_UNKNOWN', status: 'PENDING' },
+    });
+    const initiation = await service.initiateWalletDeposit(
+      'customer-id',
+      depositRequest(),
+      'wallet-deposit-unknown-outcome',
+    );
+    expect(initiation).toMatchObject({ reference: 'LPD_LEGACY_UNKNOWN', status: 'PENDING' });
+    expect(unresolvedPayment).toMatchObject({ status: 'FAILED', failureCode: null });
+    expect(stkRequest).not.toHaveBeenCalled();
+  });
+
+  it('encodes only explicit definitive provider failures as retryable in backend eligibility', async () => {
+    const findFirst = jest.fn(async (_args: { where: object }) => null);
+    const eligibilityService = new PaymentService({
+      paymentTransaction: { findFirst },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    await expect(eligibilityService.getWalletDepositEligibility('customer-id')).resolves.toMatchObject({
+      canInitiateNewDeposit: true,
+      pendingDeposit: null,
+    });
+    expect(JSON.stringify(findFirst.mock.calls[0][0])).toContain(
+      '"notIn":["MPESA_OAUTH_FAILED","MPESA_CONFIGURATION_FAILED","MPESA_STK_REJECTED"]',
+    );
+  });
+
+  it('projects a legacy 4999 deposit as pending in payment status and history without exposing failure internals', async () => {
+    const legacyPayment = {
+      internalReference: 'LPD_LEGACY_4999',
+      type: PaymentType.WALLET_DEPOSIT,
+      amountKes: 65,
+      currency: 'KES',
+      status: PaymentStatus.FAILED,
+      failureCode: 'MPESA_RESULT_4999',
+      receiptReference: null,
+      confirmedAt: null,
+      createdAt: new Date(),
+    };
+    const findFirst = jest.fn(async () => legacyPayment);
+    const findMany = jest.fn(async () => [legacyPayment]);
+    const legacyService = new PaymentService({
+      paymentTransaction: { findFirst, findMany },
+    } as unknown as PrismaService, {} as MpesaService, {} as LedgerService);
+
+    await expect(legacyService.getWalletDepositStatus('customer-id', 'LPD_LEGACY_4999'))
+      .resolves.toMatchObject({ status: 'PENDING', receiptReference: null });
+    await expect(legacyService.listCustomerPayments('customer-id')).resolves.toMatchObject([{
+      internalReference: 'LPD_LEGACY_4999',
+      status: 'PENDING',
+      unresolved: true,
+    }]);
   });
 
   it('authorizes a new attempt only after backend records no pending deposit', async () => {

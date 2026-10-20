@@ -3,6 +3,11 @@ export const WALLET_DEPOSIT_POLL_WINDOW_MS = 60_000;
 
 const TERMINAL_DEPOSIT_STATUSES = new Set(['CONFIRMED', 'FAILED', 'CANCELLED', 'EXPIRED', 'REVERSED']);
 
+export function shouldClearWalletDepositTracking({ reference, paymentStatus, canInitiateNewDeposit }) {
+  return Boolean(reference) &&
+    (TERMINAL_DEPOSIT_STATUSES.has(paymentStatus) || canInitiateNewDeposit === true);
+}
+
 function wait(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {

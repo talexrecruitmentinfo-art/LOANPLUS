@@ -6,7 +6,10 @@ import { useRouter } from 'next/navigation';
 import { apiRequest } from '@/lib/api';
 import { formatMoney, PLATFORM_CURRENCY } from '@/lib/currency';
 import { normalizeKenyanPhone } from '@/lib/kenyan-phone.mjs';
-import { pollWalletDepositStatus } from '@/lib/wallet-deposit-polling.mjs';
+import {
+  pollWalletDepositStatus,
+  shouldClearWalletDepositTracking,
+} from '@/lib/wallet-deposit-polling.mjs';
 
 interface Wallet {
   balanceKes: number;
@@ -307,12 +310,45 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
       (payment.status === 'PENDING' || payment.unresolved))
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0];
   const unresolvedDepositReference =
-    depositEligibility?.pendingDeposit?.reference ?? unresolvedDepositRecord?.internalReference;
+    depositEligibility?.pendingDeposit?.reference ??
+    (depositEligibility?.canInitiateNewDeposit === false || depositEligibility === null
+      ? unresolvedDepositRecord?.internalReference
+      : undefined);
   const selectedDepositReference = unresolvedDepositReference || depositReference;
   const trackedDeposit = payments.find((payment) => payment.internalReference === selectedDepositReference);
-  const displayedDepositStatus = depositStatus?.reference === selectedDepositReference
-    ? depositStatus.status
-    : trackedDeposit?.status ?? depositEligibility?.pendingDeposit?.status ?? unresolvedDepositRecord?.status ?? null;
+  const eligibilityReleased = depositEligibility?.canInitiateNewDeposit === true &&
+    depositEligibility.pendingDeposit === null;
+  const trackedTerminalStatus = trackedDeposit &&
+    ['CONFIRMED', 'FAILED', 'CANCELLED', 'EXPIRED', 'REVERSED'].includes(trackedDeposit.status)
+    ? trackedDeposit.status
+    : null;
+  const displayedDepositStatus = eligibilityReleased
+    ? trackedTerminalStatus ??
+      (depositStatus?.reference === selectedDepositReference && depositStatus.status !== 'PENDING'
+        ? depositStatus.status
+        : null)
+    : trackedTerminalStatus ??
+      (depositStatus?.reference === selectedDepositReference
+        ? depositStatus.status
+        : depositEligibility?.pendingDeposit?.status ?? unresolvedDepositRecord?.status ?? null);
+
+  useEffect(() => {
+    const trackedPayment = payments.find((payment) => payment.internalReference === depositReference);
+    if (!shouldClearWalletDepositTracking({
+      reference: depositReference,
+      paymentStatus: trackedPayment?.status ?? null,
+      canInitiateNewDeposit: eligibilityReleased,
+    })) return;
+    if (depositPollingWindow.current?.reference === depositReference) {
+      depositPollingWindow.current.stopped = true;
+    }
+    depositReferenceRef.current = '';
+    depositPollingWindow.current = null;
+    setDepositReference('');
+    setDepositStatus((current) => current?.reference === depositReference ? null : current);
+    setDepositPollingTimedOut(false);
+    setDepositStatusError('');
+  }, [depositEligibility, depositReference, eligibilityReleased, payments]);
 
   const applyDepositStatus = useCallback(async (reference: string, status: string) => {
     if (!componentMounted.current || depositReferenceRef.current !== reference) return;
@@ -604,25 +640,22 @@ export default function CustomerLedger({ view }: { view: 'wallet' | 'transaction
         </div>}
         {depositQuote && !depositQuoteLoading && depositQuote.unavailableReasons.map((reason) =>
           <p className="form-error" role="status" key={reason}>{reason}</p>)}
-        {selectedDepositReference && <div className="wallet-deposit-pending" aria-live="polite">
+        {selectedDepositReference && displayedDepositStatus && <div className="wallet-deposit-pending" aria-live="polite">
           <p role="status">
             {displayedDepositStatus === 'PENDING'
               ? depositPollingTimedOut
-                ? 'We’re still waiting for Safaricom confirmation. Automatic checking has stopped. Your payment may still complete; please check its status before trying again.'
-                : 'Waiting for Safaricom confirmation. We’ll check for up to 1 minute.'
+                ? `Previous deposit ${selectedDepositReference} remains unresolved. Automatic checking has stopped; it may still complete. A new deposit is unavailable until safely resolved.`
+                : `Previous deposit ${selectedDepositReference} is awaiting Safaricom confirmation. Automatic checking runs for up to 1 minute; a new deposit is unavailable until safely resolved.`
               : `Payment status: ${displayedDepositStatus?.replaceAll('_', ' ') ?? 'being checked'} · Reference ${selectedDepositReference}.`}
           </p>
-          <small>Reference {selectedDepositReference}</small>
-          {displayedDepositStatus === 'PENDING' && <p role="status">
-            Previous deposit {selectedDepositReference} remains unresolved. A new deposit is unavailable until its outcome is verified; a polling timeout does not mean it failed.
-          </p>}
           {depositStatusError && <p className="form-error" role="alert">{depositStatusError}</p>}
-          {displayedDepositStatus === 'PENDING' && (depositPollingTimedOut || Boolean(depositStatusError)) && (
+          {displayedDepositStatus === 'PENDING' && <>
             <button className="quiet-button" type="button" disabled={depositStatusChecking}
               onClick={() => void checkDepositStatus(selectedDepositReference)}>
               {depositStatusChecking ? 'Checking status…' : 'Check status'}
             </button>
-          )}
+            {' '}<Link className="quiet-button" href="/support">Request payment reconciliation</Link>
+          </>}
         </div>}
         {walletActionMessage && <p className="wallet-action-success" role="status">{walletActionMessage}</p>}
         {walletActionError && <p className="form-error" role="alert">{walletActionError}</p>}

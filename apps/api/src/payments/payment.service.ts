@@ -59,7 +59,35 @@ const PROVIDER_REVIEW_OUTCOMES = new Set([
 ]);
 
 const ACTIVATION_AMOUNT_KES = 50;
+const RETRYABLE_WALLET_FAILURE_CODES = [
+  'MPESA_OAUTH_FAILED',
+  'MPESA_CONFIGURATION_FAILED',
+  'MPESA_STK_REJECTED',
+] as const;
 const logger = new Logger('PaymentService');
+
+function unresolvedWalletDepositFilter(userId: string): Prisma.PaymentTransactionWhereInput {
+  return {
+    userId,
+    type: PaymentType.WALLET_DEPOSIT,
+    OR: [
+      { status: PaymentStatus.PENDING },
+      {
+        status: PaymentStatus.FAILED,
+        receiptReference: null,
+        OR: [
+          { failureCode: null },
+          {
+            AND: [
+              { failureCode: { notIn: [...RETRYABLE_WALLET_FAILURE_CODES] } },
+              { NOT: { failureCode: { startsWith: 'MPESA_PREFLIGHT_' } } },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
 interface MpesaCallback {
   CheckoutRequestID: string;
   MerchantRequestID: string;
@@ -216,13 +244,15 @@ export class PaymentService {
 
   async getWalletDepositEligibility(userId: string) {
     const pendingDeposit = await this.prisma.paymentTransaction.findFirst({
-      where: { userId, type: PaymentType.WALLET_DEPOSIT, status: PaymentStatus.PENDING },
+      where: unresolvedWalletDepositFilter(userId),
       orderBy: { createdAt: 'asc' },
       select: {
         internalReference: true,
         amountKes: true,
         currency: true,
         status: true,
+        failureCode: true,
+        receiptReference: true,
         createdAt: true,
       },
     });
@@ -235,7 +265,11 @@ export class PaymentService {
         reference: pendingDeposit.internalReference,
         amountKes: pendingDeposit.amountKes,
         currency: pendingDeposit.currency,
-        status: pendingDeposit.status,
+        status: this.getWalletDepositEffectiveStatus(
+          pendingDeposit.status,
+          pendingDeposit.failureCode,
+          pendingDeposit.receiptReference,
+        ),
         createdAt: pendingDeposit.createdAt,
       },
       message: 'A previous wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.',
@@ -299,7 +333,7 @@ export class PaymentService {
           created: false,
         };
         const unresolved = await tx.paymentTransaction.findFirst({
-          where: { userId, type: PaymentType.WALLET_DEPOSIT, status: PaymentStatus.PENDING },
+          where: unresolvedWalletDepositFilter(userId),
           orderBy: { createdAt: 'asc' },
         });
         if (unresolved) {
@@ -307,7 +341,11 @@ export class PaymentService {
             payment: null,
             result: {
               reference: unresolved.internalReference,
-              status: unresolved.status,
+              status: this.getWalletDepositEffectiveStatus(
+                unresolved.status,
+                unresolved.failureCode,
+                unresolved.receiptReference,
+              ),
               amountKes: unresolved.amountKes,
               currency: unresolved.currency,
               message: 'A previous wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.',
@@ -352,7 +390,7 @@ export class PaymentService {
         const [replay, unresolved] = await Promise.all([
           this.prisma.paymentTransaction.findUnique({ where: { idempotencyKey: scopedKey } }),
           this.prisma.paymentTransaction.findFirst({
-            where: { userId, type: PaymentType.WALLET_DEPOSIT, status: PaymentStatus.PENDING },
+            where: unresolvedWalletDepositFilter(userId),
             orderBy: { createdAt: 'asc' },
           }),
         ]);
@@ -360,7 +398,11 @@ export class PaymentService {
         if (unresolved) {
           return {
             reference: unresolved.internalReference,
-            status: unresolved.status,
+            status: this.getWalletDepositEffectiveStatus(
+              unresolved.status,
+              unresolved.failureCode,
+              unresolved.receiptReference,
+            ),
             amountKes: unresolved.amountKes,
             currency: unresolved.currency,
             message: 'A previous wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.',
@@ -931,11 +973,18 @@ export class PaymentService {
     });
     return payments.map((payment) => {
       const { failureCode, ...customerPayment } = payment;
-      const unresolvedLegacyProcessing =
+      const effectiveWalletStatus = this.getWalletDepositEffectiveStatus(
+        payment.status,
+        failureCode,
+        payment.receiptReference,
+      );
+      const legacyUnresolvedProviderResult =
         payment.status === PaymentStatus.FAILED &&
         failureCode === 'MPESA_RESULT_4999' &&
         payment.receiptReference === null;
-      const status = unresolvedLegacyProcessing ? PaymentStatus.PENDING : payment.status;
+      const status = payment.type === PaymentType.WALLET_DEPOSIT
+        ? effectiveWalletStatus
+        : legacyUnresolvedProviderResult ? PaymentStatus.PENDING : payment.status;
       const resultCode = payment.receiptReference ? 0 : this.getPersistedProviderResultCode(failureCode);
       return {
         ...customerPayment,
@@ -958,13 +1007,22 @@ export class PaymentService {
         amountKes: true,
         currency: true,
         status: true,
+        failureCode: true,
         receiptReference: true,
         confirmedAt: true,
         createdAt: true,
       },
     });
     if (!payment) throw new NotFoundException('Wallet deposit was not found.');
-    return payment;
+    const { failureCode, ...customerPayment } = payment;
+    return {
+      ...customerPayment,
+      status: this.getWalletDepositEffectiveStatus(
+        payment.status,
+        failureCode,
+        payment.receiptReference,
+      ),
+    };
   }
 
   async getUnresolvedLoanProcessingFeePayment(userId: string) {
@@ -2810,6 +2868,8 @@ export class PaymentService {
       currency: string;
       status: PaymentStatus;
       requestHash: string | null;
+      failureCode: string | null;
+      receiptReference: string | null;
     },
     userId: string,
     requestHash: string,
@@ -2820,15 +2880,35 @@ export class PaymentService {
     }
     return {
       reference: payment.internalReference,
-      status: payment.status,
+      status: this.getWalletDepositEffectiveStatus(
+        payment.status,
+        payment.failureCode,
+        payment.receiptReference,
+      ),
       amountKes: payment.amountKes,
       currency: payment.currency,
-      message: payment.status === PaymentStatus.PENDING
+      message: this.getWalletDepositEffectiveStatus(
+        payment.status,
+        payment.failureCode,
+        payment.receiptReference,
+      ) === PaymentStatus.PENDING
         ? 'This wallet deposit remains unresolved. A new deposit is unavailable until its outcome is verified.'
         : payment.status === PaymentStatus.CONFIRMED
           ? 'This wallet deposit has already been confirmed.'
           : 'This wallet deposit attempt has already been recorded.',
     };
+  }
+
+  private getWalletDepositEffectiveStatus(
+    status: PaymentStatus,
+    failureCode: string | null,
+    receiptReference: string | null,
+  ): PaymentStatus {
+    return status === PaymentStatus.FAILED && receiptReference === null &&
+      !failureCode?.startsWith('MPESA_PREFLIGHT_') &&
+      !RETRYABLE_WALLET_FAILURE_CODES.some((retryableCode) => retryableCode === failureCode)
+      ? PaymentStatus.PENDING
+      : status;
   }
 
 }

@@ -1,6 +1,12 @@
 export const WALLET_DEPOSIT_POLL_INTERVAL_MS: number;
 export const WALLET_DEPOSIT_POLL_WINDOW_MS: number;
 
+export function shouldClearWalletDepositTracking(options: {
+  reference: string;
+  paymentStatus: string | null;
+  canInitiateNewDeposit: boolean | undefined;
+}): boolean;
+
 export function pollWalletDepositStatus(options: {
   reference: string;
   getStatus: (reference: string, signal: AbortSignal) => Promise<{ status: string }>;
