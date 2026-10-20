@@ -15,6 +15,9 @@ const walletDepositSettings = await readFile(new URL('../src/components/wallet-d
 const styles = await readFile(new URL('../src/app/admin.css', import.meta.url), 'utf8');
 const adminController = await readFile(new URL('../../api/src/admin/admin.controller.ts', import.meta.url), 'utf8');
 const adminService = await readFile(new URL('../../api/src/admin/admin.service.ts', import.meta.url), 'utf8');
+const reconciliationController = await readFile(new URL('../../api/src/payments/payment-reconciliation.controller.ts', import.meta.url), 'utf8');
+const apiClient = await readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8');
+const loans = await readFile(new URL('../src/app/admin/loans/page.tsx', import.meta.url), 'utf8');
 
 test('Admin portal uses a responsive, Admin-scoped shell and preserves the dedicated login page', () => {
   for (const route of ['/admin', '/admin/customers', '/admin/loans', '/admin/disbursements', '/admin/payments', '/admin/reconciliation', '/admin/website', '/admin/support', '/admin/audit', '/admin/settings', '/admin/system-health']) {
@@ -25,6 +28,7 @@ test('Admin portal uses a responsive, Admin-scoped shell and preserves the dedic
   assert.match(styles, /@media\(max-width:760px\)/);
   assert.match(styles, /\.admin-app-shell>\.admin-app-nav/);
   assert.match(styles, /:focus-visible/);
+  assert.match(shell, /adminRole !== null && item\.roles\.includes\(adminRole\)/);
 });
 
 test('wallet-deposit configuration and staff accounts use the existing Superadmin admin surfaces', () => {
@@ -104,4 +108,27 @@ test('Admin reconciliation requires supplied Safaricom IDs only for uncertain in
   assert.match(reconciliation, /different Superadmin must verify it before LoanPlus queries Safaricom/);
   assert.match(reconciliation, /\/verify-evidence/);
   assert.match(reconciliation, /EVIDENCE_SUBMITTED_AWAITING_REVIEW/);
+});
+
+test('reconciliation actions follow Superadmin permissions and cursor pagination supports back navigation', () => {
+  assert.match(reconciliation, /apiRequest<\{ role: string \}>\('\/admin\/auth\/me'/);
+  assert.match(reconciliation, /adminRole === 'SUPERADMIN' \? <>/);
+  assert.match(reconciliation, /Read-only reconciliation access/);
+  assert.match(reconciliation, /window\.confirm/);
+  assert.match(reconciliation, /\/payment-reconciliation\/\$\{payment\.id\}\/refresh/);
+  assert.match(reconciliation, /\/payment-reconciliation\/\$\{payment\.id\}\/escalate/);
+  assert.match(reconciliation, /cursorHistory/);
+  assert.match(reconciliation, /Previous page/);
+  assert.match(reconciliation, /activeSearch, activeCategory/);
+  assert.match(reconciliation, /Already escalated/);
+  assert.match(reconciliationController, /@UseGuards\(SuperadminSessionGuard\)/);
+  assert.match(reconciliationController, /@AllowStaffRoles\('STAFF_FINANCE'\)/);
+  assert.match(apiClient, /credentials: 'include'/);
+  assert.match(apiClient, /NEXT_PUBLIC_API_URL/);
+});
+
+test('loan rejection validates only its reason and consequential decisions require confirmation', () => {
+  assert.match(loans, /window\.confirm\(`Confirm that you want to \$\{action\} this loan application/);
+  assert.match(loans, /elements\.namedItem\('reason'\)/);
+  assert.doesNotMatch(loans, /if \(form\?\.reportValidity\(\)\) void saveDecision\(form, application, 'REJECT'\)/);
 });

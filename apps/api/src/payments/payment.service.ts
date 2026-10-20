@@ -1906,7 +1906,19 @@ export class PaymentService {
           payment.failureCode === 'MPESA_RESULT_4999' &&
           payment.receiptReference === null;
         if (payment.status !== PaymentStatus.PENDING && !isLegacyUnresolved) {
-          throw new ConflictException('Only unresolved activation or loan processing-fee payments can be escalated.');
+          throw new ConflictException('Only unresolved payments can be escalated.');
+        }
+        if (payment.type !== PaymentType.ACTIVATION &&
+          payment.type !== PaymentType.LOAN_PROCESSING_FEE &&
+          payment.type !== PaymentType.WALLET_DEPOSIT) {
+          throw new ConflictException('This payment type cannot be escalated.');
+        }
+        const existingEscalation = await tx.paymentReconciliationAttempt.findFirst({
+          where: { paymentTransactionId: paymentId, outcome: 'ESCALATED' },
+          select: { id: true },
+        });
+        if (existingEscalation) {
+          throw new ConflictException('This payment is already escalated for investigation.');
         }
 
         const escalation = await tx.paymentReconciliationAttempt.create({

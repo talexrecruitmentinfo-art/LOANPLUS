@@ -271,7 +271,7 @@ describe('loan processing-fee payment database integration', () => {
     expect(submittedApplication.submittedAt).toBeInstanceOf(Date);
     expect(entries).toHaveLength(2);
     expect(entries.find((entry) => entry.account.id === accountIds[0])).toMatchObject({ debitKes: 50, creditKes: 0 });
-    expect(entries.find((entry) => entry.account.id === accountIds[1])).toMatchObject({ debitKes: 0, creditKes: 50 });
+    expect(entries.find((entry) => entry.account.id === accountIds[2])).toMatchObject({ debitKes: 0, creditKes: 50 });
     expect(wallet).toHaveLength(0);
 
     const secondDraft = await loans.createApplication(userId, applicationDto, 'loan-application-idempotency-02');

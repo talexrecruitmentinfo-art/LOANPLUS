@@ -52,7 +52,7 @@ export default function AdminPortalShell({ children }: { children: ReactNode }) 
     }
   }
 
-  const visibleNavigation = navigation.filter((item) => !item.roles || !adminRole || item.roles.includes(adminRole));
+  const visibleNavigation = navigation.filter((item) => !item.roles || (adminRole !== null && item.roles.includes(adminRole)));
   const activeItem = visibleNavigation.find((item) => item.href !== '/admin' && pathname.startsWith(`${item.href}/`))
     ?? visibleNavigation.find((item) => item.href === pathname)
     ?? visibleNavigation[0];

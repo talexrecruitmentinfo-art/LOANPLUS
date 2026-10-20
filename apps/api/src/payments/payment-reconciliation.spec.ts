@@ -196,6 +196,34 @@ describe('PaymentService provider reconciliation', () => {
     expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
   });
 
+  it('keeps an ambiguous wallet-deposit provider result pending without posting a wallet credit', async () => {
+    const walletPayment = {
+      ...payment,
+      type: PaymentType.WALLET_DEPOSIT,
+      amountKes: 65,
+      failureCode: 'MPESA_RESULT_4999',
+      status: 'FAILED' as PaymentStatus,
+    };
+    const fixture = createService(1032, walletPayment);
+
+    const result = await fixture.service.reconcileActivationPayment(
+      paymentId,
+      'wallet-deposit-refresh-ambiguous-01',
+      'superadmin-id',
+      'Check unresolved wallet deposit provider status',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({
+      outcome: 'UNRESOLVED_UNKNOWN_RESULT',
+      providerResultCode: '1032',
+      reasonCode: 'UNRECOGNIZED_PROVIDER_RESULT',
+    });
+    expect(fixture.queryStkStatus).toHaveBeenCalledWith(request.checkoutRequestId);
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.postWithinTransaction).not.toHaveBeenCalled();
+  });
+
   it('records missing identifiers without querying Safaricom or changing the payment', async () => {
     const paymentWithoutProviderIds = {
       ...payment,
@@ -1029,6 +1057,98 @@ describe('PaymentService provider reconciliation', () => {
     }));
     expect(fixture.queryStkStatus).not.toHaveBeenCalled();
     expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+  });
+
+  it('escalates unresolved wallet deposits without querying the provider or changing payment state', async () => {
+    const walletPayment = {
+      ...payment,
+      type: PaymentType.WALLET_DEPOSIT,
+      amountKes: 65,
+      failureCode: 'MPESA_RESULT_4999',
+      status: 'FAILED' as PaymentStatus,
+    };
+    const fixture = createService(1032, walletPayment);
+
+    const result = await fixture.service.escalateActivationPayment(
+      paymentId,
+      'wallet-deposit-escalation-0001',
+      'superadmin-id',
+      'Escalate ambiguous wallet deposit for provider investigation',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({ outcome: 'ESCALATED', reasonCode: 'PROVIDER_INVESTIGATION_REQUIRED' });
+    expect(fixture.createAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        paymentTransactionId: paymentId,
+        outcome: 'ESCALATED',
+        operatorNote: 'Escalate ambiguous wallet deposit for provider investigation',
+      }),
+    }));
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not create duplicate escalation records for an already escalated payment', async () => {
+    const fixture = createService();
+    fixture.findRecentAttempt.mockResolvedValueOnce({ id: 'prior-escalation' });
+
+    await expect(fixture.service.escalateActivationPayment(
+      paymentId,
+      'reconciliation-escalation-0002',
+      'superadmin-id',
+      'Escalate unresolved payment for provider investigation',
+      '127.0.0.1',
+    )).rejects.toThrow('already escalated for investigation');
+    expect(fixture.createAttempt).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+  });
+
+  it('escalates unresolved wallet deposits without querying the provider or changing payment state', async () => {
+    const walletPayment = {
+      ...payment,
+      type: PaymentType.WALLET_DEPOSIT,
+      amountKes: 65,
+      failureCode: 'MPESA_RESULT_4999',
+      status: 'FAILED' as PaymentStatus,
+    };
+    const fixture = createService(1032, walletPayment);
+
+    const result = await fixture.service.escalateActivationPayment(
+      paymentId,
+      'wallet-deposit-escalation-0001',
+      'superadmin-id',
+      'Escalate ambiguous wallet deposit for provider investigation',
+      '127.0.0.1',
+    );
+
+    expect(result).toMatchObject({ outcome: 'ESCALATED', reasonCode: 'PROVIDER_INVESTIGATION_REQUIRED' });
+    expect(fixture.createAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        paymentTransactionId: paymentId,
+        outcome: 'ESCALATED',
+        operatorNote: 'Escalate ambiguous wallet deposit for provider investigation',
+      }),
+    }));
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not create duplicate escalation records for an already escalated payment', async () => {
+    const fixture = createService();
+    fixture.findRecentAttempt.mockResolvedValueOnce({ id: 'prior-escalation' });
+
+    await expect(fixture.service.escalateActivationPayment(
+      paymentId,
+      'reconciliation-escalation-0002',
+      'superadmin-id',
+      'Escalate unresolved payment for provider investigation',
+      '127.0.0.1',
+    )).rejects.toThrow('already escalated for investigation');
+    expect(fixture.createAttempt).not.toHaveBeenCalled();
+    expect(fixture.paymentUpdate).not.toHaveBeenCalled();
+    expect(fixture.queryStkStatus).not.toHaveBeenCalled();
   });
 
   it('rejects an escalation replay key already used for a provider refresh', async () => {
